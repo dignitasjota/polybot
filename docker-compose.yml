@@ -3,8 +3,9 @@ services:
     build: .
     restart: unless-stopped
     volumes:
-      - ./config:/app/config:ro
-      - ./logs:/app/logs
-      - ./data:/app/data
-    env_file:
-      - stack.env
+      - bot-logs:/app/logs
+      - bot-data:/app/data
+
+volumes:
+  bot-logs:
+  bot-data:
