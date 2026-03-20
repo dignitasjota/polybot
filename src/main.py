@@ -197,26 +197,24 @@ class Bot:
                 pass  # Will resubscribe on next reconnect
 
     def _export_data(self):
-        """Export opportunities to a JSON file for analysis."""
-        opportunities = self.detector.export_opportunities()
-        if not opportunities:
+        """Export full report to JSON file for analysis."""
+        report = self.detector.export_full_report()
+        if not report["opportunities"]:
             return
 
         export_path = Path("data/opportunities.json")
         export_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(export_path, "w") as f:
-            json.dump(
-                {
-                    "exported_at": time.time(),
-                    "stats": self.detector.get_stats(),
-                    "opportunities": opportunities,
-                },
-                f,
-                indent=2,
-            )
+            json.dump(report, f, indent=2)
 
-        self.log.info("data_exported", path=str(export_path), count=len(opportunities))
+        self.log.info(
+            "data_exported",
+            path=str(export_path),
+            count=len(report["opportunities"]),
+            settled=report["summary"]["settled"],
+            pnl=report["summary"]["total_pnl"],
+        )
 
 
 async def main():

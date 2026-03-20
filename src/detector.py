@@ -336,3 +336,101 @@ class ClosingArbitrageDetector:
             }
             for o in self._opportunities_log
         ]
+
+    def export_full_report(self) -> dict:
+        """Export complete report with summary analytics for strategy evaluation."""
+        opportunities = self.export_opportunities()
+        stats = self.get_stats()
+
+        settled = [o for o in opportunities if o["outcome"] != "pending"]
+        wins = [o for o in settled if o["outcome"] == "win"]
+        losses = [o for o in settled if o["outcome"] == "loss"]
+        pending = [o for o in opportunities if o["outcome"] == "pending"]
+
+        # Per-market breakdown
+        markets: dict[str, dict] = {}
+        for o in opportunities:
+            key = o["condition_id"]
+            if key not in markets:
+                markets[key] = {
+                    "question": o["question"],
+                    "opportunities": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "pending": 0,
+                    "total_pnl": 0.0,
+                    "total_bet": 0.0,
+                }
+            m = markets[key]
+            m["opportunities"] += 1
+            m[o["outcome"] + "s" if o["outcome"] != "pending" else "pending"] += 1
+            m["total_pnl"] = round(m["total_pnl"] + o["actual_pnl"], 2)
+            m["total_bet"] = round(m["total_bet"] + o["suggested_bet"], 2)
+
+        # Balance history (chronological P&L curve)
+        balance_history = []
+        running_balance = self._starting_balance
+        for o in settled:
+            running_balance = round(running_balance + o["actual_pnl"], 2)
+            balance_history.append({
+                "timestamp": o["resolved_at"],
+                "question": o["question"][:60],
+                "outcome": o["outcome"],
+                "pnl": o["actual_pnl"],
+                "balance": running_balance,
+            })
+
+        # Drawdown calculation
+        peak = self._starting_balance
+        max_drawdown = 0.0
+        for entry in balance_history:
+            if entry["balance"] > peak:
+                peak = entry["balance"]
+            dd = (peak - entry["balance"]) / peak * 100 if peak > 0 else 0
+            if dd > max_drawdown:
+                max_drawdown = dd
+
+        # Average margins
+        avg_margin_net = sum(o["margin_net"] for o in opportunities) / len(opportunities) if opportunities else 0
+        avg_margin_wins = sum(o["margin_net"] for o in wins) / len(wins) if wins else 0
+        avg_margin_losses = sum(o["margin_net"] for o in losses) / len(losses) if losses else 0
+        avg_price = sum(o["token_price"] for o in opportunities) / len(opportunities) if opportunities else 0
+
+        return {
+            "exported_at": time.time(),
+            "config": {
+                "starting_balance": self._starting_balance,
+                "max_bet_pct": self.risk.max_bet_pct,
+                "max_bet_per_trade": self.risk.max_bet_per_trade,
+                "min_margin_net": self.config.min_margin_net,
+                "probability_tiers": [
+                    {"max_hours": t.max_hours, "min_probability": t.min_probability}
+                    for t in self.config.probability_tiers
+                ],
+            },
+            "summary": {
+                "current_balance": self._balance,
+                "total_pnl": stats["simulated_pnl"],
+                "roi_pct": stats["roi_pct"],
+                "total_opportunities": len(opportunities),
+                "settled": len(settled),
+                "wins": len(wins),
+                "losses": len(losses),
+                "pending": len(pending),
+                "win_rate_pct": round(len(wins) / len(settled) * 100, 1) if settled else 0,
+                "avg_win_pnl": round(sum(o["actual_pnl"] for o in wins) / len(wins), 2) if wins else 0,
+                "avg_loss_pnl": round(sum(o["actual_pnl"] for o in losses) / len(losses), 2) if losses else 0,
+                "best_trade": round(max((o["actual_pnl"] for o in settled), default=0), 2),
+                "worst_trade": round(min((o["actual_pnl"] for o in settled), default=0), 2),
+                "max_drawdown_pct": round(max_drawdown, 2),
+                "avg_token_price": round(avg_price, 4),
+                "avg_margin_net": round(avg_margin_net, 4),
+                "avg_margin_wins": round(avg_margin_wins, 4),
+                "avg_margin_losses": round(avg_margin_losses, 4),
+                "total_wagered": round(sum(o["suggested_bet"] for o in settled), 2),
+                "unique_markets": len(markets),
+            },
+            "balance_history": balance_history,
+            "by_market": list(markets.values()),
+            "opportunities": opportunities,
+        }

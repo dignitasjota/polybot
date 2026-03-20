@@ -16,6 +16,7 @@ def create_app(bot) -> web.Application:
     app["bot"] = bot
     app.router.add_get("/", handle_dashboard)
     app.router.add_get("/api/opportunities", handle_api)
+    app.router.add_get("/api/report", handle_report)
     return app
 
 
@@ -29,6 +30,12 @@ async def handle_api(request: web.Request) -> web.Response:
         "opportunities": bot.detector.export_opportunities(),
     }
     return web.json_response(data)
+
+
+async def handle_report(request: web.Request) -> web.Response:
+    bot = request.app["bot"]
+    report = bot.detector.export_full_report()
+    return web.json_response(report)
 
 
 async def handle_dashboard(request: web.Request) -> web.Response:
@@ -264,7 +271,8 @@ async def handle_dashboard(request: web.Request) -> web.Response:
     </table>
 
     <div class="footer">
-        API: <a href="/api/opportunities" style="color:#00aaff">/api/opportunities</a>
+        API: <a href="/api/opportunities" style="color:#00aaff">/api/opportunities</a> |
+        <a href="/api/report" style="color:#00aaff">/api/report</a> (full report for analysis)
     </div>
 </body>
 </html>"""
