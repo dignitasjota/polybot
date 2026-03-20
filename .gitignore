@@ -1,0 +1,9 @@
+stack.env
+.env
+*.env
+__pycache__/
+*.pyc
+.venv/
+logs/
+data/
+.claude/
