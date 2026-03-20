@@ -33,10 +33,13 @@ class Bot:
         self._stats_interval = 60  # Log stats every 60 seconds
 
     async def start(self):
+        tiers_str = " | ".join(
+            f"<{t.max_hours}h:{t.min_probability}" for t in self.config.strategy.probability_tiers
+        )
         self.log.info(
             "bot_starting",
             strategy=self.config.strategy.name,
-            min_prob=self.config.strategy.min_implied_probability,
+            probability_tiers=tiers_str,
             max_time=str(self.config.strategy.max_time_to_resolution),
             max_markets=self.config.data.max_markets_monitored,
         )
