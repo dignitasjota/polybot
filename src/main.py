@@ -8,11 +8,14 @@ from pathlib import Path
 
 import structlog
 
+from aiohttp import web
+
 from src.config import Config
 from src.detector import ClosingArbitrageDetector
 from src.gamma_client import GammaClient
 from src.logger import setup_logging
 from src.market_tracker import MarketTracker
+from src.web import create_app
 from src.websocket_client import WebSocketClient
 
 
@@ -55,6 +58,7 @@ class Bot:
             self._run_gamma_poller(),
             self._run_stats_reporter(),
             self._run_data_exporter(),
+            self._run_web_server(),
         )
 
     async def stop(self):
@@ -119,6 +123,20 @@ class Bot:
                     spread_sum=f"${market.spread_sum:.4f}",
                     resolved=market.resolved,
                 )
+
+    async def _run_web_server(self):
+        """Run the web dashboard."""
+        app = create_app(self)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", 8080)
+        await site.start()
+        self.log.info("web_server_started", port=8080)
+
+        while self._running:
+            await asyncio.sleep(1)
+
+        await runner.cleanup()
 
     async def _run_data_exporter(self):
         """Periodically export opportunity data to file."""

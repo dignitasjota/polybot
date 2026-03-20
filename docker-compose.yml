@@ -2,6 +2,8 @@ services:
   bot:
     build: .
     restart: unless-stopped
+    ports:
+      - "8080:8080"
     volumes:
       - bot-logs:/app/logs
       - bot-data:/app/data
