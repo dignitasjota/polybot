@@ -31,6 +31,8 @@ class Opportunity:
     depth_at_price: float  # Available size at best ask
     resolved: bool  # Whether the market has already resolved
     winning_token_id: str
+    hours_remaining: float = 0.0
+    min_probability_required: float = 0.0
 
 
 class ClosingArbitrageDetector:
@@ -107,16 +109,22 @@ class ClosingArbitrageDetector:
         self._log_opportunity(opp)
 
     def _check_pre_resolution(self, market: MarketState):
-        """Pre-resolution: look for tokens priced >= min_implied_probability."""
+        """Pre-resolution: look for tokens priced >= min probability for their time remaining."""
+        hours = market.hours_to_resolution
+        if hours is None:
+            return
+
+        min_prob = self.config.get_min_probability(hours)
+
         # Check YES side
-        if market.best_ask_yes >= self.config.min_implied_probability:
-            self._evaluate_side(market, is_yes=True)
+        if market.best_ask_yes >= min_prob:
+            self._evaluate_side(market, is_yes=True, min_prob=min_prob, hours_remaining=hours)
 
         # Check NO side
-        if market.best_ask_no >= self.config.min_implied_probability:
-            self._evaluate_side(market, is_yes=False)
+        if market.best_ask_no >= min_prob:
+            self._evaluate_side(market, is_yes=False, min_prob=min_prob, hours_remaining=hours)
 
-    def _evaluate_side(self, market: MarketState, is_yes: bool):
+    def _evaluate_side(self, market: MarketState, is_yes: bool, min_prob: float = 0.95, hours_remaining: float = 0.0):
         price = market.best_ask_yes if is_yes else market.best_ask_no
 
         if price <= 0 or price >= 1.0:
@@ -145,6 +153,8 @@ class ClosingArbitrageDetector:
             depth_at_price=depth,
             resolved=False,
             winning_token_id="",
+            hours_remaining=hours_remaining,
+            min_probability_required=min_prob,
         )
 
         self._log_opportunity(opp)
@@ -173,6 +183,12 @@ class ClosingArbitrageDetector:
         if opp.resolved:
             self._stats["resolved_opportunities"] += 1
 
+        # Format hours remaining for readability
+        if opp.hours_remaining < 1:
+            time_left = f"{opp.hours_remaining * 60:.0f}min"
+        else:
+            time_left = f"{opp.hours_remaining:.1f}h"
+
         logger.info(
             "opportunity_detected",
             type="CLOSING_RESOLVED" if opp.resolved else "CLOSING_PRE_RESOLUTION",
@@ -183,6 +199,8 @@ class ClosingArbitrageDetector:
             margin_net=f"${opp.margin_net:.4f}",
             fee=f"${opp.fee_estimated:.4f}",
             depth=f"{opp.depth_at_price:.1f}",
+            time_left=time_left,
+            min_prob_required=f"{opp.min_probability_required:.2f}",
             resolved=opp.resolved,
         )
 
@@ -210,6 +228,8 @@ class ClosingArbitrageDetector:
                 "margin_net": o.margin_net,
                 "depth_at_price": o.depth_at_price,
                 "resolved": o.resolved,
+                "hours_remaining": o.hours_remaining,
+                "min_probability_required": o.min_probability_required,
             }
             for o in self._opportunities_log
         ]

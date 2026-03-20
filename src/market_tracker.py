@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import structlog
 
@@ -22,6 +23,7 @@ class MarketState:
     question: str
     yes_token_id: str
     no_token_id: str
+    end_date: datetime | None = None
 
     # Best prices (updated via WebSocket)
     best_bid_yes: float = 0.0
@@ -46,6 +48,14 @@ class MarketState:
     # Resolution
     resolved: bool = False
     winning_token_id: str = ""
+
+    @property
+    def hours_to_resolution(self) -> float | None:
+        """Hours remaining until market resolution."""
+        if self.end_date is None:
+            return None
+        delta = self.end_date - datetime.now(timezone.utc)
+        return max(0.0, delta.total_seconds() / 3600)
 
     @property
     def is_stale(self) -> bool:
@@ -83,12 +93,14 @@ class MarketTracker:
         question: str,
         yes_token_id: str,
         no_token_id: str,
+        end_date: datetime | None = None,
     ) -> MarketState:
         state = MarketState(
             condition_id=condition_id,
             question=question,
             yes_token_id=yes_token_id,
             no_token_id=no_token_id,
+            end_date=end_date,
         )
         self._markets[yes_token_id] = state
         self._markets[no_token_id] = state

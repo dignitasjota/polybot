@@ -15,12 +15,32 @@ else:
 
 
 @dataclass
+class ProbabilityTier:
+    """Maps time remaining to minimum required probability."""
+    max_hours: float  # If time remaining < max_hours, this tier applies
+    min_probability: float
+
+
+@dataclass
 class StrategyConfig:
     enabled: bool = True
     name: str = "closing_arbitrage"
-    min_implied_probability: float = 0.95
     max_time_to_resolution: timedelta = field(default_factory=lambda: timedelta(hours=24))
     min_margin_net: float = 0.008
+    probability_tiers: list[ProbabilityTier] = field(default_factory=lambda: [
+        ProbabilityTier(max_hours=0.5, min_probability=0.93),
+        ProbabilityTier(max_hours=2, min_probability=0.95),
+        ProbabilityTier(max_hours=6, min_probability=0.97),
+        ProbabilityTier(max_hours=24, min_probability=0.99),
+    ])
+
+    def get_min_probability(self, hours_remaining: float) -> float:
+        """Get minimum probability required for a given time remaining."""
+        for tier in self.probability_tiers:
+            if hours_remaining <= tier.max_hours:
+                return tier.min_probability
+        # Beyond all tiers, use the strictest
+        return self.probability_tiers[-1].min_probability if self.probability_tiers else 0.99
 
 
 @dataclass
@@ -90,6 +110,17 @@ class Config:
             strategy_raw["max_time_to_resolution"] = _parse_duration(
                 strategy_raw["max_time_to_resolution"]
             )
+
+        # Parse probability tiers
+        tiers_raw = strategy_raw.pop("probability_tiers", None)
+        if tiers_raw:
+            strategy_raw["probability_tiers"] = [
+                ProbabilityTier(
+                    max_hours=float(t["max_hours"]),
+                    min_probability=float(t["min_probability"]),
+                )
+                for t in tiers_raw
+            ]
 
         cfg = cls(
             strategy=StrategyConfig(**strategy_raw),

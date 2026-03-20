@@ -147,6 +147,7 @@ class Bot:
                 question=market.question,
                 yes_token_id=market.yes_token_id,
                 no_token_id=market.no_token_id,
+                end_date=market.end_date,
             )
             new_count += 1
 
