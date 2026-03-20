@@ -6,7 +6,12 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 
-import tomli
+import sys
+
+if sys.version_info >= (3, 11):
+    import tomllib as tomli
+else:
+    import tomli
 
 
 @dataclass
