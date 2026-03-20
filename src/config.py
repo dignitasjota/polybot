@@ -45,12 +45,14 @@ class StrategyConfig:
 
 @dataclass
 class RiskConfig:
-    max_bet_per_trade: float = 200.0
+    max_bet_pct: float = 2.0  # % of balance per bet
+    max_bet_per_trade: float = 200.0  # Absolute cap
     max_position_per_market: float = 400.0
     max_total_exposure: float = 1000.0
     max_daily_loss: float = 100.0
     max_concurrent_positions: int = 5
     kill_switch: bool = False
+    simulated_balance: float = 500.0  # Starting balance for paper trading
 
 
 @dataclass

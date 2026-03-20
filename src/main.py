@@ -28,7 +28,10 @@ class Bot:
         self.tracker = MarketTracker()
         self.gamma = GammaClient()
         self.ws_client = WebSocketClient(self.config.websocket, self.tracker)
-        self.detector = ClosingArbitrageDetector(self.config.strategy, self.tracker)
+        self.detector = ClosingArbitrageDetector(
+            self.config.strategy, self.tracker, self.config.risk,
+            starting_balance=self.config.risk.simulated_balance,
+        )
         self._running = False
         self._stats_interval = 60  # Log stats every 60 seconds
 

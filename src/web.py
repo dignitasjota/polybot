@@ -80,6 +80,21 @@ async def handle_dashboard(request: web.Request) -> web.Response:
         resolved_class = "resolved-row" if o["resolved"] else ""
         min_prob = o.get("min_probability_required", 0)
 
+        suggested_bet = o.get('suggested_bet', 0)
+        potential_profit = o.get('potential_profit', 0)
+        outcome = o.get('outcome', 'pending')
+        actual_pnl = o.get('actual_pnl', 0)
+
+        if outcome == "win":
+            outcome_badge = '<span class="badge win">WIN</span>'
+            pnl_class = "pnl-win"
+        elif outcome == "loss":
+            outcome_badge = '<span class="badge loss">LOSS</span>'
+            pnl_class = "pnl-loss"
+        else:
+            outcome_badge = '<span class="badge pending">PENDING</span>'
+            pnl_class = ""
+
         opps_html += f"""
         <tr class="{resolved_class}">
             <td>{ts}</td>
@@ -90,7 +105,11 @@ async def handle_dashboard(request: web.Request) -> web.Response:
             <td>{time_left}</td>
             <td>{min_prob:.2f}</td>
             <td>{o['depth_at_price']:.0f}</td>
+            <td>${suggested_bet:.2f}</td>
+            <td class="profit">${potential_profit:.2f}</td>
             <td>{"RESOLVED" if o['resolved'] else "PRE"}</td>
+            <td>{outcome_badge}</td>
+            <td class="{pnl_class}">{f'${actual_pnl:+.2f}' if outcome != 'pending' else '-'}</td>
         </tr>"""
 
     html = f"""<!DOCTYPE html>
@@ -134,6 +153,12 @@ async def handle_dashboard(request: web.Request) -> web.Response:
     .badge {{ padding: 2px 6px; border-radius: 3px; font-size: 0.75em; font-weight: bold; }}
     .badge.resolved {{ background: #00ff88; color: #000; }}
     .pct {{ color: #888; font-size: 0.85em; }}
+    .profit {{ color: #00ff88; font-weight: bold; }}
+    .badge.win {{ background: #00ff88; color: #000; }}
+    .badge.loss {{ background: #ff4444; color: #fff; }}
+    .badge.pending {{ background: #555; color: #ccc; }}
+    .pnl-win {{ color: #00ff88; font-weight: bold; }}
+    .pnl-loss {{ color: #ff4444; font-weight: bold; }}
     .footer {{ color: #444; font-size: 0.75em; margin-top: 20px; }}
     @media (max-width: 768px) {{
         table {{ font-size: 0.7em; }}
@@ -167,6 +192,34 @@ async def handle_dashboard(request: web.Request) -> web.Response:
             <div class="label">Scans</div>
             <div class="value">{stats['total_scans']}</div>
         </div>
+        <div class="stat">
+            <div class="label">Wins / Losses</div>
+            <div class="value">{stats.get('settled_wins', 0)} / {stats.get('settled_losses', 0)}</div>
+        </div>
+    </div>
+
+    <h2>PAPER TRADING</h2>
+    <div class="stats">
+        <div class="stat">
+            <div class="label">Capital Inicial</div>
+            <div class="value">${stats.get('starting_balance', 500):.2f}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Balance Actual</div>
+            <div class="value{' off' if stats.get('current_balance', 0) < stats.get('starting_balance', 500) else ''}">${stats.get('current_balance', 500):.2f}</div>
+        </div>
+        <div class="stat">
+            <div class="label">P&L Total</div>
+            <div class="value{' off' if stats.get('simulated_pnl', 0) < 0 else ''}">${stats.get('simulated_pnl', 0):+.2f}</div>
+        </div>
+        <div class="stat">
+            <div class="label">ROI</div>
+            <div class="value{' off' if stats.get('roi_pct', 0) < 0 else ''}">{stats.get('roi_pct', 0):+.2f}%</div>
+        </div>
+        <div class="stat">
+            <div class="label">Bet Size ({bot.detector.risk.max_bet_pct}%)</div>
+            <div class="value">${stats.get('current_balance', 500) * bot.detector.risk.max_bet_pct / 100:.2f}</div>
+        </div>
     </div>
 
     <h2>OPPORTUNITIES (last 50)</h2>
@@ -181,11 +234,15 @@ async def handle_dashboard(request: web.Request) -> web.Response:
                 <th>Time Left</th>
                 <th>Min Prob</th>
                 <th>Depth</th>
+                <th>Bet</th>
+                <th>Profit</th>
                 <th>Type</th>
+                <th>Result</th>
+                <th>P&L</th>
             </tr>
         </thead>
         <tbody>
-            {opps_html if opps_html else '<tr><td colspan="9" style="color:#555;text-align:center;padding:20px;">No opportunities detected yet...</td></tr>'}
+            {opps_html if opps_html else '<tr><td colspan="13" style="color:#555;text-align:center;padding:20px;">No opportunities detected yet...</td></tr>'}
         </tbody>
     </table>
 

@@ -29,12 +29,14 @@ max_hours = 24     # 6h - 24h
 min_probability = 0.99
 
 [risk]
-max_bet_per_trade = 200.0         # Maximo invertido por trade ($)
+max_bet_pct = 2.0                 # % del balance por apuesta (Kelly fraccionado)
+max_bet_per_trade = 200.0         # Tope absoluto por trade ($) — aplica aunque el % sea mayor
 max_position_per_market = 400.0   # Exposicion maxima por mercado ($)
 max_total_exposure = 1000.0       # Exposicion total abierta ($)
 max_daily_loss = 100.0            # Stop-loss diario ($)
-max_concurrent_positions = 5      # Posiciones abiertas simultaneas
+max_concurrent_positions = 20      # Posiciones abiertas simultaneas
 kill_switch = false               # true = detener todo inmediatamente
+simulated_balance = 1000.0         # Capital inicial simulado para paper trading ($)
 
 [data]
 stale_data_threshold_seconds = 5  # Pausar si datos >5s antiguos
