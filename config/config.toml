@@ -5,7 +5,7 @@ enabled = true
 name = "closing_arbitrage"
 
 # Criterios de entrada
-max_time_to_resolution = "24h"    # Solo mercados que resuelven en <24h
+max_time_to_resolution = "1h"     # Solo mercados que resuelven en <1h
 min_margin_net = 0.008            # Margen minimo por share tras fees ($0.008)
 
 # Probabilidad minima escalada segun tiempo restante
@@ -13,36 +13,20 @@ min_margin_net = 0.008            # Margen minimo por share tras fees ($0.008)
 # porque hay menos probabilidad de que se de la vuelta
 # Se evalua de arriba a abajo: la primera que cumpla (tiempo < max_hours) aplica
 [[strategy.probability_tiers]]
-max_hours = 0.08   # < 5 min — casi seguro, muy agresivo
-min_probability = 0.80
-
-[[strategy.probability_tiers]]
-max_hours = 0.25   # < 15 min
-min_probability = 0.85
-
-[[strategy.probability_tiers]]
-max_hours = 0.5    # < 30 min
-min_probability = 0.88
-
-[[strategy.probability_tiers]]
-max_hours = 1      # < 1h
-min_probability = 0.91
-
-[[strategy.probability_tiers]]
-max_hours = 2      # 1h - 2h
-min_probability = 0.93
-
-[[strategy.probability_tiers]]
-max_hours = 6      # 2h - 6h
+max_hours = 0.08   # < 5 min
 min_probability = 0.95
 
 [[strategy.probability_tiers]]
-max_hours = 12     # 6h - 12h
+max_hours = 0.25   # < 15 min
+min_probability = 0.96
+
+[[strategy.probability_tiers]]
+max_hours = 0.5    # < 30 min
 min_probability = 0.97
 
 [[strategy.probability_tiers]]
-max_hours = 24     # 12h - 24h
-min_probability = 0.99
+max_hours = 1      # < 1h
+min_probability = 0.98
 
 [risk]
 max_bet_pct = 2.0                 # % del balance por apuesta (Kelly fraccionado)
@@ -56,7 +40,7 @@ simulated_balance = 1000.0         # Capital inicial simulado para paper trading
 
 [data]
 stale_data_threshold_seconds = 5  # Pausar si datos >5s antiguos
-gamma_poll_interval_seconds = 300 # Polling Gamma API cada 5 min
+gamma_poll_interval_seconds = 60  # Polling Gamma API cada 1 min (necesario para mercados de 5 min)
 max_markets_monitored = 200        # Maximo mercados a monitorear
 
 [websocket]

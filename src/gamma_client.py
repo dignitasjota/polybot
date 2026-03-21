@@ -267,17 +267,23 @@ class GammaClient:
                 outcomes = outcomes_raw or []
 
             # Map outcomes to token IDs and prices
-            # Standard order is [Yes, No] but let's be safe
+            # Standard: [Yes, No] — but 5-min crypto markets use [Up, Down]
             yes_idx = None
             no_idx = None
             for i, outcome in enumerate(outcomes):
-                if outcome.lower() == "yes":
+                low = outcome.lower()
+                if low in ("yes", "up"):
                     yes_idx = i
-                elif outcome.lower() == "no":
+                elif low in ("no", "down"):
                     no_idx = i
 
             if yes_idx is None or no_idx is None:
-                return None
+                # Fallback: if exactly 2 outcomes, use positional [0]=yes, [1]=no
+                if len(outcomes) == 2:
+                    yes_idx = 0
+                    no_idx = 1
+                else:
+                    return None
 
             yes_token_id = clob_token_ids[yes_idx]
             no_token_id = clob_token_ids[no_idx]
