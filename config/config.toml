@@ -56,3 +56,49 @@ format = "json"
 file = "logs/bot.jsonl"
 max_file_size_mb = 100
 rotate_count = 5
+
+# ── Cuentas de trading ──────────────────────────────────────────────────
+# Cada [[accounts]] es independiente: su propia estrategia, credenciales y riesgo.
+# Si no se definen cuentas, se crea una cuenta "default" directional en paper.
+
+# Cuenta 1: Estrategia direccional (Binance)
+[[accounts]]
+name = "directional_main"
+enabled = true
+strategy_type = "directional"
+execution_mode = "paper"  # Cambiar a "live" cuando estemos listos
+
+[accounts.credentials]
+private_key_env = "PRIVATE_KEY"
+api_key_env = "POLYMARKET_API_KEY"
+api_secret_env = "POLYMARKET_SECRET"
+passphrase_env = "POLYMARKET_PASSPHRASE"
+
+# Cuenta 2: Copy-trading (paper trading para evaluar rentabilidad)
+[[accounts]]
+name = "copy_vidarx"
+enabled = true
+strategy_type = "copy_trade"
+execution_mode = "paper"
+
+[accounts.credentials]
+private_key_env = "COPY_PRIVATE_KEY"
+api_key_env = "COPY_API_KEY"
+api_secret_env = "COPY_SECRET"
+passphrase_env = "COPY_PASSPHRASE"
+
+[accounts.copy_trade]
+target_wallets = [
+    "0x2d8b401d2f0e6937afebf18e19e11ca568a5260a",  # vidarx
+    "0x674b949283ea2eb33c2cad519a3e2f26b3144f07",  # para888
+]
+poll_interval_ms = 500
+max_latency_ms = 120000  # 120s para paper trading (en live bajar a 5000-10000)
+copy_size_mode = "fixed"
+fixed_bet_size = 5.0
+
+[accounts.risk]
+max_bet_per_trade = 50.0
+max_daily_loss = 50.0
+max_concurrent_positions = 10
+simulated_balance = 500.0

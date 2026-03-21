@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 
@@ -24,6 +25,7 @@ class Opportunity:
     condition_id: str
     question: str
     token_side: str  # YES or NO
+    token_id: str  # The actual token ID to buy
     token_price: float  # Best ask of the candidate token
     implied_probability: float
     margin_gross: float  # 1.00 - price
@@ -69,7 +71,8 @@ class ClosingArbitrageDetector:
         self._active_opportunities: dict[str, Opportunity] = {}  # "condition_id:side" -> latest opp
         self._bet_placed: dict[str, Opportunity] = {}  # "condition_id:side" -> first bet (for paper trading)
         self._settled_conditions: set[str] = set()  # Already settled condition_ids
-        self._price_checker = PriceChecker(min_buffer_pct=0.10)
+        self._price_checker = PriceChecker(min_buffer_pct=0.03)
+        self._on_opportunity_cb = None  # async callback(Opportunity) for executor
         self._stats = {
             "total_scans": 0,
             "opportunities_found": 0,
@@ -81,6 +84,10 @@ class ClosingArbitrageDetector:
             "price_checks_rejected": 0,
             "price_checks_uncertain": 0,
         }
+
+    def on_opportunity(self, callback):
+        """Register an async callback to be called when a new bet is placed."""
+        self._on_opportunity_cb = callback
 
     async def close(self):
         """Close resources (Binance session)."""
@@ -213,11 +220,14 @@ class ClosingArbitrageDetector:
 
         suggested_bet, potential_profit = self._calculate_bet(price, margin_net, depth)
 
+        token_id = market.yes_token_id if is_yes else market.no_token_id
+
         opp = Opportunity(
             timestamp=time.time(),
             condition_id=market.condition_id,
             question=market.question,
             token_side=side,
+            token_id=token_id,
             token_price=price,
             implied_probability=price,
             margin_gross=margin_gross,
@@ -265,34 +275,10 @@ class ClosingArbitrageDetector:
 
         min_prob = self.config.get_min_probability(hours)
 
-        # For Up/Down crypto markets: verify direction with real Binance prices
+        # For Up/Down crypto markets: use Binance directional strategy (NOT closing arb)
         price_check = self._price_checker.check_direction(market.question)
         if price_check is not None:
-            # This is an Up/Down market — only bet if Binance confirms the direction
-            confirmed = price_check["confirmed_side"]
-            if confirmed is None:
-                # Price too close to call — skip entirely
-                self._stats["price_checks_uncertain"] += 1
-                logger.info(
-                    "price_check_uncertain",
-                    question=market.question[:60],
-                    change_pct=price_check["change_pct"],
-                    symbol=price_check["symbol"],
-                )
-                return
-
-            # Only bet on the Binance-confirmed side
-            if confirmed == "YES" and market.best_ask_yes >= min_prob:
-                self._stats["price_checks_confirmed"] += 1
-                self._evaluate_side(market, is_yes=True, min_prob=min_prob, hours_remaining=hours)
-                still_active.add(f"{market.condition_id}:YES")
-            elif confirmed == "NO" and market.best_ask_no >= min_prob:
-                self._stats["price_checks_confirmed"] += 1
-                self._evaluate_side(market, is_yes=False, min_prob=min_prob, hours_remaining=hours)
-                still_active.add(f"{market.condition_id}:NO")
-            else:
-                # Binance says one direction but order book price not high enough
-                self._stats["price_checks_rejected"] += 1
+            self._check_up_down_market(market, price_check, hours, still_active)
             return
 
         # Non Up/Down markets: use order book price only (original logic)
@@ -304,6 +290,82 @@ class ClosingArbitrageDetector:
             if market.best_ask_no >= min_prob:
                 self._evaluate_side(market, is_yes=False, min_prob=min_prob, hours_remaining=hours)
                 still_active.add(f"{market.condition_id}:NO")
+
+    def _check_up_down_market(
+        self, market: MarketState, price_check: dict, hours: float, still_active: set[str]
+    ):
+        """Up/Down crypto strategy: buy the Binance-confirmed direction.
+
+        Unlike closing arbitrage (buy at $0.97+, profit $0.03), this buys at
+        market price (e.g., $0.55) and profits the full margin to $1.00.
+        The edge comes from Binance confirming the direction before the
+        Polymarket order book fully adjusts.
+        """
+        confirmed = price_check["confirmed_side"]
+        change_pct = price_check["change_pct"]
+
+        if confirmed is None:
+            # Price too close to call — skip
+            self._stats["price_checks_uncertain"] += 1
+            return
+
+        is_yes = confirmed == "YES"
+        price = market.best_ask_yes if is_yes else market.best_ask_no
+
+        # Don't buy at extreme prices: too low = no data, too high = no margin
+        if price <= 0 or price >= 0.85:
+            self._stats["price_checks_rejected"] += 1
+            return
+
+        self._stats["price_checks_confirmed"] += 1
+
+        margin_gross = 1.0 - price
+        fee = self._calculate_fee(price, 1.0)
+        margin_net = margin_gross - fee - GAS_REDEEM_USD
+
+        side = "YES" if is_yes else "NO"
+        depth = self._get_depth_at_best_ask(market, is_yes)
+        suggested_bet, potential_profit = self._calculate_bet(price, margin_net, depth)
+        token_id = market.yes_token_id if is_yes else market.no_token_id
+
+        opp = Opportunity(
+            timestamp=time.time(),
+            condition_id=market.condition_id,
+            question=market.question,
+            token_side=side,
+            token_id=token_id,
+            token_price=price,
+            implied_probability=price,
+            margin_gross=margin_gross,
+            fee_estimated=fee,
+            margin_net=margin_net,
+            depth_at_price=depth,
+            resolved=False,
+            winning_token_id="",
+            hours_remaining=hours,
+            min_probability_required=0.0,
+            suggested_bet=suggested_bet,
+            potential_profit=potential_profit,
+        )
+
+        # Only log if this is a new bet (not a price update for an existing one)
+        key = f"{market.condition_id}:{side}"
+        if key not in self._bet_placed:
+            logger.info(
+                "updown_opportunity",
+                question=market.question[:60],
+                side=confirmed,
+                price=f"${price:.4f}",
+                margin=f"${margin_gross:.4f}",
+                change_pct=f"{change_pct:+.4f}%",
+                symbol=price_check["symbol"],
+                depth=f"{depth:.1f}",
+                bet=f"${suggested_bet:.2f}",
+                hours_left=f"{hours:.3f}",
+            )
+
+        self._log_opportunity(opp)
+        still_active.add(f"{market.condition_id}:{side}")
 
     def _evaluate_side(self, market: MarketState, is_yes: bool, min_prob: float = 0.95, hours_remaining: float = 0.0):
         price = market.best_ask_yes if is_yes else market.best_ask_no
@@ -323,11 +385,14 @@ class ClosingArbitrageDetector:
 
         suggested_bet, potential_profit = self._calculate_bet(price, margin_net, depth)
 
+        token_id = market.yes_token_id if is_yes else market.no_token_id
+
         opp = Opportunity(
             timestamp=time.time(),
             condition_id=market.condition_id,
             question=market.question,
             token_side=side,
+            token_id=token_id,
             token_price=price,
             implied_probability=price,
             margin_gross=margin_gross,
@@ -405,7 +470,12 @@ class ClosingArbitrageDetector:
             )
         else:
             is_new_bet = key not in self._bet_placed
-        if is_new_bet:
+        if is_new_bet and opp.suggested_bet > 0:
+            self._bet_placed[key] = opp
+            # Fire executor callback (non-blocking)
+            if self._on_opportunity_cb:
+                asyncio.create_task(self._on_opportunity_cb(opp))
+        elif is_new_bet:
             self._bet_placed[key] = opp
         else:
             # Not a new bet — log the price update but zero out the bet
@@ -473,6 +543,7 @@ class ClosingArbitrageDetector:
                 "condition_id": o.condition_id,
                 "question": o.question,
                 "token_side": o.token_side,
+                "token_id": o.token_id,
                 "token_price": o.token_price,
                 "implied_probability": o.implied_probability,
                 "margin_gross": o.margin_gross,
@@ -504,6 +575,7 @@ class ClosingArbitrageDetector:
                 "condition_id": o.condition_id,
                 "question": o.question,
                 "token_side": o.token_side,
+                "token_id": o.token_id,
                 "token_price": o.token_price,
                 "margin_net": o.margin_net,
                 "suggested_bet": o.suggested_bet,

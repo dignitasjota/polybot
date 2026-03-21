@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import signal
 import time
 from pathlib import Path
@@ -10,8 +11,10 @@ import structlog
 
 from aiohttp import web
 
+from src.account_runner import AccountRunner
 from src.config import Config
 from src.detector import ClosingArbitrageDetector
+from src.executor import Executor, ExecutionMode
 from src.gamma_client import GammaClient
 from src.logger import setup_logging
 from src.market_tracker import MarketTracker
@@ -20,66 +23,107 @@ from src.websocket_client import WebSocketClient
 
 
 class Bot:
-    """Main bot orchestrator for the Closing Arbitrage observer (Phase 1.1)."""
+    """Main bot orchestrator — supports multiple independent accounts.
+
+    Each account runs its own strategy (directional or copy-trade) with
+    its own executor, risk limits, and credentials.
+
+    Directional accounts share market infrastructure (tracker, WS, Gamma)
+    to avoid duplicate connections. Copy-trade accounts are fully independent.
+    """
 
     def __init__(self, config_path: str = "config/config.toml"):
         self.config = Config.load(config_path)
         self.log = setup_logging(self.config.logging)
+
+        # Shared market infrastructure (used by all directional accounts)
         self.tracker = MarketTracker()
         self.gamma = GammaClient()
         self.ws_client = WebSocketClient(self.config.websocket, self.tracker)
-        self.detector = ClosingArbitrageDetector(
-            self.config.strategy, self.tracker, self.config.risk,
-            starting_balance=self.config.risk.simulated_balance,
-        )
+
+        # Account runners
+        self.accounts: list[AccountRunner] = []
+        for acc_cfg in self.config.accounts:
+            if not acc_cfg.enabled:
+                continue
+            runner = AccountRunner(
+                account=acc_cfg,
+                strategy=self.config.strategy,
+                data=self.config.data,
+                ws_config=self.config.websocket,
+                shared_tracker=self.tracker if acc_cfg.strategy_type == "directional" else None,
+                shared_ws=self.ws_client if acc_cfg.strategy_type == "directional" else None,
+                shared_gamma=self.gamma if acc_cfg.strategy_type == "directional" else None,
+            )
+            self.accounts.append(runner)
+
+        # Keep references to the first directional account's detector for
+        # backward compat (web dashboard, data export, resolution checker)
+        self.detector: ClosingArbitrageDetector | None = None
+        self.executor: Executor | None = None
+        for acc in self.accounts:
+            if acc.detector:
+                self.detector = acc.detector
+                self.executor = acc.executor
+                break
+
         self._running = False
-        self._stats_interval = 60  # Log stats every 60 seconds
+        self._stats_interval = 60
 
     async def start(self):
-        tiers_str = " | ".join(
-            f"<{t.max_hours}h:{t.min_probability}" for t in self.config.strategy.probability_tiers
-        )
+        account_names = [a.name for a in self.accounts]
         self.log.info(
             "bot_starting",
+            accounts=account_names,
             strategy=self.config.strategy.name,
-            probability_tiers=tiers_str,
             max_time=str(self.config.strategy.max_time_to_resolution),
             max_markets=self.config.data.max_markets_monitored,
         )
 
         self._running = True
 
-        # Start background Binance price polling
-        await self.detector._price_checker.start()
+        # Start all account runners
+        for acc in self.accounts:
+            await acc.start()
 
-        # Register the detector callback on the WebSocket
-        self.ws_client.on_opportunity(self.detector.check)
+        # Initial market discovery (for directional accounts)
+        has_directional = any(a.strategy_type == "directional" for a in self.accounts)
+        if has_directional:
+            await self._discover_markets()
 
-        # Initial market discovery
-        await self._discover_markets()
+            if not self.tracker.all_token_ids:
+                self.log.warning("no_markets_found", msg="No markets match criteria, will retry...")
 
-        if not self.tracker.all_token_ids:
-            self.log.warning("no_markets_found", msg="No markets match criteria, will retry...")
-
-        # Run all tasks concurrently
-        await asyncio.gather(
-            self._run_websocket(),
-            self._run_gamma_poller(),
-            self._run_resolution_checker(),
-            self._run_market_cleanup(),
+        # Build task list
+        tasks = [
             self._run_stats_reporter(),
-            self._run_data_exporter(),
             self._run_web_server(),
-        )
+        ]
+        if has_directional:
+            tasks.extend([
+                self._run_websocket(),
+                self._run_gamma_poller(),
+                self._run_resolution_checker(),
+                self._run_market_cleanup(),
+                self._run_data_exporter(),
+            ])
+
+        await asyncio.gather(*tasks)
 
     async def stop(self):
         self.log.info("bot_stopping")
         self._running = False
+
+        # Stop all accounts
+        for acc in self.accounts:
+            await acc.stop()
+
         await self.ws_client.stop()
         await self.gamma.close()
-        await self.detector.close()
         self._export_data()
-        self.log.info("bot_stopped", stats=self.detector.get_stats())
+
+        stats = {a.name: a.get_stats() for a in self.accounts}
+        self.log.info("bot_stopped", account_stats=stats)
 
     async def _run_websocket(self):
         """WebSocket connection with auto-reconnection."""
@@ -103,25 +147,20 @@ class Bot:
                 self.log.error("gamma_poll_error", error=str(e))
 
     async def _run_resolution_checker(self):
-        """Periodically check if tracked markets have resolved via Gamma API.
-
-        This catches resolutions missed by WebSocket (disconnections, restarts).
-        """
-        check_interval = 30  # Every 30 seconds
+        """Periodically check if tracked markets have resolved via Gamma API."""
+        check_interval = 30
         while self._running:
             await asyncio.sleep(check_interval)
             if not self._running:
                 break
             try:
-                # Find markets past or near their end_date that aren't resolved yet
-                # Check markets within 5 minutes of end_date too (may resolve early)
                 candidates = [
                     m.condition_id
                     for m in self.tracker.all_markets
                     if not m.resolved
                     and m.end_date is not None
                     and m.hours_to_resolution is not None
-                    and m.hours_to_resolution <= 0.1  # Within ~6 minutes of end
+                    and m.hours_to_resolution <= 0.1
                 ]
                 if not candidates:
                     continue
@@ -138,8 +177,10 @@ class Bot:
 
                 if resolved:
                     self.log.info("resolution_check", resolved=len(resolved), checked=len(candidates))
-                    # Trigger detector to settle
-                    await self.detector.check("", "resolution_check")
+                    # Trigger all directional detectors to settle
+                    for acc in self.accounts:
+                        if acc.detector:
+                            await acc.detector.check("", "resolution_check")
                 elif candidates:
                     self.log.debug("resolution_check_none_resolved", checked=len(candidates))
 
@@ -148,8 +189,7 @@ class Bot:
 
     async def _run_market_cleanup(self):
         """Periodically remove expired/resolved markets to free memory."""
-        cleanup_interval = 120  # Every 2 minutes
-        # Keep resolved markets for 10 min (time for settlement), then discard
+        cleanup_interval = 120
         keep_resolved_seconds = 600
 
         while self._running:
@@ -160,22 +200,20 @@ class Bot:
                 now_ts = time.time()
                 to_remove = []
                 for m in self.tracker.all_markets:
-                    # Remove resolved markets after grace period
                     if m.resolved and m.last_update > 0:
                         if (now_ts - m.last_update) > keep_resolved_seconds:
                             to_remove.append(m.condition_id)
                             continue
-                    # Remove markets expired >15 min ago that never resolved
                     if m.end_date is not None and m.hours_to_resolution == 0.0:
-                        time_since_end = (
-                            now_ts - m.end_date.timestamp()
-                        )
-                        if time_since_end > 900:  # 15 min past end_date
+                        time_since_end = now_ts - m.end_date.timestamp()
+                        if time_since_end > 900:
                             to_remove.append(m.condition_id)
 
                 for cid in to_remove:
                     self.tracker.remove_market(cid)
-                    self.detector.cleanup_market(cid)
+                    for acc in self.accounts:
+                        if acc.detector:
+                            acc.detector.cleanup_market(cid)
 
                 if to_remove:
                     self.log.info(
@@ -183,7 +221,6 @@ class Bot:
                         removed=len(to_remove),
                         remaining=len(self.tracker.all_markets),
                     )
-                    # Resubscribe WS with reduced token list
                     try:
                         await self.ws_client.resubscribe()
                     except Exception:
@@ -193,37 +230,28 @@ class Bot:
                 self.log.error("market_cleanup_error", error=str(e))
 
     async def _run_stats_reporter(self):
-        """Periodically log statistics."""
+        """Periodically log statistics for all accounts."""
         while self._running:
             await asyncio.sleep(self._stats_interval)
             if not self._running:
                 break
 
-            stats = self.detector.get_stats()
-            active_markets = len(self.tracker.all_markets)
-            stale = sum(1 for m in self.tracker.all_markets if m.is_stale)
-            resolved = sum(1 for m in self.tracker.all_markets if m.resolved)
+            # Per-account stats
+            for acc in self.accounts:
+                stats = acc.get_stats()
+                self.log.info("account_stats", **stats)
 
-            self.log.info(
-                "stats",
-                markets_active=active_markets,
-                markets_stale=stale,
-                markets_resolved=resolved,
-                ws_connected=self.ws_client.is_connected,
-                **stats,
-            )
-
-            # Log current market prices
-            for market in self.tracker.all_markets:
-                if market.is_stale:
-                    continue
-                self.log.debug(
-                    "market_price",
-                    question=market.question[:60],
-                    yes_ask=f"${market.best_ask_yes:.4f}",
-                    no_ask=f"${market.best_ask_no:.4f}",
-                    spread_sum=f"${market.spread_sum:.4f}",
-                    resolved=market.resolved,
+            # Shared market stats (if directional accounts exist)
+            if self.tracker:
+                active_markets = len(self.tracker.all_markets)
+                stale = sum(1 for m in self.tracker.all_markets if m.is_stale)
+                resolved = sum(1 for m in self.tracker.all_markets if m.resolved)
+                self.log.info(
+                    "market_stats",
+                    markets_active=active_markets,
+                    markets_stale=stale,
+                    markets_resolved=resolved,
+                    ws_connected=self.ws_client.is_connected,
                 )
 
     async def _run_web_server(self):
@@ -242,7 +270,7 @@ class Bot:
 
     async def _run_data_exporter(self):
         """Periodically export opportunity data to file."""
-        export_interval = 300  # Every 5 minutes
+        export_interval = 300
         while self._running:
             await asyncio.sleep(export_interval)
             if not self._running:
@@ -286,31 +314,38 @@ class Bot:
                 new=new_count,
                 total=len(self.tracker.all_markets),
             )
-            # Resubscribe WebSocket with new tokens
             try:
                 await self.ws_client.resubscribe()
             except Exception:
-                pass  # Will resubscribe on next reconnect
+                pass
 
     def _export_data(self):
-        """Export full report to JSON file for analysis."""
-        report = self.detector.export_full_report()
-        if not report["opportunities"]:
-            return
+        """Export full report per account to separate JSON files."""
+        export_dir = Path("data")
+        export_dir.mkdir(parents=True, exist_ok=True)
 
-        export_path = Path("data/opportunities.json")
-        export_path.parent.mkdir(parents=True, exist_ok=True)
+        for acc in self.accounts:
+            report = acc.export_full_report()
+            if not report:
+                continue
 
-        with open(export_path, "w") as f:
-            json.dump(report, f, indent=2)
+            # Use bets key (copy_trade) or opportunities key (directional)
+            items = report.get("bets", report.get("opportunities", []))
+            if not items:
+                continue
 
-        self.log.info(
-            "data_exported",
-            path=str(export_path),
-            count=len(report["opportunities"]),
-            settled=report["summary"]["settled"],
-            pnl=report["summary"]["total_pnl"],
-        )
+            export_path = export_dir / f"{acc.name}.json"
+            with open(export_path, "w") as f:
+                json.dump(report, f, indent=2)
+
+            self.log.info(
+                "data_exported",
+                account=acc.name,
+                path=str(export_path),
+                bets=report["summary"].get("total_bets", len(items)),
+                settled=report["summary"].get("settled", 0),
+                pnl=report["summary"].get("total_pnl", 0),
+            )
 
 
 async def main():

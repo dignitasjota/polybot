@@ -131,7 +131,7 @@ async def _fetch_binance_price(symbol: str, session: aiohttp.ClientSession) -> f
             data = await resp.json()
             return float(data["price"])
     except Exception as e:
-        logger.warning("binance_price_error", symbol=symbol, error=str(e))
+        logger.warning("binance_price_error", symbol=symbol, error=str(e), error_type=type(e).__name__)
         return None
 
 
@@ -159,7 +159,7 @@ async def _fetch_binance_open_price(
             # Kline format: [open_time, open, high, low, close, ...]
             return float(data[0][1])  # open price
     except Exception as e:
-        logger.warning("binance_kline_error", symbol=symbol, error=str(e))
+        logger.warning("binance_kline_error", symbol=symbol, error=str(e), error_type=type(e).__name__)
         return None
 
 

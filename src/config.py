@@ -80,6 +80,50 @@ class LoggingConfig:
     rotate_count: int = 5
 
 
+@dataclass
+class CredentialsConfig:
+    """Credentials for a Polymarket account (env var names or direct values)."""
+    private_key_env: str = "PRIVATE_KEY"
+    api_key_env: str = "POLYMARKET_API_KEY"
+    api_secret_env: str = "POLYMARKET_SECRET"
+    passphrase_env: str = "POLYMARKET_PASSPHRASE"
+
+    def get_private_key(self) -> str:
+        return get_secret(self.private_key_env)
+
+    def get_api_key(self) -> str:
+        return get_secret(self.api_key_env)
+
+    def get_api_secret(self) -> str:
+        return get_secret(self.api_secret_env)
+
+    def get_passphrase(self) -> str:
+        return get_secret(self.passphrase_env)
+
+
+@dataclass
+class CopyTradeConfig:
+    """Configuration for copy-trading strategy."""
+    target_wallets: list[str] = field(default_factory=list)
+    poll_interval_ms: int = 500  # How often to poll for new trades
+    max_latency_ms: int = 5000   # Ignore trades older than this
+    copy_size_mode: str = "fixed"  # "fixed" or "proportional"
+    fixed_bet_size: float = 5.0   # Fixed bet size in USD
+    proportional_factor: float = 1.0  # Multiplier for proportional mode
+
+
+@dataclass
+class AccountConfig:
+    """Configuration for a single trading account."""
+    name: str = "default"
+    enabled: bool = True
+    strategy_type: str = "directional"  # "directional" or "copy_trade"
+    execution_mode: str = "paper"  # "paper", "dry_run", "live"
+    credentials: CredentialsConfig = field(default_factory=CredentialsConfig)
+    risk: RiskConfig = field(default_factory=RiskConfig)
+    copy_trade: CopyTradeConfig = field(default_factory=CopyTradeConfig)
+
+
 def _parse_duration(value: str) -> timedelta:
     """Parse duration strings like '24h', '30m', '5s'."""
     value = value.strip().lower()
@@ -99,6 +143,7 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     websocket: WebSocketConfig = field(default_factory=WebSocketConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    accounts: list[AccountConfig] = field(default_factory=list)
     _path: str = ""
 
     @classmethod
@@ -124,12 +169,49 @@ class Config:
                 for t in tiers_raw
             ]
 
+        risk_raw = raw.get("risk", {})
+
+        # Parse accounts
+        accounts = []
+        for acc_raw in raw.get("accounts", []):
+            creds_raw = acc_raw.pop("credentials", {})
+            creds = CredentialsConfig(**creds_raw) if creds_raw else CredentialsConfig()
+
+            copy_raw = acc_raw.pop("copy_trade", {})
+            copy_cfg = CopyTradeConfig(**copy_raw) if copy_raw else CopyTradeConfig()
+
+            # Account-level risk overrides (falls back to global risk)
+            acc_risk_raw = acc_raw.pop("risk", None)
+            if acc_risk_raw:
+                # Merge: global risk as base, account overrides on top
+                merged_risk = {**risk_raw, **acc_risk_raw}
+                acc_risk = RiskConfig(**merged_risk)
+            else:
+                acc_risk = RiskConfig(**risk_raw)
+
+            accounts.append(AccountConfig(
+                credentials=creds,
+                copy_trade=copy_cfg,
+                risk=acc_risk,
+                **acc_raw,
+            ))
+
+        # Fallback: if no accounts defined, create one default account
+        if not accounts:
+            accounts.append(AccountConfig(
+                name="default",
+                strategy_type="directional",
+                execution_mode="paper",
+                risk=RiskConfig(**risk_raw),
+            ))
+
         cfg = cls(
             strategy=StrategyConfig(**strategy_raw),
-            risk=RiskConfig(**raw.get("risk", {})),
+            risk=RiskConfig(**risk_raw),
             data=DataConfig(**raw.get("data", {})),
             websocket=WebSocketConfig(**raw.get("websocket", {})),
             logging=LoggingConfig(**raw.get("logging", {})),
+            accounts=accounts,
             _path=str(path),
         )
         return cfg
