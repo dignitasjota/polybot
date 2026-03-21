@@ -91,6 +91,7 @@ passphrase_env = "COPY_PASSPHRASE"
 target_wallets = [
     "0x2d8b401d2f0e6937afebf18e19e11ca568a5260a",  # vidarx
     "0x674b949283ea2eb33c2cad519a3e2f26b3144f07",  # para888
+    "0x45bc74efa620b45c02308acaecdff1f7c06f978b",  # 0xbbc5z (BTC heavy, $517K)
 ]
 poll_interval_ms = 500
 max_latency_ms = 120000  # 120s para paper trading (en live bajar a 5000-10000)
