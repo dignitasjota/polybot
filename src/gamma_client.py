@@ -151,7 +151,11 @@ class GammaClient:
         return markets
 
     async def check_resolution(self, condition_ids: list[str]) -> dict[str, str]:
-        """Check if markets have resolved via Gamma API.
+        """Check if markets have resolved via CLOB REST API.
+
+        Uses GET https://clob.polymarket.com/markets/{condition_id} which returns
+        authoritative resolution data with a `tokens` array where each token has
+        a `winner` boolean field.
 
         Returns dict of condition_id -> winning_token_id for resolved markets.
         """
@@ -163,60 +167,70 @@ class GammaClient:
 
         for condition_id in condition_ids:
             try:
+                # Use CLOB REST API — authoritative source for resolution
+                url = f"https://clob.polymarket.com/markets/{condition_id}"
                 async with session.get(
-                    f"{GAMMA_API_URL}/markets",
-                    params={"condition_id": condition_id},
+                    url,
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     if resp.status != 200:
+                        logger.debug(
+                            "clob_resolution_check_status",
+                            condition_id=condition_id[:16],
+                            status=resp.status,
+                        )
                         continue
                     data = await resp.json()
                     if not data:
                         continue
 
-                    # Gamma returns a list, take first match
-                    item = data[0] if isinstance(data, list) else data
+                    logger.debug(
+                        "clob_resolution_response",
+                        condition_id=condition_id[:16],
+                        closed=data.get("closed"),
+                        active=data.get("active"),
+                        has_tokens=bool(data.get("tokens")),
+                    )
 
-                    # Check various resolution indicators
-                    is_resolved = item.get("resolved", False)
-                    is_closed = item.get("closed", False)
+                    # CLOB API: check if market is closed/inactive
+                    is_closed = data.get("closed", False)
+                    is_active = data.get("active", True)
 
-                    if not (is_resolved or is_closed):
+                    if not is_closed and is_active:
                         continue
 
-                    # Try to determine the winner
+                    # Look for winner in the tokens array
+                    # Each token has: token_id, outcome ("Yes"/"No"), winner (bool)
+                    tokens = data.get("tokens", [])
                     winning_token_id = ""
 
-                    # Check outcomePrices — after resolution, winner = 1.0, loser = 0.0
-                    outcome_prices_raw = item.get("outcomePrices", "[]")
-                    if isinstance(outcome_prices_raw, str):
-                        outcome_prices = json_lib.loads(outcome_prices_raw)
-                    else:
-                        outcome_prices = outcome_prices_raw or []
-
-                    clob_token_ids_raw = item.get("clobTokenIds", "[]")
-                    if isinstance(clob_token_ids_raw, str):
-                        clob_token_ids = json_lib.loads(clob_token_ids_raw)
-                    else:
-                        clob_token_ids = clob_token_ids_raw or []
-
-                    if len(outcome_prices) >= 2 and len(clob_token_ids) >= 2:
-                        for i, price_str in enumerate(outcome_prices):
-                            price = float(price_str)
-                            if price >= 0.99:  # Winner converges to 1.0
-                                winning_token_id = clob_token_ids[i]
-                                break
+                    for token in tokens:
+                        if token.get("winner") is True:
+                            winning_token_id = token.get("token_id", "")
+                            break
 
                     if winning_token_id:
                         resolved[condition_id] = winning_token_id
                         logger.info(
-                            "gamma_resolution_detected",
+                            "clob_resolution_detected",
                             condition_id=condition_id[:16],
-                            question=item.get("question", "")[:60],
+                            winning_token=winning_token_id[:16],
+                            question=data.get("question", "")[:60],
+                        )
+                    elif is_closed:
+                        # Market closed but no winner found yet — log for debugging
+                        logger.debug(
+                            "clob_market_closed_no_winner",
+                            condition_id=condition_id[:16],
+                            tokens_count=len(tokens),
+                            token_details=[
+                                {"outcome": t.get("outcome"), "winner": t.get("winner")}
+                                for t in tokens
+                            ],
                         )
 
             except (aiohttp.ClientError, asyncio.TimeoutError, json_lib.JSONDecodeError) as e:
-                logger.debug("gamma_resolution_check_error", condition_id=condition_id[:16], error=str(e))
+                logger.debug("clob_resolution_check_error", condition_id=condition_id[:16], error=str(e))
                 continue
 
         return resolved

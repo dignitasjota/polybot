@@ -108,16 +108,24 @@ class Bot:
             if not self._running:
                 break
             try:
-                # Find markets past their end_date that aren't resolved yet
+                # Find markets past or near their end_date that aren't resolved yet
+                # Check markets within 5 minutes of end_date too (may resolve early)
                 candidates = [
                     m.condition_id
                     for m in self.tracker.all_markets
                     if not m.resolved
                     and m.end_date is not None
-                    and m.hours_to_resolution == 0.0
+                    and m.hours_to_resolution is not None
+                    and m.hours_to_resolution <= 0.1  # Within ~6 minutes of end
                 ]
                 if not candidates:
                     continue
+
+                self.log.debug(
+                    "resolution_check_candidates",
+                    count=len(candidates),
+                    condition_ids=[c[:16] for c in candidates],
+                )
 
                 resolved = await self.gamma.check_resolution(candidates)
                 for condition_id, winning_token_id in resolved.items():
@@ -127,6 +135,8 @@ class Bot:
                     self.log.info("resolution_check", resolved=len(resolved), checked=len(candidates))
                     # Trigger detector to settle
                     await self.detector.check("", "resolution_check")
+                elif candidates:
+                    self.log.debug("resolution_check_none_resolved", checked=len(candidates))
 
             except Exception as e:
                 self.log.error("resolution_check_error", error=str(e))

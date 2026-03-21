@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiohttp import web
 
@@ -44,7 +44,8 @@ async def handle_dashboard(request: web.Request) -> web.Response:
     opportunities = bot.detector.export_opportunities()
     markets = bot.tracker.all_markets
 
-    now = datetime.now(timezone.utc)
+    tz_display = timezone(timedelta(hours=1))  # GMT+1 (CET)
+    now = datetime.now(tz_display)
 
     # Build markets summary
     markets_html = ""
@@ -76,7 +77,7 @@ async def handle_dashboard(request: web.Request) -> web.Response:
     # Build opportunities
     opps_html = ""
     for o in reversed(opportunities[-50:]):
-        ts = datetime.fromtimestamp(o["timestamp"], tz=timezone.utc).strftime("%H:%M:%S")
+        ts = datetime.fromtimestamp(o["timestamp"], tz=tz_display).strftime("%H:%M:%S")
         hours = o.get("hours_remaining", 0)
         if hours < 1:
             time_left = f"{hours * 60:.0f}min"
@@ -180,7 +181,7 @@ async def handle_dashboard(request: web.Request) -> web.Response:
 </head>
 <body>
     <h1>POLYMARKET CLOSING ARBITRAGE</h1>
-    <div class="subtitle">Phase 1.1 Observer | Auto-refresh 10s | {now.strftime('%Y-%m-%d %H:%M:%S UTC')}</div>
+    <div class="subtitle">Phase 1.1 Observer | Auto-refresh 10s | {now.strftime('%Y-%m-%d %H:%M:%S')} CET</div>
 
     <div class="stats">
         <div class="stat">
