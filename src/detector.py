@@ -7,6 +7,7 @@ import structlog
 
 from src.config import RiskConfig, StrategyConfig
 from src.market_tracker import MarketState, MarketTracker
+from src.price_checker import PriceChecker
 
 logger = structlog.get_logger("polymarket.detector")
 
@@ -68,6 +69,7 @@ class ClosingArbitrageDetector:
         self._active_opportunities: dict[str, Opportunity] = {}  # "condition_id:side" -> latest opp
         self._bet_placed: dict[str, Opportunity] = {}  # "condition_id:side" -> first bet (for paper trading)
         self._settled_conditions: set[str] = set()  # Already settled condition_ids
+        self._price_checker = PriceChecker(min_buffer_pct=0.10)
         self._stats = {
             "total_scans": 0,
             "opportunities_found": 0,
@@ -75,7 +77,14 @@ class ClosingArbitrageDetector:
             "settled_wins": 0,
             "settled_losses": 0,
             "simulated_pnl": 0.0,
+            "price_checks_confirmed": 0,
+            "price_checks_rejected": 0,
+            "price_checks_uncertain": 0,
         }
+
+    async def close(self):
+        """Close resources (Binance session)."""
+        await self._price_checker.close()
 
     async def check(self, token_id: str = "", event_type: str = ""):
         """Check all markets for closing arbitrage opportunities."""
@@ -93,7 +102,7 @@ class ClosingArbitrageDetector:
                 continue
 
             # Check pre-resolution (higher risk, token priced high)
-            self._check_pre_resolution(market, still_active)
+            await self._check_pre_resolution(market, still_active)
 
         # Mark disappeared opportunities (were active, no longer detected)
         now = time.time()
@@ -217,15 +226,49 @@ class ClosingArbitrageDetector:
 
         self._log_opportunity(opp)
 
-    def _check_pre_resolution(self, market: MarketState, still_active: set[str]):
+    async def _check_pre_resolution(self, market: MarketState, still_active: set[str]):
         """Pre-resolution: look for tokens priced >= min probability for their time remaining."""
         hours = market.hours_to_resolution
         if hours is None:
             return
 
+        # Don't bet on markets that have reached resolution time — outcome is unknown
+        if hours <= 0:
+            return
+
         min_prob = self.config.get_min_probability(hours)
 
-        # Only bet on the side with higher probability (avoid betting both sides)
+        # For Up/Down crypto markets: verify direction with real Binance prices
+        price_check = await self._price_checker.check_direction(market.question)
+        if price_check is not None:
+            # This is an Up/Down market — only bet if Binance confirms the direction
+            confirmed = price_check["confirmed_side"]
+            if confirmed is None:
+                # Price too close to call — skip entirely
+                self._stats["price_checks_uncertain"] += 1
+                logger.info(
+                    "price_check_uncertain",
+                    question=market.question[:60],
+                    change_pct=price_check["change_pct"],
+                    symbol=price_check["symbol"],
+                )
+                return
+
+            # Only bet on the Binance-confirmed side
+            if confirmed == "YES" and market.best_ask_yes >= min_prob:
+                self._stats["price_checks_confirmed"] += 1
+                self._evaluate_side(market, is_yes=True, min_prob=min_prob, hours_remaining=hours)
+                still_active.add(f"{market.condition_id}:YES")
+            elif confirmed == "NO" and market.best_ask_no >= min_prob:
+                self._stats["price_checks_confirmed"] += 1
+                self._evaluate_side(market, is_yes=False, min_prob=min_prob, hours_remaining=hours)
+                still_active.add(f"{market.condition_id}:NO")
+            else:
+                # Binance says one direction but order book price not high enough
+                self._stats["price_checks_rejected"] += 1
+            return
+
+        # Non Up/Down markets: use order book price only (original logic)
         if market.best_ask_yes >= market.best_ask_no:
             if market.best_ask_yes >= min_prob:
                 self._evaluate_side(market, is_yes=True, min_prob=min_prob, hours_remaining=hours)
@@ -285,10 +328,11 @@ class ClosingArbitrageDetector:
         # Never bet more than current balance
         bet = min(bet, self._balance)
 
-        # Don't suggest more than available depth
+        # Don't suggest more than available depth; reject if no liquidity
+        if depth <= 0:
+            return 0.0, 0.0
         max_from_depth = depth * price  # depth is in shares, convert to USD
-        if max_from_depth > 0:
-            bet = min(bet, max_from_depth)
+        bet = min(bet, max_from_depth)
 
         # Shares bought = bet / price, each share pays $1 if wins
         shares = bet / price if price > 0 else 0

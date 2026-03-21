@@ -74,6 +74,7 @@ class Bot:
         self._running = False
         await self.ws_client.stop()
         await self.gamma.close()
+        await self.detector.close()
         self._export_data()
         self.log.info("bot_stopped", stats=self.detector.get_stats())
 
