@@ -319,7 +319,21 @@ class ClosingArbitrageDetector:
 
         # For paper trading: only place ONE bet per market+side (first detection)
         # Subsequent price changes are logged but don't create new bets
-        is_new_bet = key not in self._bet_placed
+        # GUARD: never bet on opposite side of a market we already have a bet on
+        opposite_side = "NO" if opp.token_side == "YES" else "YES"
+        opposite_key = f"{opp.condition_id}:{opposite_side}"
+        if opposite_key in self._bet_placed:
+            opp.suggested_bet = 0.0
+            opp.potential_profit = 0.0
+            is_new_bet = False
+            logger.warning(
+                "opposite_side_blocked",
+                condition_id=opp.condition_id,
+                blocked_side=opp.token_side,
+                existing_side=opposite_side,
+            )
+        else:
+            is_new_bet = key not in self._bet_placed
         if is_new_bet:
             self._bet_placed[key] = opp
         else:
