@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timezone, timedelta
 
 import aiohttp
@@ -155,8 +156,11 @@ class PriceChecker:
         """
         self.min_buffer_pct = min_buffer_pct
         self._session: aiohttp.ClientSession | None = None
-        # Cache open prices to avoid repeated API calls
+        # Cache open prices permanently (they never change)
         self._open_price_cache: dict[str, float] = {}  # "BTCUSDT:1234567890" -> price
+        # Cache current prices with TTL to avoid hammering Binance API
+        self._current_price_cache: dict[str, tuple[float, float]] = {}  # symbol -> (price, timestamp)
+        self._current_price_ttl = 2.0  # seconds
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -196,10 +200,16 @@ class PriceChecker:
                 return None
             self._open_price_cache[cache_key] = open_price
 
-        # Get current price
-        current_price = await get_binance_price(symbol, session)
-        if current_price is None:
-            return None
+        # Get current price (cached for 2s to avoid rate limits)
+        cached = self._current_price_cache.get(symbol)
+        now = time.time()
+        if cached and (now - cached[1]) < self._current_price_ttl:
+            current_price = cached[0]
+        else:
+            current_price = await get_binance_price(symbol, session)
+            if current_price is None:
+                return None
+            self._current_price_cache[symbol] = (current_price, now)
 
         # Calculate direction
         change_pct = ((current_price - open_price) / open_price) * 100
