@@ -225,15 +225,15 @@ class ClosingArbitrageDetector:
 
         min_prob = self.config.get_min_probability(hours)
 
-        # Check YES side
-        if market.best_ask_yes >= min_prob:
-            self._evaluate_side(market, is_yes=True, min_prob=min_prob, hours_remaining=hours)
-            still_active.add(f"{market.condition_id}:YES")
-
-        # Check NO side
-        if market.best_ask_no >= min_prob:
-            self._evaluate_side(market, is_yes=False, min_prob=min_prob, hours_remaining=hours)
-            still_active.add(f"{market.condition_id}:NO")
+        # Only bet on the side with higher probability (avoid betting both sides)
+        if market.best_ask_yes >= market.best_ask_no:
+            if market.best_ask_yes >= min_prob:
+                self._evaluate_side(market, is_yes=True, min_prob=min_prob, hours_remaining=hours)
+                still_active.add(f"{market.condition_id}:YES")
+        else:
+            if market.best_ask_no >= min_prob:
+                self._evaluate_side(market, is_yes=False, min_prob=min_prob, hours_remaining=hours)
+                still_active.add(f"{market.condition_id}:NO")
 
     def _evaluate_side(self, market: MarketState, is_yes: bool, min_prob: float = 0.95, hours_remaining: float = 0.0):
         price = market.best_ask_yes if is_yes else market.best_ask_no
