@@ -187,12 +187,18 @@ class ClosingArbitrageDetector:
             # (their suggested_bet was already zeroed in _log_opportunity)
 
     def _check_resolved_market(self, market: MarketState):
-        """Post-resolution: the winner is known, buy if price < $1.00."""
+        """Post-resolution: the winner is known, buy if price < $1.00.
+
+        Only buy the winning token when price >= 0.95 to confirm the order book
+        has converged and we're truly buying the winner at a small discount.
+        Low prices (e.g., $0.38) indicate stale/unconverged data — too risky.
+        """
         winning_id = market.winning_token_id
         is_yes = winning_id == market.yes_token_id
         price = market.best_ask_yes if is_yes else market.best_ask_no
 
-        if price <= 0 or price >= 1.0:
+        # Only buy when price is high — confirms winner and minimizes risk
+        if price < 0.95 or price >= 1.0:
             return
 
         margin_gross = 1.0 - price
@@ -225,6 +231,27 @@ class ClosingArbitrageDetector:
         )
 
         self._log_opportunity(opp)
+
+        # Post-resolution bets are always wins — settle immediately
+        if opp.suggested_bet > 0:
+            key = f"{opp.condition_id}:{opp.token_side}"
+            bet_opp = self._bet_placed.get(key)
+            if bet_opp and bet_opp.outcome == "pending":
+                shares = bet_opp.suggested_bet / bet_opp.token_price if bet_opp.token_price > 0 else 0
+                pnl = round(shares * bet_opp.margin_net, 2)
+                bet_opp.outcome = "win"
+                bet_opp.actual_pnl = pnl
+                bet_opp.resolved_at = time.time()
+                self._balance = round(self._balance + pnl, 2)
+                self._stats["settled_wins"] += 1
+                self._stats["simulated_pnl"] = round(self._stats["simulated_pnl"] + pnl, 2)
+                logger.info(
+                    "post_resolution_settled",
+                    question=bet_opp.question[:80],
+                    price=f"${bet_opp.token_price:.4f}",
+                    pnl=f"${pnl:+.2f}",
+                    balance=f"${self._balance:.2f}",
+                )
 
     async def _check_pre_resolution(self, market: MarketState, still_active: set[str]):
         """Pre-resolution: look for tokens priced >= min probability for their time remaining."""

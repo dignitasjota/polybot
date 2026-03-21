@@ -27,11 +27,19 @@ CRYPTO_SYMBOLS = {
     "litecoin": "LTCUSDT",
     "sui": "SUIUSDT",
     "pepe": "PEPEUSDT",
+    # Note: Hyperliquid (HYPE) is NOT on Binance — these markets
+    # will fall back to order-book-only logic (no price verification)
 }
 
 # Regex to parse "Crypto Up or Down - March 21, 6:05AM-6:10AM ET"
 _QUESTION_RE = re.compile(
-    r"^(\w+)\s+Up or Down\s*-\s*(\w+ \d+),?\s*(\d{1,2}:\d{2}(?:AM|PM))\s*-\s*(\d{1,2}:\d{2}(?:AM|PM))\s*ET$",
+    r"^(\w+)\s+Up or Down\s*-\s*(\w+ \d+),?\s*(\d{1,2}(?::\d{2})?(?:AM|PM))\s*-\s*(\d{1,2}(?::\d{2})?(?:AM|PM))\s*ET$",
+    re.IGNORECASE,
+)
+
+# Regex for hourly format: "Crypto Up or Down - March 21, 6AM ET"
+_QUESTION_HOURLY_RE = re.compile(
+    r"^(\w+)\s+Up or Down\s*-\s*(\w+ \d+),?\s*(\d{1,2}(?::\d{2})?(?:AM|PM))\s*ET$",
     re.IGNORECASE,
 )
 
@@ -45,39 +53,71 @@ def _et_to_utc(dt: datetime) -> datetime:
     return dt.replace(tzinfo=timezone(ET_OFFSET_DST)).astimezone(timezone.utc)
 
 
+def _parse_time_str(date_str: str, year: int, time_str: str) -> datetime | None:
+    """Parse a time string that may or may not have minutes (e.g., '6AM' or '6:05AM')."""
+    for fmt in ("%B %d %Y %I:%M%p", "%B %d %Y %I%p"):
+        try:
+            return datetime.strptime(f"{date_str} {year} {time_str}", fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def parse_up_down_question(question: str, year: int | None = None) -> dict | None:
     """Parse an Up/Down market question to extract crypto, start time, end time.
 
+    Supports formats:
+    - "Bitcoin Up or Down - March 21, 6:05AM-6:10AM ET" (range)
+    - "Bitcoin Up or Down - March 21, 6AM ET" (hourly — start=6AM, end=7AM)
+
     Returns dict with keys: crypto, symbol, start_utc, end_utc, or None if not parseable.
     """
-    m = _QUESTION_RE.match(question)
-    if not m:
-        return None
-
-    crypto_name = m.group(1).lower()
-    symbol = CRYPTO_SYMBOLS.get(crypto_name)
-    if not symbol:
-        return None
-
-    date_str = m.group(2)  # "March 21"
-    start_time_str = m.group(3)  # "6:05AM"
-    end_time_str = m.group(4)    # "6:10AM"
-
     if year is None:
         year = datetime.now(timezone.utc).year
 
-    try:
-        start_dt = datetime.strptime(f"{date_str} {year} {start_time_str}", "%B %d %Y %I:%M%p")
-        end_dt = datetime.strptime(f"{date_str} {year} {end_time_str}", "%B %d %Y %I:%M%p")
-    except ValueError:
-        return None
+    # Try range format first: "6:05AM-6:10AM ET"
+    m = _QUESTION_RE.match(question)
+    if m:
+        crypto_name = m.group(1).lower()
+        symbol = CRYPTO_SYMBOLS.get(crypto_name)
+        if not symbol:
+            return None
 
-    return {
-        "crypto": crypto_name,
-        "symbol": symbol,
-        "start_utc": _et_to_utc(start_dt),
-        "end_utc": _et_to_utc(end_dt),
-    }
+        date_str = m.group(2)
+        start_dt = _parse_time_str(date_str, year, m.group(3))
+        end_dt = _parse_time_str(date_str, year, m.group(4))
+        if not start_dt or not end_dt:
+            return None
+
+        return {
+            "crypto": crypto_name,
+            "symbol": symbol,
+            "start_utc": _et_to_utc(start_dt),
+            "end_utc": _et_to_utc(end_dt),
+        }
+
+    # Try hourly format: "6AM ET" (implies 1-hour window)
+    m = _QUESTION_HOURLY_RE.match(question)
+    if m:
+        crypto_name = m.group(1).lower()
+        symbol = CRYPTO_SYMBOLS.get(crypto_name)
+        if not symbol:
+            return None
+
+        date_str = m.group(2)
+        start_dt = _parse_time_str(date_str, year, m.group(3))
+        if not start_dt:
+            return None
+        end_dt = start_dt + timedelta(hours=1)
+
+        return {
+            "crypto": crypto_name,
+            "symbol": symbol,
+            "start_utc": _et_to_utc(start_dt),
+            "end_utc": _et_to_utc(end_dt),
+        }
+
+    return None
 
 
 async def get_binance_price(symbol: str, session: aiohttp.ClientSession | None = None) -> float | None:
