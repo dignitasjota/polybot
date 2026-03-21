@@ -14,19 +14,19 @@ min_margin_net = 0.008            # Margen minimo por share tras fees ($0.008)
 # Se evalua de arriba a abajo: la primera que cumpla (tiempo < max_hours) aplica
 [[strategy.probability_tiers]]
 max_hours = 0.08   # < 5 min
-min_probability = 0.95
-
-[[strategy.probability_tiers]]
-max_hours = 0.25   # < 15 min
-min_probability = 0.96
-
-[[strategy.probability_tiers]]
-max_hours = 0.5    # < 30 min
 min_probability = 0.97
 
 [[strategy.probability_tiers]]
-max_hours = 1      # < 1h
+max_hours = 0.25   # < 15 min
 min_probability = 0.98
+
+[[strategy.probability_tiers]]
+max_hours = 0.5    # < 30 min
+min_probability = 0.99
+
+[[strategy.probability_tiers]]
+max_hours = 1      # < 1h
+min_probability = 0.99
 
 [risk]
 max_bet_pct = 2.0                 # % del balance por apuesta (Kelly fraccionado)

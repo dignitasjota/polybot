@@ -355,6 +355,18 @@ class ClosingArbitrageDetector:
             resolved=opp.resolved,
         )
 
+    def cleanup_market(self, condition_id: str):
+        """Remove all tracking data for a market that's been cleaned up."""
+        # Clean _last_logged, _active_opportunities for this condition
+        keys_to_remove = [k for k in self._last_logged if k.startswith(condition_id)]
+        for k in keys_to_remove:
+            self._last_logged.pop(k, None)
+            self._active_opportunities.pop(k, None)
+
+        # Trim opportunities log — keep last 500 entries max
+        if len(self._opportunities_log) > 500:
+            self._opportunities_log = self._opportunities_log[-500:]
+
     def get_stats(self) -> dict:
         roi = ((self._balance - self._starting_balance) / self._starting_balance * 100) if self._starting_balance > 0 else 0
         return {

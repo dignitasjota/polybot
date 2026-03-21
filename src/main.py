@@ -63,6 +63,7 @@ class Bot:
             self._run_websocket(),
             self._run_gamma_poller(),
             self._run_resolution_checker(),
+            self._run_market_cleanup(),
             self._run_stats_reporter(),
             self._run_data_exporter(),
             self._run_web_server(),
@@ -140,6 +141,52 @@ class Bot:
 
             except Exception as e:
                 self.log.error("resolution_check_error", error=str(e))
+
+    async def _run_market_cleanup(self):
+        """Periodically remove expired/resolved markets to free memory."""
+        cleanup_interval = 120  # Every 2 minutes
+        # Keep resolved markets for 10 min (time for settlement), then discard
+        keep_resolved_seconds = 600
+
+        while self._running:
+            await asyncio.sleep(cleanup_interval)
+            if not self._running:
+                break
+            try:
+                now_ts = time.time()
+                to_remove = []
+                for m in self.tracker.all_markets:
+                    # Remove resolved markets after grace period
+                    if m.resolved and m.last_update > 0:
+                        if (now_ts - m.last_update) > keep_resolved_seconds:
+                            to_remove.append(m.condition_id)
+                            continue
+                    # Remove markets expired >15 min ago that never resolved
+                    if m.end_date is not None and m.hours_to_resolution == 0.0:
+                        time_since_end = (
+                            now_ts - m.end_date.timestamp()
+                        )
+                        if time_since_end > 900:  # 15 min past end_date
+                            to_remove.append(m.condition_id)
+
+                for cid in to_remove:
+                    self.tracker.remove_market(cid)
+                    self.detector.cleanup_market(cid)
+
+                if to_remove:
+                    self.log.info(
+                        "market_cleanup",
+                        removed=len(to_remove),
+                        remaining=len(self.tracker.all_markets),
+                    )
+                    # Resubscribe WS with reduced token list
+                    try:
+                        await self.ws_client.resubscribe()
+                    except Exception:
+                        pass
+
+            except Exception as e:
+                self.log.error("market_cleanup_error", error=str(e))
 
     async def _run_stats_reporter(self):
         """Periodically log statistics."""
