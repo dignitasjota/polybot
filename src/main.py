@@ -49,6 +49,9 @@ class Bot:
 
         self._running = True
 
+        # Start background Binance price polling
+        await self.detector._price_checker.start()
+
         # Register the detector callback on the WebSocket
         self.ws_client.on_opportunity(self.detector.check)
 

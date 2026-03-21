@@ -102,7 +102,7 @@ class ClosingArbitrageDetector:
                 continue
 
             # Check pre-resolution (higher risk, token priced high)
-            await self._check_pre_resolution(market, still_active)
+            self._check_pre_resolution(market, still_active)
 
         # Mark disappeared opportunities (were active, no longer detected)
         now = time.time()
@@ -253,7 +253,7 @@ class ClosingArbitrageDetector:
                     balance=f"${self._balance:.2f}",
                 )
 
-    async def _check_pre_resolution(self, market: MarketState, still_active: set[str]):
+    def _check_pre_resolution(self, market: MarketState, still_active: set[str]):
         """Pre-resolution: look for tokens priced >= min probability for their time remaining."""
         hours = market.hours_to_resolution
         if hours is None:
@@ -266,7 +266,7 @@ class ClosingArbitrageDetector:
         min_prob = self.config.get_min_probability(hours)
 
         # For Up/Down crypto markets: verify direction with real Binance prices
-        price_check = await self._price_checker.check_direction(market.question)
+        price_check = self._price_checker.check_direction(market.question)
         if price_check is not None:
             # This is an Up/Down market — only bet if Binance confirms the direction
             confirmed = price_check["confirmed_side"]

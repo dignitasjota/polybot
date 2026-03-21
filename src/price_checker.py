@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from datetime import datetime, timezone, timedelta
@@ -120,11 +121,8 @@ def parse_up_down_question(question: str, year: int | None = None) -> dict | Non
     return None
 
 
-async def get_binance_price(symbol: str, session: aiohttp.ClientSession | None = None) -> float | None:
+async def _fetch_binance_price(symbol: str, session: aiohttp.ClientSession) -> float | None:
     """Get current price from Binance."""
-    own_session = session is None
-    if own_session:
-        session = aiohttp.ClientSession()
     try:
         url = f"{BINANCE_API}/ticker/price"
         async with session.get(url, params={"symbol": symbol}, timeout=aiohttp.ClientTimeout(total=3)) as resp:
@@ -135,23 +133,14 @@ async def get_binance_price(symbol: str, session: aiohttp.ClientSession | None =
     except Exception as e:
         logger.warning("binance_price_error", symbol=symbol, error=str(e))
         return None
-    finally:
-        if own_session:
-            await session.close()
 
 
-async def get_binance_open_price(
+async def _fetch_binance_open_price(
     symbol: str,
     start_utc: datetime,
-    session: aiohttp.ClientSession | None = None,
+    session: aiohttp.ClientSession,
 ) -> float | None:
-    """Get the opening price at a specific time from Binance klines.
-
-    Uses 1-minute klines to get the open price of the candle that contains start_utc.
-    """
-    own_session = session is None
-    if own_session:
-        session = aiohttp.ClientSession()
+    """Get the opening price at a specific time from Binance klines."""
     try:
         start_ms = int(start_utc.timestamp() * 1000)
         url = f"{BINANCE_API}/klines"
@@ -172,84 +161,112 @@ async def get_binance_open_price(
     except Exception as e:
         logger.warning("binance_kline_error", symbol=symbol, error=str(e))
         return None
-    finally:
-        if own_session:
-            await session.close()
 
 
 class PriceChecker:
     """Verifies Up/Down market direction using Binance prices as proxy for Chainlink.
 
-    Polymarket Up/Down markets resolve using Chainlink Data Streams (e.g. BTC/USD).
-    Chainlink Data Streams require paid enterprise access, so we use Binance spot
-    prices as a proxy (correlation >99.99%). The min_buffer_pct accounts for any
-    small discrepancy between Binance and Chainlink.
+    Prices are fetched in a background loop every 1 second and cached.
+    check_direction() reads from cache only — zero I/O, zero latency.
     """
 
-    def __init__(self, min_buffer_pct: float = 0.10):
-        """
-        Args:
-            min_buffer_pct: Minimum price difference (%) from open to confirm direction.
-                           Set to 0.10% to cover Binance-Chainlink price discrepancy.
-                           Lower = more trades but higher risk of wrong direction.
-                           Higher = fewer trades but more confidence.
-        """
+    def __init__(self, min_buffer_pct: float = 0.10, poll_interval: float = 1.0):
         self.min_buffer_pct = min_buffer_pct
+        self._poll_interval = poll_interval
         self._session: aiohttp.ClientSession | None = None
-        # Cache open prices permanently (they never change)
-        self._open_price_cache: dict[str, float] = {}  # "BTCUSDT:1234567890" -> price
-        # Cache current prices with TTL to avoid hammering Binance API
-        self._current_price_cache: dict[str, tuple[float, float]] = {}  # symbol -> (price, timestamp)
-        self._current_price_ttl = 2.0  # seconds
+        self._running = False
+        self._bg_task: asyncio.Task | None = None
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
+        # Caches (read by check_direction, written by background loop)
+        self._current_prices: dict[str, float] = {}       # symbol -> price
+        self._open_prices: dict[str, float] = {}           # "BTCUSDT:timestamp" -> open price
+        self._active_symbols: set[str] = set()             # symbols to poll
+        self._pending_open_requests: dict[str, datetime] = {}  # cache_key -> start_utc
+        self._last_update: float = 0.0
+
+    async def start(self):
+        """Start the background price polling loop."""
+        if self._running:
+            return
+        self._running = True
+        self._session = aiohttp.ClientSession()
+        self._bg_task = asyncio.create_task(self._poll_loop())
+        logger.info("price_checker_started", poll_interval=self._poll_interval)
 
     async def close(self):
+        """Stop background polling and close session."""
+        self._running = False
+        if self._bg_task:
+            self._bg_task.cancel()
+            try:
+                await self._bg_task
+            except asyncio.CancelledError:
+                pass
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def check_direction(self, question: str) -> dict | None:
+    async def _poll_loop(self):
+        """Background loop: fetch current prices for all active symbols."""
+        while self._running:
+            try:
+                await self._update_prices()
+            except Exception as e:
+                logger.warning("price_poll_error", error=str(e))
+            await asyncio.sleep(self._poll_interval)
+
+    async def _update_prices(self):
+        """Fetch current prices for all active symbols in parallel."""
+        if not self._session or not self._active_symbols:
+            return
+
+        # Fetch all current prices in parallel
+        tasks = {
+            symbol: asyncio.create_task(_fetch_binance_price(symbol, self._session))
+            for symbol in self._active_symbols
+        }
+        for symbol, task in tasks.items():
+            price = await task
+            if price is not None:
+                self._current_prices[symbol] = price
+
+        # Fetch any pending open prices
+        for cache_key, start_utc in list(self._pending_open_requests.items()):
+            symbol = cache_key.split(":")[0]
+            open_price = await _fetch_binance_open_price(symbol, start_utc, self._session)
+            if open_price is not None:
+                self._open_prices[cache_key] = open_price
+                del self._pending_open_requests[cache_key]
+
+        self._last_update = time.time()
+
+    def check_direction(self, question: str) -> dict | None:
         """Check the actual crypto direction for an Up/Down market.
 
-        Returns dict with:
-            - confirmed_side: "YES" (Up) or "NO" (Down) or None if uncertain
-            - current_price: float
-            - open_price: float
-            - change_pct: float (percentage change from open)
-            - symbol: str
-
-        Returns None if the question is not an Up/Down market or prices unavailable.
+        This method is SYNCHRONOUS and reads from cache only — no I/O.
+        Returns None if the question is not an Up/Down market or prices not yet cached.
         """
         parsed = parse_up_down_question(question)
         if not parsed:
             return None
 
-        session = await self._get_session()
         symbol = parsed["symbol"]
         start_utc = parsed["start_utc"]
 
-        # Get open price (cached)
-        cache_key = f"{symbol}:{int(start_utc.timestamp())}"
-        open_price = self._open_price_cache.get(cache_key)
-        if open_price is None:
-            open_price = await get_binance_open_price(symbol, start_utc, session)
-            if open_price is None:
-                return None
-            self._open_price_cache[cache_key] = open_price
+        # Register symbol for background polling
+        self._active_symbols.add(symbol)
 
-        # Get current price (cached for 2s to avoid rate limits)
-        cached = self._current_price_cache.get(symbol)
-        now = time.time()
-        if cached and (now - cached[1]) < self._current_price_ttl:
-            current_price = cached[0]
-        else:
-            current_price = await get_binance_price(symbol, session)
-            if current_price is None:
-                return None
-            self._current_price_cache[symbol] = (current_price, now)
+        # Get open price from cache
+        cache_key = f"{symbol}:{int(start_utc.timestamp())}"
+        open_price = self._open_prices.get(cache_key)
+        if open_price is None:
+            # Request it for next poll cycle
+            self._pending_open_requests[cache_key] = start_utc
+            return None
+
+        # Get current price from cache
+        current_price = self._current_prices.get(symbol)
+        if current_price is None:
+            return None
 
         # Calculate direction
         change_pct = ((current_price - open_price) / open_price) * 100
@@ -261,21 +278,10 @@ class PriceChecker:
         else:
             confirmed_side = "NO"  # Down
 
-        result = {
+        return {
             "confirmed_side": confirmed_side,
             "current_price": current_price,
             "open_price": open_price,
             "change_pct": round(change_pct, 4),
             "symbol": symbol,
         }
-
-        logger.debug(
-            "price_check",
-            symbol=symbol,
-            open_price=open_price,
-            current_price=current_price,
-            change_pct=f"{change_pct:.4f}%",
-            confirmed_side=confirmed_side,
-        )
-
-        return result
