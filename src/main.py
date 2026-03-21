@@ -62,6 +62,7 @@ class Bot:
         await asyncio.gather(
             self._run_websocket(),
             self._run_gamma_poller(),
+            self._run_resolution_checker(),
             self._run_stats_reporter(),
             self._run_data_exporter(),
             self._run_web_server(),
@@ -95,6 +96,40 @@ class Bot:
                 await self._discover_markets()
             except Exception as e:
                 self.log.error("gamma_poll_error", error=str(e))
+
+    async def _run_resolution_checker(self):
+        """Periodically check if tracked markets have resolved via Gamma API.
+
+        This catches resolutions missed by WebSocket (disconnections, restarts).
+        """
+        check_interval = 30  # Every 30 seconds
+        while self._running:
+            await asyncio.sleep(check_interval)
+            if not self._running:
+                break
+            try:
+                # Find markets past their end_date that aren't resolved yet
+                candidates = [
+                    m.condition_id
+                    for m in self.tracker.all_markets
+                    if not m.resolved
+                    and m.end_date is not None
+                    and m.hours_to_resolution == 0.0
+                ]
+                if not candidates:
+                    continue
+
+                resolved = await self.gamma.check_resolution(candidates)
+                for condition_id, winning_token_id in resolved.items():
+                    self.tracker.mark_resolved(condition_id, winning_token_id)
+
+                if resolved:
+                    self.log.info("resolution_check", resolved=len(resolved), checked=len(candidates))
+                    # Trigger detector to settle
+                    await self.detector.check("", "resolution_check")
+
+            except Exception as e:
+                self.log.error("resolution_check_error", error=str(e))
 
     async def _run_stats_reporter(self):
         """Periodically log statistics."""

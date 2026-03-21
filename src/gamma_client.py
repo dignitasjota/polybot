@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json as json_lib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,8 @@ class Market:
     enable_order_book: bool
     yes_price: float
     no_price: float
+    resolved: bool = False
+    winning_token_id: str = ""
 
     @property
     def best_token_price(self) -> float:
@@ -73,9 +76,12 @@ class GammaClient:
 
         Uses end_date_min + ascending order to get soonest-closing markets first,
         avoiding pagination through thousands of irrelevant markets.
+        Filters: enableOrderBook=true, has liquidity (price > 0).
         """
         session = await self._get_session()
         markets: list[Market] = []
+        skipped_no_book = 0
+        skipped_no_liquidity = 0
         offset = 0
         page_size = 100
         now = datetime.now(timezone.utc)
@@ -114,6 +120,14 @@ class GammaClient:
                         market = self._parse_market(item)
                         if market is None:
                             continue
+                        # Skip markets without order book
+                        if not market.enable_order_book:
+                            skipped_no_book += 1
+                            continue
+                        # Skip markets with no liquidity (both sides at 0)
+                        if market.yes_price <= 0 and market.no_price <= 0:
+                            skipped_no_liquidity += 1
+                            continue
                         markets.append(market)
 
                     if len(data) < page_size:
@@ -130,9 +144,82 @@ class GammaClient:
         logger.info(
             "gamma_markets_fetched",
             total_found=len(markets),
+            skipped_no_book=skipped_no_book,
+            skipped_no_liquidity=skipped_no_liquidity,
             max_time_to_resolution=str(max_time_to_resolution),
         )
         return markets
+
+    async def check_resolution(self, condition_ids: list[str]) -> dict[str, str]:
+        """Check if markets have resolved via Gamma API.
+
+        Returns dict of condition_id -> winning_token_id for resolved markets.
+        """
+        if not condition_ids:
+            return {}
+
+        session = await self._get_session()
+        resolved: dict[str, str] = {}
+
+        for condition_id in condition_ids:
+            try:
+                async with session.get(
+                    f"{GAMMA_API_URL}/markets",
+                    params={"condition_id": condition_id},
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    if not data:
+                        continue
+
+                    # Gamma returns a list, take first match
+                    item = data[0] if isinstance(data, list) else data
+
+                    # Check various resolution indicators
+                    is_resolved = item.get("resolved", False)
+                    is_closed = item.get("closed", False)
+
+                    if not (is_resolved or is_closed):
+                        continue
+
+                    # Try to determine the winner
+                    winning_token_id = ""
+
+                    # Check outcomePrices — after resolution, winner = 1.0, loser = 0.0
+                    outcome_prices_raw = item.get("outcomePrices", "[]")
+                    if isinstance(outcome_prices_raw, str):
+                        outcome_prices = json_lib.loads(outcome_prices_raw)
+                    else:
+                        outcome_prices = outcome_prices_raw or []
+
+                    clob_token_ids_raw = item.get("clobTokenIds", "[]")
+                    if isinstance(clob_token_ids_raw, str):
+                        clob_token_ids = json_lib.loads(clob_token_ids_raw)
+                    else:
+                        clob_token_ids = clob_token_ids_raw or []
+
+                    if len(outcome_prices) >= 2 and len(clob_token_ids) >= 2:
+                        for i, price_str in enumerate(outcome_prices):
+                            price = float(price_str)
+                            if price >= 0.99:  # Winner converges to 1.0
+                                winning_token_id = clob_token_ids[i]
+                                break
+
+                    if winning_token_id:
+                        resolved[condition_id] = winning_token_id
+                        logger.info(
+                            "gamma_resolution_detected",
+                            condition_id=condition_id[:16],
+                            question=item.get("question", "")[:60],
+                        )
+
+            except (aiohttp.ClientError, asyncio.TimeoutError, json_lib.JSONDecodeError) as e:
+                logger.debug("gamma_resolution_check_error", condition_id=condition_id[:16], error=str(e))
+                continue
+
+        return resolved
 
     def _parse_market(self, data: dict) -> Market | None:
         """Parse a market from the Gamma API response.

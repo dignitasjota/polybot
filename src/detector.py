@@ -41,6 +41,10 @@ class Opportunity:
     actual_pnl: float = 0.0  # Simulated P&L (positive = profit, negative = loss)
     resolved_at: float = 0.0  # Timestamp when outcome was determined
 
+    # Duration tracking
+    disappeared_at: float = 0.0  # When opportunity was no longer detected
+    duration_seconds: float = 0.0  # How long the opportunity lasted
+
 
 class ClosingArbitrageDetector:
     """Detects closing arbitrage opportunities.
@@ -61,6 +65,8 @@ class ClosingArbitrageDetector:
         self._opportunities_log: list[Opportunity] = []
         # Track last logged price per market+side to avoid spam
         self._last_logged: dict[str, float] = {}  # "condition_id:side" -> price
+        self._active_opportunities: dict[str, Opportunity] = {}  # "condition_id:side" -> latest opp
+        self._bet_placed: dict[str, Opportunity] = {}  # "condition_id:side" -> first bet (for paper trading)
         self._settled_conditions: set[str] = set()  # Already settled condition_ids
         self._stats = {
             "total_scans": 0,
@@ -74,6 +80,7 @@ class ClosingArbitrageDetector:
     async def check(self, token_id: str = "", event_type: str = ""):
         """Check all markets for closing arbitrage opportunities."""
         self._stats["total_scans"] += 1
+        still_active: set[str] = set()
 
         for market in self.tracker.all_markets:
             if market.is_stale:
@@ -86,53 +93,89 @@ class ClosingArbitrageDetector:
                 continue
 
             # Check pre-resolution (higher risk, token priced high)
-            self._check_pre_resolution(market)
+            self._check_pre_resolution(market, still_active)
+
+        # Mark disappeared opportunities (were active, no longer detected)
+        now = time.time()
+        for key in list(self._active_opportunities):
+            if key not in still_active:
+                opp = self._active_opportunities.pop(key)
+                if opp.disappeared_at == 0:
+                    opp.disappeared_at = now
+                    opp.duration_seconds = round(now - opp.timestamp, 1)
+                    logger.info(
+                        "opportunity_disappeared",
+                        question=opp.question[:60],
+                        side=opp.token_side,
+                        price=f"${opp.token_price:.4f}",
+                        duration=f"{opp.duration_seconds:.0f}s",
+                    )
 
     def _settle_pending(self, market: MarketState):
-        """When a market resolves, check all pre-resolution opportunities and mark win/loss."""
+        """When a market resolves, settle the paper trading bet for this market.
+
+        Only the FIRST bet per market+side counts (stored in _bet_placed).
+        All log entries for the same market get their outcome updated for display.
+        """
         if market.condition_id in self._settled_conditions:
             return
         self._settled_conditions.add(market.condition_id)
 
         winning_id = market.winning_token_id
         winning_side = "YES" if winning_id == market.yes_token_id else "NO"
+        now = time.time()
 
-        for opp in self._opportunities_log:
-            if opp.condition_id != market.condition_id or opp.outcome != "pending":
-                continue
+        # Find bet(s) placed for this market (one per side max)
+        bets_for_market = {
+            k: v for k, v in self._bet_placed.items()
+            if v.condition_id == market.condition_id
+        }
 
-            opp.resolved_at = time.time()
-
-            if opp.token_side == winning_side:
-                # Win: we bought at token_price, redeemed at $1.00
-                # Profit per share = margin_net (already accounts for fees + gas)
-                shares = opp.suggested_bet / opp.token_price if opp.token_price > 0 else 0
-                opp.actual_pnl = round(shares * opp.margin_net, 2)
-                opp.outcome = "win"
+        for key, bet_opp in bets_for_market.items():
+            if bet_opp.token_side == winning_side:
+                shares = bet_opp.suggested_bet / bet_opp.token_price if bet_opp.token_price > 0 else 0
+                pnl = round(shares * bet_opp.margin_net, 2)
+                outcome = "win"
                 self._stats["settled_wins"] += 1
             else:
-                # Loss: we bought the wrong side, token goes to $0
-                opp.actual_pnl = round(-opp.suggested_bet, 2)
-                opp.outcome = "loss"
+                pnl = round(-bet_opp.suggested_bet, 2)
+                outcome = "loss"
                 self._stats["settled_losses"] += 1
 
-            self._balance = round(self._balance + opp.actual_pnl, 2)
-            self._stats["simulated_pnl"] = round(
-                self._stats["simulated_pnl"] + opp.actual_pnl, 2
-            )
+            self._balance = round(self._balance + pnl, 2)
+            self._stats["simulated_pnl"] = round(self._stats["simulated_pnl"] + pnl, 2)
 
             logger.info(
                 "opportunity_settled",
-                outcome=opp.outcome,
-                question=opp.question[:80],
-                side=opp.token_side,
+                outcome=outcome,
+                question=bet_opp.question[:80],
+                side=bet_opp.token_side,
                 winning_side=winning_side,
-                price=f"${opp.token_price:.4f}",
-                bet=f"${opp.suggested_bet:.2f}",
-                pnl=f"${opp.actual_pnl:+.2f}",
+                price=f"${bet_opp.token_price:.4f}",
+                bet=f"${bet_opp.suggested_bet:.2f}",
+                pnl=f"${pnl:+.2f}",
                 balance=f"${self._balance:.2f}",
                 cumulative_pnl=f"${self._stats['simulated_pnl']:+.2f}",
             )
+
+            # Update the bet opportunity object
+            bet_opp.outcome = outcome
+            bet_opp.actual_pnl = pnl
+            bet_opp.resolved_at = now
+            if bet_opp.duration_seconds == 0:
+                bet_opp.duration_seconds = round(now - bet_opp.timestamp, 1)
+
+        # Mark ALL log entries for this market with the outcome (for display)
+        for opp in self._opportunities_log:
+            if opp.condition_id != market.condition_id or opp.outcome != "pending":
+                continue
+            side_outcome = "win" if opp.token_side == winning_side else "loss"
+            opp.outcome = side_outcome
+            opp.resolved_at = now
+            if opp.duration_seconds == 0:
+                opp.duration_seconds = round(now - opp.timestamp, 1)
+            # Only the original bet has actual_pnl; price updates show 0
+            # (their suggested_bet was already zeroed in _log_opportunity)
 
     def _check_resolved_market(self, market: MarketState):
         """Post-resolution: the winner is known, buy if price < $1.00."""
@@ -174,7 +217,7 @@ class ClosingArbitrageDetector:
 
         self._log_opportunity(opp)
 
-    def _check_pre_resolution(self, market: MarketState):
+    def _check_pre_resolution(self, market: MarketState, still_active: set[str]):
         """Pre-resolution: look for tokens priced >= min probability for their time remaining."""
         hours = market.hours_to_resolution
         if hours is None:
@@ -185,10 +228,12 @@ class ClosingArbitrageDetector:
         # Check YES side
         if market.best_ask_yes >= min_prob:
             self._evaluate_side(market, is_yes=True, min_prob=min_prob, hours_remaining=hours)
+            still_active.add(f"{market.condition_id}:YES")
 
         # Check NO side
         if market.best_ask_no >= min_prob:
             self._evaluate_side(market, is_yes=False, min_prob=min_prob, hours_remaining=hours)
+            still_active.add(f"{market.condition_id}:NO")
 
     def _evaluate_side(self, market: MarketState, is_yes: bool, min_prob: float = 0.95, hours_remaining: float = 0.0):
         price = market.best_ask_yes if is_yes else market.best_ask_no
@@ -270,6 +315,18 @@ class ClosingArbitrageDetector:
             return  # Same price, skip logging
 
         self._last_logged[key] = opp.token_price
+        self._active_opportunities[key] = opp
+
+        # For paper trading: only place ONE bet per market+side (first detection)
+        # Subsequent price changes are logged but don't create new bets
+        is_new_bet = key not in self._bet_placed
+        if is_new_bet:
+            self._bet_placed[key] = opp
+        else:
+            # Not a new bet — log the price update but zero out the bet
+            opp.suggested_bet = 0.0
+            opp.potential_profit = 0.0
+
         self._opportunities_log.append(opp)
         self._stats["opportunities_found"] += 1
         if opp.resolved:
@@ -333,6 +390,8 @@ class ClosingArbitrageDetector:
                 "outcome": o.outcome,
                 "actual_pnl": o.actual_pnl,
                 "resolved_at": o.resolved_at,
+                "disappeared_at": o.disappeared_at,
+                "duration_seconds": o.duration_seconds,
             }
             for o in self._opportunities_log
         ]
@@ -342,19 +401,37 @@ class ClosingArbitrageDetector:
         opportunities = self.export_opportunities()
         stats = self.get_stats()
 
-        settled = [o for o in opportunities if o["outcome"] != "pending"]
-        wins = [o for o in settled if o["outcome"] == "win"]
-        losses = [o for o in settled if o["outcome"] == "loss"]
-        pending = [o for o in opportunities if o["outcome"] == "pending"]
+        # Use _bet_placed for P&L calculations (one bet per market+side)
+        bets = [
+            {
+                "condition_id": o.condition_id,
+                "question": o.question,
+                "token_side": o.token_side,
+                "token_price": o.token_price,
+                "margin_net": o.margin_net,
+                "suggested_bet": o.suggested_bet,
+                "outcome": o.outcome,
+                "actual_pnl": o.actual_pnl,
+                "resolved_at": o.resolved_at,
+                "duration_seconds": o.duration_seconds,
+                "hours_remaining": o.hours_remaining,
+            }
+            for o in self._bet_placed.values()
+        ]
 
-        # Per-market breakdown
+        settled_bets = [b for b in bets if b["outcome"] != "pending"]
+        wins = [b for b in settled_bets if b["outcome"] == "win"]
+        losses = [b for b in settled_bets if b["outcome"] == "loss"]
+        pending_bets = [b for b in bets if b["outcome"] == "pending"]
+
+        # Per-market breakdown (from bets only)
         markets: dict[str, dict] = {}
-        for o in opportunities:
-            key = o["condition_id"]
+        for b in bets:
+            key = b["condition_id"]
             if key not in markets:
                 markets[key] = {
-                    "question": o["question"],
-                    "opportunities": 0,
+                    "question": b["question"],
+                    "bets": 0,
                     "wins": 0,
                     "losses": 0,
                     "pending": 0,
@@ -362,21 +439,26 @@ class ClosingArbitrageDetector:
                     "total_bet": 0.0,
                 }
             m = markets[key]
-            m["opportunities"] += 1
-            m[o["outcome"] + "s" if o["outcome"] != "pending" else "pending"] += 1
-            m["total_pnl"] = round(m["total_pnl"] + o["actual_pnl"], 2)
-            m["total_bet"] = round(m["total_bet"] + o["suggested_bet"], 2)
+            m["bets"] += 1
+            if b["outcome"] == "win":
+                m["wins"] += 1
+            elif b["outcome"] == "loss":
+                m["losses"] += 1
+            else:
+                m["pending"] += 1
+            m["total_pnl"] = round(m["total_pnl"] + b["actual_pnl"], 2)
+            m["total_bet"] = round(m["total_bet"] + b["suggested_bet"], 2)
 
-        # Balance history (chronological P&L curve)
+        # Balance history (chronological P&L curve from settled bets)
         balance_history = []
         running_balance = self._starting_balance
-        for o in settled:
-            running_balance = round(running_balance + o["actual_pnl"], 2)
+        for b in sorted(settled_bets, key=lambda x: x["resolved_at"]):
+            running_balance = round(running_balance + b["actual_pnl"], 2)
             balance_history.append({
-                "timestamp": o["resolved_at"],
-                "question": o["question"][:60],
-                "outcome": o["outcome"],
-                "pnl": o["actual_pnl"],
+                "timestamp": b["resolved_at"],
+                "question": b["question"][:60],
+                "outcome": b["outcome"],
+                "pnl": b["actual_pnl"],
                 "balance": running_balance,
             })
 
@@ -390,11 +472,17 @@ class ClosingArbitrageDetector:
             if dd > max_drawdown:
                 max_drawdown = dd
 
-        # Average margins
-        avg_margin_net = sum(o["margin_net"] for o in opportunities) / len(opportunities) if opportunities else 0
-        avg_margin_wins = sum(o["margin_net"] for o in wins) / len(wins) if wins else 0
-        avg_margin_losses = sum(o["margin_net"] for o in losses) / len(losses) if losses else 0
-        avg_price = sum(o["token_price"] for o in opportunities) / len(opportunities) if opportunities else 0
+        # Duration stats (from bets)
+        durations = [b["duration_seconds"] for b in bets if b["duration_seconds"] > 0]
+        avg_duration = sum(durations) / len(durations) if durations else 0
+        min_duration = min(durations) if durations else 0
+        max_duration = max(durations) if durations else 0
+
+        # Average margins (from bets)
+        avg_margin_net = sum(b["margin_net"] for b in bets) / len(bets) if bets else 0
+        avg_margin_wins = sum(b["margin_net"] for b in wins) / len(wins) if wins else 0
+        avg_margin_losses = sum(b["margin_net"] for b in losses) / len(losses) if losses else 0
+        avg_price = sum(b["token_price"] for b in bets) / len(bets) if bets else 0
 
         return {
             "exported_at": time.time(),
@@ -412,25 +500,30 @@ class ClosingArbitrageDetector:
                 "current_balance": self._balance,
                 "total_pnl": stats["simulated_pnl"],
                 "roi_pct": stats["roi_pct"],
-                "total_opportunities": len(opportunities),
-                "settled": len(settled),
+                "total_bets": len(bets),
+                "total_price_updates": len(opportunities),
+                "settled": len(settled_bets),
                 "wins": len(wins),
                 "losses": len(losses),
-                "pending": len(pending),
-                "win_rate_pct": round(len(wins) / len(settled) * 100, 1) if settled else 0,
-                "avg_win_pnl": round(sum(o["actual_pnl"] for o in wins) / len(wins), 2) if wins else 0,
-                "avg_loss_pnl": round(sum(o["actual_pnl"] for o in losses) / len(losses), 2) if losses else 0,
-                "best_trade": round(max((o["actual_pnl"] for o in settled), default=0), 2),
-                "worst_trade": round(min((o["actual_pnl"] for o in settled), default=0), 2),
+                "pending": len(pending_bets),
+                "win_rate_pct": round(len(wins) / len(settled_bets) * 100, 1) if settled_bets else 0,
+                "avg_win_pnl": round(sum(b["actual_pnl"] for b in wins) / len(wins), 2) if wins else 0,
+                "avg_loss_pnl": round(sum(b["actual_pnl"] for b in losses) / len(losses), 2) if losses else 0,
+                "best_trade": round(max((b["actual_pnl"] for b in settled_bets), default=0), 2),
+                "worst_trade": round(min((b["actual_pnl"] for b in settled_bets), default=0), 2),
                 "max_drawdown_pct": round(max_drawdown, 2),
                 "avg_token_price": round(avg_price, 4),
                 "avg_margin_net": round(avg_margin_net, 4),
                 "avg_margin_wins": round(avg_margin_wins, 4),
                 "avg_margin_losses": round(avg_margin_losses, 4),
-                "total_wagered": round(sum(o["suggested_bet"] for o in settled), 2),
+                "total_wagered": round(sum(b["suggested_bet"] for b in settled_bets), 2),
                 "unique_markets": len(markets),
+                "avg_duration_seconds": round(avg_duration, 1),
+                "min_duration_seconds": round(min_duration, 1),
+                "max_duration_seconds": round(max_duration, 1),
             },
             "balance_history": balance_history,
             "by_market": list(markets.values()),
+            "bets": bets,
             "opportunities": opportunities,
         }

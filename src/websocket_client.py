@@ -5,6 +5,7 @@ import json
 import random
 import time
 
+import aiohttp
 import structlog
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
@@ -13,6 +14,7 @@ from src.config import WebSocketConfig
 from src.market_tracker import MarketTracker
 
 WS_MARKET_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+CLOB_REST_URL = "https://clob.polymarket.com"
 
 logger = structlog.get_logger("polymarket.websocket")
 
@@ -29,13 +31,18 @@ class WebSocketClient:
         self._reconnect_attempt = 0
         self._last_pong: float = 0
         self._on_opportunity_callback = None
+        self._fallback_active = False
+        self._http_session: aiohttp.ClientSession | None = None
 
     def on_opportunity(self, callback):
         """Register a callback for when opportunity-relevant data arrives."""
         self._on_opportunity_callback = callback
 
     async def start(self):
-        """Start the WebSocket connection with auto-reconnection."""
+        """Start the WebSocket connection with auto-reconnection.
+
+        When WS is disconnected, falls back to REST polling to keep prices updated.
+        """
         self._running = True
         while self._running:
             try:
@@ -51,7 +58,8 @@ class WebSocketClient:
                     reconnect_in_ms=delay,
                     attempt=self._reconnect_attempt,
                 )
-                await asyncio.sleep(delay / 1000)
+                # Fallback REST polling while reconnecting
+                await self._run_rest_fallback(delay / 1000)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -59,13 +67,16 @@ class WebSocketClient:
                 if not self._running:
                     break
                 logger.error("ws_unexpected_error", error=str(e), type=type(e).__name__)
-                await asyncio.sleep(2)
+                await self._run_rest_fallback(2.0)
 
     async def stop(self):
         """Stop the WebSocket connection."""
         self._running = False
+        self._fallback_active = False
         if self._ws:
             await self._ws.close()
+        if self._http_session and not self._http_session.closed:
+            await self._http_session.close()
 
     @property
     def is_connected(self) -> bool:
@@ -239,6 +250,67 @@ class WebSocketClient:
                 "market_resolved_incomplete",
                 event_keys=list(event.keys()),
             )
+
+    async def _run_rest_fallback(self, duration_seconds: float):
+        """Poll REST API for prices while WS is disconnected.
+
+        Runs for `duration_seconds` then returns so WS can try reconnecting.
+        """
+        token_ids = self.tracker.all_token_ids
+        if not token_ids:
+            await asyncio.sleep(duration_seconds)
+            return
+
+        self._fallback_active = True
+        interval = self.config.fallback_rest_interval_ms / 1000.0
+        logger.info("rest_fallback_started", tokens=len(token_ids), interval_ms=self.config.fallback_rest_interval_ms)
+
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession()
+
+        deadline = time.time() + duration_seconds
+        polls = 0
+        while self._running and time.time() < deadline:
+            try:
+                await self._poll_rest_prices(token_ids)
+                polls += 1
+            except Exception as e:
+                logger.debug("rest_fallback_error", error=str(e))
+            await asyncio.sleep(interval)
+
+        self._fallback_active = False
+        if polls > 0:
+            logger.info("rest_fallback_stopped", polls=polls)
+
+    async def _poll_rest_prices(self, token_ids: list[str]):
+        """Fetch current prices from CLOB REST API for all tracked tokens."""
+        assert self._http_session is not None
+        for token_id in token_ids:
+            try:
+                async with self._http_session.get(
+                    f"{CLOB_REST_URL}/price",
+                    params={"token_id": token_id, "side": "buy"},
+                    timeout=aiohttp.ClientTimeout(total=3),
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    price = float(data.get("price", 0))
+                    if price > 0:
+                        state = self.tracker.get_by_token(token_id)
+                        if state:
+                            is_yes = token_id == state.yes_token_id
+                            if is_yes:
+                                state.best_ask_yes = price
+                            else:
+                                state.best_ask_no = price
+                            state.last_update = time.time()
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                continue
+
+        # Trigger detector after REST update
+        if self._on_opportunity_callback:
+            await self._on_opportunity_callback("", "rest_fallback")
 
     def _get_reconnect_delay(self) -> int:
         """Calculate reconnect delay with exponential backoff and jitter."""

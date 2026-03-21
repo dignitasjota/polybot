@@ -102,6 +102,9 @@ async def handle_dashboard(request: web.Request) -> web.Response:
             outcome_badge = '<span class="badge pending">PENDING</span>'
             pnl_class = ""
 
+        dur = o.get('duration_seconds', 0)
+        dur_str = f"{dur:.0f}s" if dur > 0 else "-"
+
         opps_html += f"""
         <tr class="{resolved_class}">
             <td>{ts}</td>
@@ -114,6 +117,7 @@ async def handle_dashboard(request: web.Request) -> web.Response:
             <td>{o['depth_at_price']:.0f}</td>
             <td>${suggested_bet:.2f}</td>
             <td class="profit">${potential_profit:.2f}</td>
+            <td>{dur_str}</td>
             <td>{"RESOLVED" if o['resolved'] else "PRE"}</td>
             <td>{outcome_badge}</td>
             <td class="{pnl_class}">{f'${actual_pnl:+.2f}' if outcome != 'pending' else '-'}</td>
@@ -181,7 +185,7 @@ async def handle_dashboard(request: web.Request) -> web.Response:
     <div class="stats">
         <div class="stat">
             <div class="label">WS Status</div>
-            <div class="value{'' if bot.ws_client.is_connected else ' off'}">{'LIVE' if bot.ws_client.is_connected else 'DOWN'}</div>
+            <div class="value{'' if bot.ws_client.is_connected else ' warn' if bot.ws_client._fallback_active else ' off'}">{'LIVE' if bot.ws_client.is_connected else 'REST' if bot.ws_client._fallback_active else 'DOWN'}</div>
         </div>
         <div class="stat">
             <div class="label">Markets</div>
@@ -243,13 +247,14 @@ async def handle_dashboard(request: web.Request) -> web.Response:
                 <th>Depth</th>
                 <th>Bet</th>
                 <th>Profit</th>
+                <th>Duration</th>
                 <th>Type</th>
                 <th>Result</th>
                 <th>P&L</th>
             </tr>
         </thead>
         <tbody>
-            {opps_html if opps_html else '<tr><td colspan="13" style="color:#555;text-align:center;padding:20px;">No opportunities detected yet...</td></tr>'}
+            {opps_html if opps_html else '<tr><td colspan="14" style="color:#555;text-align:center;padding:20px;">No opportunities detected yet...</td></tr>'}
         </tbody>
     </table>
 
