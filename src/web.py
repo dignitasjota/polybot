@@ -74,24 +74,42 @@ async def handle_dashboard(request: web.Request) -> web.Response:
             <td>{resolved_badge}</td>
         </tr>"""
 
-    # Build opportunities
-    opps_html = ""
-    for o in reversed(opportunities[-50:]):
-        ts = datetime.fromtimestamp(o["timestamp"], tz=tz_display).strftime("%H:%M:%S")
-        hours = o.get("hours_remaining", 0)
-        if hours < 1:
-            time_left = f"{hours * 60:.0f}min"
+    # Group opportunities: bets (suggested_bet > 0) with their price updates
+    grouped: dict[str, dict] = {}  # "condition_id:side" -> {"bet": opp, "updates": [opp, ...]}
+    for o in opportunities:
+        key = f"{o['condition_id']}:{o['token_side']}"
+        if key not in grouped:
+            grouped[key] = {"bet": None, "updates": []}
+        if o.get("suggested_bet", 0) > 0:
+            grouped[key]["bet"] = o
         else:
-            time_left = f"{hours:.1f}h"
+            grouped[key]["updates"].append(o)
 
-        margin_pct = o["margin_net"] / o["token_price"] * 100 if o["token_price"] > 0 else 0
-        resolved_class = "resolved-row" if o["resolved"] else ""
-        min_prob = o.get("min_probability_required", 0)
+    # Sort groups by bet timestamp descending (newest first), limit to last 50
+    sorted_groups = sorted(
+        grouped.values(),
+        key=lambda g: g["bet"]["timestamp"] if g["bet"] else 0,
+        reverse=True,
+    )[:50]
 
-        suggested_bet = o.get('suggested_bet', 0)
-        potential_profit = o.get('potential_profit', 0)
-        outcome = o.get('outcome', 'pending')
-        actual_pnl = o.get('actual_pnl', 0)
+    opps_html = ""
+    group_idx = 0
+    for group in sorted_groups:
+        bet = group["bet"]
+        updates = group["updates"]
+
+        if bet is None:
+            continue
+
+        # Render the main bet row
+        ts = datetime.fromtimestamp(bet["timestamp"], tz=tz_display).strftime("%H:%M:%S")
+        hours = bet.get("hours_remaining", 0)
+        time_left = f"{hours * 60:.0f}min" if hours < 1 else f"{hours:.1f}h"
+        margin_pct = bet["margin_net"] / bet["token_price"] * 100 if bet["token_price"] > 0 else 0
+        resolved_class = "resolved-row" if bet["resolved"] else ""
+        min_prob = bet.get("min_probability_required", 0)
+        outcome = bet.get("outcome", "pending")
+        actual_pnl = bet.get("actual_pnl", 0)
 
         if outcome == "win":
             outcome_badge = '<span class="badge win">WIN</span>'
@@ -103,26 +121,60 @@ async def handle_dashboard(request: web.Request) -> web.Response:
             outcome_badge = '<span class="badge pending">PENDING</span>'
             pnl_class = ""
 
-        dur = o.get('duration_seconds', 0)
+        dur = bet.get("duration_seconds", 0)
         dur_str = f"{dur:.0f}s" if dur > 0 else "-"
 
+        # Toggle button if there are price updates
+        toggle = ""
+        if updates:
+            toggle = f'<span class="toggle-btn" onclick="toggleUpdates({group_idx})">+ {len(updates)}</span>'
+
         opps_html += f"""
-        <tr class="{resolved_class}">
-            <td>{ts}</td>
-            <td class="question">{_esc(o['question'][:60])}</td>
-            <td>{o['token_side']}</td>
-            <td>${o['token_price']:.4f}</td>
-            <td>${o['margin_net']:.4f} <span class="pct">({margin_pct:.2f}%)</span></td>
+        <tr class="{resolved_class} bet-row">
+            <td>{ts} {toggle}</td>
+            <td class="question">{_esc(bet['question'][:60])}</td>
+            <td>{bet['token_side']}</td>
+            <td>${bet['token_price']:.4f}</td>
+            <td>${bet['margin_net']:.4f} <span class="pct">({margin_pct:.2f}%)</span></td>
             <td>{time_left}</td>
             <td>{min_prob:.2f}</td>
-            <td>{o['depth_at_price']:.0f}</td>
-            <td>${suggested_bet:.2f}</td>
-            <td class="profit">${potential_profit:.2f}</td>
+            <td>{bet['depth_at_price']:.0f}</td>
+            <td>${bet['suggested_bet']:.2f}</td>
+            <td class="profit">${bet['potential_profit']:.2f}</td>
             <td>{dur_str}</td>
-            <td>{"RESOLVED" if o['resolved'] else "PRE"}</td>
+            <td>{"RESOLVED" if bet['resolved'] else "PRE"}</td>
             <td>{outcome_badge}</td>
             <td class="{pnl_class}">{f'${actual_pnl:+.2f}' if outcome != 'pending' else '-'}</td>
         </tr>"""
+
+        # Render hidden price update rows
+        for u in updates:
+            u_ts = datetime.fromtimestamp(u["timestamp"], tz=tz_display).strftime("%H:%M:%S")
+            u_hours = u.get("hours_remaining", 0)
+            u_time_left = f"{u_hours * 60:.0f}min" if u_hours < 1 else f"{u_hours:.1f}h"
+            u_margin_pct = u["margin_net"] / u["token_price"] * 100 if u["token_price"] > 0 else 0
+            u_dur = u.get("duration_seconds", 0)
+            u_dur_str = f"{u_dur:.0f}s" if u_dur > 0 else "-"
+
+            opps_html += f"""
+        <tr class="update-row update-group-{group_idx}">
+            <td class="update-indent">{u_ts}</td>
+            <td class="question update-text">{_esc(u['question'][:60])}</td>
+            <td>{u['token_side']}</td>
+            <td>${u['token_price']:.4f}</td>
+            <td>${u['margin_net']:.4f} <span class="pct">({u_margin_pct:.2f}%)</span></td>
+            <td>{u_time_left}</td>
+            <td>{u.get('min_probability_required', 0):.2f}</td>
+            <td>{u['depth_at_price']:.0f}</td>
+            <td>-</td>
+            <td>-</td>
+            <td>{u_dur_str}</td>
+            <td>{"RESOLVED" if u['resolved'] else "PRE"}</td>
+            <td></td>
+            <td></td>
+        </tr>"""
+
+        group_idx += 1
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -171,6 +223,18 @@ async def handle_dashboard(request: web.Request) -> web.Response:
     .badge.pending {{ background: #555; color: #ccc; }}
     .pnl-win {{ color: #00ff88; font-weight: bold; }}
     .pnl-loss {{ color: #ff4444; font-weight: bold; }}
+    .bet-row {{ border-left: 3px solid #00aaff; }}
+    .toggle-btn {{
+        cursor: pointer; color: #00aaff; font-size: 0.75em;
+        background: #1a1a2e; border: 1px solid #333; border-radius: 3px;
+        padding: 1px 5px; margin-left: 6px; user-select: none;
+    }}
+    .toggle-btn:hover {{ background: #2a2a4e; }}
+    .update-row {{ display: none; }}
+    .update-row.visible {{ display: table-row; }}
+    .update-row td {{ color: #666; font-size: 0.8em; border-left: 3px solid #333; }}
+    .update-indent {{ padding-left: 20px !important; }}
+    .update-text {{ color: #555 !important; }}
     .footer {{ color: #444; font-size: 0.75em; margin-top: 20px; }}
     @media (max-width: 768px) {{
         table {{ font-size: 0.7em; }}
@@ -280,6 +344,18 @@ async def handle_dashboard(request: web.Request) -> web.Response:
         API: <a href="/api/opportunities" style="color:#00aaff">/api/opportunities</a> |
         <a href="/api/report" style="color:#00aaff">/api/report</a> (full report for analysis)
     </div>
+
+    <script>
+    function toggleUpdates(groupIdx) {{
+        const rows = document.querySelectorAll('.update-group-' + groupIdx);
+        const btn = event.currentTarget;
+        const isVisible = rows.length > 0 && rows[0].classList.contains('visible');
+        rows.forEach(r => r.classList.toggle('visible'));
+        btn.textContent = isVisible
+            ? '+ ' + rows.length
+            : '− ' + rows.length;
+    }}
+    </script>
 </body>
 </html>"""
 

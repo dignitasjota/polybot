@@ -9,23 +9,39 @@ max_time_to_resolution = "24h"    # Solo mercados que resuelven en <24h
 min_margin_net = 0.008            # Margen minimo por share tras fees ($0.008)
 
 # Probabilidad minima escalada segun tiempo restante
-# Cuanto mas tiempo falta, mas certeza exigimos
-# Formato: cada entrada es [horas_limite, probabilidad_minima]
-# Se evalua de arriba a abajo: la primera que cumpla (tiempo < horas_limite) aplica
+# Cuanto menos tiempo queda, mas agresivos somos (menos prob exigimos)
+# porque hay menos probabilidad de que se de la vuelta
+# Se evalua de arriba a abajo: la primera que cumpla (tiempo < max_hours) aplica
+[[strategy.probability_tiers]]
+max_hours = 0.08   # < 5 min — casi seguro, muy agresivo
+min_probability = 0.80
+
+[[strategy.probability_tiers]]
+max_hours = 0.25   # < 15 min
+min_probability = 0.85
+
 [[strategy.probability_tiers]]
 max_hours = 0.5    # < 30 min
+min_probability = 0.88
+
+[[strategy.probability_tiers]]
+max_hours = 1      # < 1h
+min_probability = 0.91
+
+[[strategy.probability_tiers]]
+max_hours = 2      # 1h - 2h
 min_probability = 0.93
 
 [[strategy.probability_tiers]]
-max_hours = 2      # 30 min - 2h
+max_hours = 6      # 2h - 6h
 min_probability = 0.95
 
 [[strategy.probability_tiers]]
-max_hours = 6      # 2h - 6h
+max_hours = 12     # 6h - 12h
 min_probability = 0.97
 
 [[strategy.probability_tiers]]
-max_hours = 24     # 6h - 24h
+max_hours = 24     # 12h - 24h
 min_probability = 0.99
 
 [risk]
@@ -34,14 +50,14 @@ max_bet_per_trade = 200.0         # Tope absoluto por trade ($) — aplica aunqu
 max_position_per_market = 400.0   # Exposicion maxima por mercado ($)
 max_total_exposure = 1000.0       # Exposicion total abierta ($)
 max_daily_loss = 100.0            # Stop-loss diario ($)
-max_concurrent_positions = 20      # Posiciones abiertas simultaneas
+max_concurrent_positions = 25     # Posiciones abiertas simultaneas
 kill_switch = false               # true = detener todo inmediatamente
 simulated_balance = 1000.0         # Capital inicial simulado para paper trading ($)
 
 [data]
 stale_data_threshold_seconds = 5  # Pausar si datos >5s antiguos
 gamma_poll_interval_seconds = 300 # Polling Gamma API cada 5 min
-max_markets_monitored = 20        # Maximo mercados a monitorear
+max_markets_monitored = 200        # Maximo mercados a monitorear
 
 [websocket]
 ping_interval_seconds = 10
