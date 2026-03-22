@@ -7,6 +7,7 @@ import structlog
 
 from src.config import AccountConfig, Config, StrategyConfig, DataConfig, WebSocketConfig
 from src.copy_trader import CopyTrader
+from src.db import get_wallet_overrides
 from src.detector import ClosingArbitrageDetector
 from src.executor import Executor, ExecutionMode
 from src.gamma_client import GammaClient
@@ -117,6 +118,10 @@ class AccountRunner:
 
     async def _start_copy_trade(self):
         """Start copy-trading strategy."""
+        # Load wallet overrides (roles + enabled) from DB
+        overrides = await get_wallet_overrides()
+        self.copy_trader.set_wallet_overrides(overrides)
+
         # Wire callback: copy trader -> executor
         self.copy_trader.on_opportunity(self.executor.execute)
         await self.copy_trader.start()

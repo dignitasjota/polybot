@@ -15,6 +15,15 @@ from src.web.config_manager import ConfigManager
 routes = web.RouteTableDef()
 
 
+async def _sync_wallet_overrides_to_copy_trader(request: web.Request):
+    """Push updated wallet roles/enabled to live CopyTrader instances."""
+    overrides = await get_wallet_overrides()
+    bot = request.app["bot"]
+    for runner in bot.accounts:
+        if runner.strategy_type == "copy_trade" and runner.copy_trader:
+            runner.copy_trader.set_wallet_overrides(overrides)
+
+
 def _get_cm(request: web.Request) -> ConfigManager:
     bot = request.app["bot"]
     if "config_manager" not in request.app:
@@ -50,6 +59,8 @@ async def panel_copy_trade(request: web.Request) -> web.Response:
             "address": addr,
             "alias": ov.get("alias", ""),
             "enabled": ov.get("enabled", True),
+            "role": ov.get("role", "primary"),
+            "confirms_wallet": ov.get("confirms_wallet", ""),
         })
     # Add wallets only in overrides (added via panel, not yet in TOML)
     for addr, ov in overrides.items():
@@ -58,6 +69,8 @@ async def panel_copy_trade(request: web.Request) -> web.Response:
                 "address": addr,
                 "alias": ov.get("alias", ""),
                 "enabled": ov.get("enabled", True),
+                "role": ov.get("role", "primary"),
+                "confirms_wallet": ov.get("confirms_wallet", ""),
             })
 
     ctx.update({
@@ -79,23 +92,54 @@ async def panel_copy_wallets(request: web.Request) -> web.Response:
 
     if action == "add" and address:
         alias = data.get("alias", "").strip()
+        role = data.get("role", "primary")
         cm.add_copy_wallet(address)
-        await set_wallet_override(address, alias=alias, enabled=True)
-        await add_audit(user, "wallet_add", f"{address} alias={alias}")
+        await set_wallet_override(address, alias=alias, enabled=True, role=role)
+        await _sync_wallet_overrides_to_copy_trader(request)
+        await add_audit(user, "wallet_add", f"{address} alias={alias} role={role}")
         msg = f'<div class="flash flash-success">Wallet added: {address[:10]}...</div>'
 
     elif action == "remove" and address:
         cm.remove_copy_wallet(address)
         await remove_wallet_override(address)
+        await _sync_wallet_overrides_to_copy_trader(request)
         await add_audit(user, "wallet_remove", address)
         msg = f'<div class="flash flash-success">Wallet removed: {address[:10]}...</div>'
 
     elif action == "toggle" and address:
         enabled = data.get("enabled", "true").lower() == "true"
-        await set_wallet_override(address, enabled=enabled)
+        # Preserve existing fields
+        overrides = await get_wallet_overrides()
+        existing = overrides.get(address, {})
+        await set_wallet_override(
+            address,
+            alias=existing.get("alias", ""),
+            enabled=enabled,
+            role=existing.get("role", "primary"),
+            confirms_wallet=existing.get("confirms_wallet", ""),
+        )
+        await _sync_wallet_overrides_to_copy_trader(request)
         await add_audit(user, "wallet_toggle", f"{address} enabled={enabled}")
         state = "enabled" if enabled else "disabled"
         msg = f'<div class="flash flash-info">Wallet {state}: {address[:10]}...</div>'
+
+    elif action == "set_role" and address:
+        role = data.get("role", "primary")
+        if role not in ("primary", "confirmation"):
+            role = "primary"
+        confirms_wallet = data.get("confirms_wallet", "").strip().lower()
+        overrides = await get_wallet_overrides()
+        existing = overrides.get(address, {})
+        await set_wallet_override(
+            address,
+            alias=existing.get("alias", ""),
+            enabled=existing.get("enabled", True),
+            role=role,
+            confirms_wallet=confirms_wallet if role == "confirmation" else "",
+        )
+        await _sync_wallet_overrides_to_copy_trader(request)
+        await add_audit(user, "wallet_role", f"{address} role={role} confirms={confirms_wallet}")
+        msg = f'<div class="flash flash-info">Wallet role updated: {address[:10]}...</div>'
 
     else:
         msg = '<div class="flash flash-error">Invalid action</div>'

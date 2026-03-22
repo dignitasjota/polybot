@@ -7,12 +7,16 @@
 {# Wallets section #}
 <div class="section">
     <h3>TARGET WALLETS</h3>
+    <p class="desc" style="margin-bottom:10px;">
+        <b>Primary</b>: se copia directamente. <b>Confirmation</b>: solo copia si la primary asignada ya aposto el mismo lado.
+    </p>
     <div id="wallet-list">
     <table>
         <thead>
             <tr>
                 <th>Address</th>
                 <th>Alias</th>
+                <th>Role</th>
                 <th>Enabled</th>
                 <th>Actions</th>
             </tr>
@@ -22,6 +26,36 @@
             <tr>
                 <td style="font-size:0.75em;">{{ w.address }}</td>
                 <td>{{ w.alias }}</td>
+                <td style="white-space:nowrap;">
+                    <form style="display:inline;">
+                        <input type="hidden" name="action" value="set_role">
+                        <input type="hidden" name="address" value="{{ w.address }}">
+                        <select name="role"
+                            style="background:#1a1a2e;border:1px solid #333;color:#e0e0e0;font-size:0.85em;padding:2px 4px;border-radius:3px;"
+                            hx-post="/panel/copy-trade/wallets"
+                            hx-target="#wallet-flash"
+                            hx-swap="innerHTML"
+                            hx-include="closest form">
+                            <option value="primary" {{ 'selected' if w.role == 'primary' else '' }}>Primary</option>
+                            <option value="confirmation" {{ 'selected' if w.role == 'confirmation' else '' }}>Confirmation</option>
+                        </select>
+                        {% if w.role == 'confirmation' %}
+                        <select name="confirms_wallet"
+                            style="background:#1a1a2e;border:1px solid #333;color:#ffaa00;font-size:0.75em;padding:2px 4px;border-radius:3px;margin-left:4px;"
+                            hx-post="/panel/copy-trade/wallets"
+                            hx-target="#wallet-flash"
+                            hx-swap="innerHTML"
+                            hx-include="closest form">
+                            <option value="">-- confirms --</option>
+                            {% for p in wallets if p.address != w.address and p.role == 'primary' %}
+                            <option value="{{ p.address }}" {{ 'selected' if w.confirms_wallet == p.address else '' }}>
+                                {{ p.alias or p.address[:10] }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                        {% endif %}
+                    </form>
+                </td>
                 <td>
                     <label class="toggle">
                         <input type="checkbox" {{ 'checked' if w.enabled else '' }}
@@ -63,6 +97,13 @@
                 <input type="text" name="alias" placeholder="optional">
             </div>
             <div class="form-group">
+                <label>Role</label>
+                <select name="role" style="background:#1a1a2e;border:1px solid #333;color:#e0e0e0;padding:8px 10px;border-radius:4px;font-family:'Courier New',monospace;font-size:0.9em;">
+                    <option value="primary">Primary</option>
+                    <option value="confirmation">Confirmation</option>
+                </select>
+            </div>
+            <div class="form-group">
                 <button type="submit" class="btn btn-success">Add Wallet</button>
             </div>
         </div>
@@ -87,7 +128,7 @@
             <div class="form-group">
                 <label>Min Price</label>
                 <input type="number" name="min_price" value="{{ params.min_price }}" step="0.01" min="0" max="1">
-                <span class="desc">Ignora trades por debajo de este precio. Debajo de 0.35 el WR es 0%</span>
+                <span class="desc">Ignora trades por debajo de este precio. Debajo de 0.40 el WR es muy bajo</span>
             </div>
         </div>
         <div class="form-row" style="margin-top:12px;">

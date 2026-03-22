@@ -75,6 +75,14 @@ class CopyTrader:
         self._seen_trades: set[str] = set()
         self._on_opportunity_cb = None
 
+        # Wallet roles: address -> "primary" or "confirmation"
+        # Confirmation wallets only copy if their assigned primary already bet same side
+        self._wallet_roles: dict[str, str] = {}
+        # Confirmation -> primary mapping: which primary wallet to check
+        self._confirms_wallet: dict[str, str] = {}
+        # Track which wallets are enabled
+        self._wallet_enabled: dict[str, bool] = {}
+
         # Bet tracking
         self._bets: dict[str, CopyBet] = {}  # "condition_id:side" -> CopyBet
         self._all_bets: list[CopyBet] = []    # All bets for export
@@ -91,6 +99,17 @@ class CopyTrader:
             "starting_balance": starting_balance,
             "roi_pct": 0.0,
         }
+
+    def set_wallet_overrides(self, overrides: dict[str, dict]):
+        """Update wallet roles, confirmations and enabled status from DB overrides.
+
+        overrides: {address: {role, enabled, confirms_wallet}}
+        """
+        for addr, ov in overrides.items():
+            self._wallet_roles[addr] = ov.get("role", "primary")
+            self._wallet_enabled[addr] = ov.get("enabled", True)
+            if ov.get("confirms_wallet"):
+                self._confirms_wallet[addr] = ov["confirms_wallet"]
 
     def on_opportunity(self, callback):
         """Register callback for when a copy-trade opportunity is detected."""
@@ -141,7 +160,11 @@ class CopyTrader:
     async def _poll_all_wallets(self):
         if not self._session:
             return
-        tasks = [self._poll_wallet(w) for w in self.config.target_wallets]
+        tasks = [
+            self._poll_wallet(w)
+            for w in self.config.target_wallets
+            if self._wallet_enabled.get(w, True)
+        ]
         await asyncio.gather(*tasks, return_exceptions=True)
         self._stats["polls"] += 1
 
@@ -225,11 +248,52 @@ class CopyTrader:
         outcome_lower = trade.outcome.lower()
         token_side = "YES" if outcome_lower in ("yes", "y", "up") else "NO"
 
-        # Allow copying both sides of same market — VPS data shows this is
-        # the core profit driver for 0xbbc5z (buys both sides at extreme prices)
-        key = f"{trade.condition_id}:{token_side}"
+        # Key includes wallet to allow confirmation bets alongside primary bets
+        wallet_prefix = trade.maker_address[:10]
+        key = f"{trade.condition_id}:{token_side}:{wallet_prefix}"
         if key in self._bets:
-            return  # Already copied this exact side
+            return  # Already copied this exact trade
+
+        # Confirmation wallet logic: copy UNLESS the assigned primary wallet
+        # already bet on the OPPOSITE side of the same market
+        wallet_role = self._wallet_roles.get(trade.maker_address, "primary")
+        if wallet_role == "confirmation":
+            primary_addr = self._confirms_wallet.get(trade.maker_address, "")
+            if not primary_addr:
+                logger.info(
+                    "copy_trade_confirmation_no_assignment",
+                    wallet=wallet_prefix,
+                    question=trade.question[:60],
+                )
+                return
+
+            primary_prefix = primary_addr[:10]
+            opposite_side = "NO" if token_side == "YES" else "YES"
+            primary_opp_key = f"{trade.condition_id}:{opposite_side}:{primary_prefix}"
+
+            if primary_opp_key in self._bets:
+                # Primary bet opposite side → conflict, skip
+                logger.info(
+                    "copy_trade_confirmation_conflict",
+                    wallet=wallet_prefix,
+                    primary=primary_prefix,
+                    question=trade.question[:60],
+                    side=token_side,
+                    primary_side=opposite_side,
+                )
+                return
+
+            # No conflict → proceed (primary same side = double bet, no primary = solo bet)
+            primary_same_key = f"{trade.condition_id}:{token_side}:{primary_prefix}"
+            mode = "double" if primary_same_key in self._bets else "solo"
+            logger.info(
+                "copy_trade_confirmation_ok",
+                wallet=wallet_prefix,
+                primary=primary_prefix,
+                question=trade.question[:60],
+                side=token_side,
+                mode=mode,
+            )
 
         # Filter out low-price bets — data shows 0 wins and 11 losses below min_price
         if trade.price < self.config.min_price:

@@ -101,7 +101,7 @@ poll_interval_ms = 500
 max_latency_ms = 120000  # 120s para paper trading (en live bajar a 5000-10000)
 copy_size_mode = "fixed"
 fixed_bet_size = 5.0
-min_price = 0.35                  # Precio minimo para copiar trades
+min_price = 0.40                  # Precio minimo para copiar trades
 max_concurrent_bets = 3           # Max bets copy concurrentes
 
 [accounts.risk]

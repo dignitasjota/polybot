@@ -21,7 +21,9 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS wallet_overrides (
     address TEXT PRIMARY KEY,
     alias TEXT DEFAULT '',
-    enabled INTEGER DEFAULT 1
+    enabled INTEGER DEFAULT 1,
+    role TEXT DEFAULT 'primary',
+    confirms_wallet TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -47,6 +49,16 @@ async def init_db():
     db = await get_db()
     try:
         await db.executescript(SCHEMA)
+
+        # Migrate: add role + confirms_wallet columns if missing
+        cursor = await db.execute("PRAGMA table_info(wallet_overrides)")
+        cols = {row[1] for row in await cursor.fetchall()}
+        if "role" not in cols:
+            await db.execute("ALTER TABLE wallet_overrides ADD COLUMN role TEXT DEFAULT 'primary'")
+        if "confirms_wallet" not in cols:
+            await db.execute("ALTER TABLE wallet_overrides ADD COLUMN confirms_wallet TEXT DEFAULT ''")
+        if "role" not in cols or "confirms_wallet" not in cols:
+            await db.commit()
 
         # Create default admin if no users exist
         cursor = await db.execute("SELECT COUNT(*) FROM users")
@@ -116,23 +128,39 @@ async def get_audit_log(limit: int = 50) -> list[dict]:
 
 
 async def get_wallet_overrides() -> dict[str, dict]:
-    """Return {address: {alias, enabled}} for all overrides."""
+    """Return {address: {alias, enabled, role, confirms_wallet}} for all overrides."""
     db = await get_db()
     try:
-        cursor = await db.execute("SELECT address, alias, enabled FROM wallet_overrides")
+        cursor = await db.execute(
+            "SELECT address, alias, enabled, role, confirms_wallet FROM wallet_overrides"
+        )
         rows = await cursor.fetchall()
-        return {r["address"]: {"alias": r["alias"], "enabled": bool(r["enabled"])} for r in rows}
+        return {
+            r["address"]: {
+                "alias": r["alias"],
+                "enabled": bool(r["enabled"]),
+                "role": r["role"] or "primary",
+                "confirms_wallet": r["confirms_wallet"] or "",
+            }
+            for r in rows
+        }
     finally:
         await db.close()
 
 
-async def set_wallet_override(address: str, alias: str = "", enabled: bool = True):
+async def set_wallet_override(
+    address: str, alias: str = "", enabled: bool = True,
+    role: str = "primary", confirms_wallet: str = "",
+):
     db = await get_db()
     try:
         await db.execute(
-            "INSERT INTO wallet_overrides (address, alias, enabled) VALUES (?, ?, ?) "
-            "ON CONFLICT(address) DO UPDATE SET alias=excluded.alias, enabled=excluded.enabled",
-            (address.lower(), alias, int(enabled)),
+            "INSERT INTO wallet_overrides (address, alias, enabled, role, confirms_wallet) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(address) DO UPDATE SET "
+            "alias=excluded.alias, enabled=excluded.enabled, "
+            "role=excluded.role, confirms_wallet=excluded.confirms_wallet",
+            (address.lower(), alias, int(enabled), role, confirms_wallet.lower()),
         )
         await db.commit()
     finally:
