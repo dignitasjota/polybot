@@ -82,6 +82,10 @@ class Bot:
 
         self._running = True
 
+        # Ensure DB schema is up to date before anything reads it
+        from src.db import init_db
+        await init_db()
+
         # Start all account runners
         for acc in self.accounts:
             await acc.start()
