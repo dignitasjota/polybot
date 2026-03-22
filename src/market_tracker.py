@@ -128,14 +128,19 @@ class MarketTracker:
         return list(self._markets.keys())
 
     def update_book(self, token_id: str, bids: list[dict], asks: list[dict]):
-        """Update order book from a 'book' snapshot event."""
+        """Update order book from a 'book' snapshot event.
+
+        Only keeps top 3 levels to minimize object creation and memory.
+        """
         state = self._markets.get(token_id)
         if not state:
             return
 
-        parsed_bids = [PriceLevel(float(b["price"]), float(b["size"])) for b in bids]
-        parsed_asks = [PriceLevel(float(a["price"]), float(a["size"])) for a in asks]
+        # Only parse top 3 levels — we only use level 0 for price/depth
+        parsed_bids = [PriceLevel(float(b["price"]), float(b["size"])) for b in bids[:3]]
+        parsed_asks = [PriceLevel(float(a["price"]), float(a["size"])) for a in asks[:3]]
 
+        now = time.time()
         is_yes = token_id == state.yes_token_id
         if is_yes:
             state.bids_yes = parsed_bids
@@ -152,8 +157,8 @@ class MarketTracker:
             if parsed_asks:
                 state.best_ask_no = parsed_asks[0].price
 
-        state.last_update = time.time()
-        state.last_book_snapshot = time.time()
+        state.last_update = now
+        state.last_book_snapshot = now
 
     def update_best_bid_ask(self, token_id: str, best_bid: float, best_ask: float):
         """Update best bid/ask from a 'best_bid_ask' event."""

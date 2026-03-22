@@ -156,7 +156,11 @@ class WebSocketClient:
             await self._handle_message(data)
 
     async def _handle_message(self, data: dict | list):
-        """Route WebSocket messages to the appropriate handler."""
+        """Route WebSocket messages to the appropriate handler.
+
+        Throttles ALL processing (not just detector callbacks) per token_id
+        to reduce CPU. Resolution events always pass through immediately.
+        """
         events = data if isinstance(data, list) else [data]
 
         for event in events:
@@ -166,6 +170,29 @@ class WebSocketClient:
             event_type = event.get("event_type", "")
             asset_id = event.get("asset_id", "")
 
+            # Resolution events are always processed immediately
+            if event_type == "market_resolved":
+                self._handle_market_resolved(event)
+                if self._on_opportunity_callback:
+                    await self._on_opportunity_callback(asset_id, event_type)
+                continue
+
+            if event_type == "tick_size_change":
+                logger.info(
+                    "tick_size_change",
+                    asset_id=asset_id,
+                    old=event.get("old_tick_size"),
+                    new=event.get("new_tick_size"),
+                )
+                continue
+
+            # Throttle: skip processing entirely if same token updated < 1s ago
+            now = time.time()
+            last = self._last_check_time.get(asset_id, 0)
+            if now - last < 1.0:
+                continue
+            self._last_check_time[asset_id] = now
+
             if event_type == "book":
                 self._handle_book(event)
             elif event_type == "price_change":
@@ -174,48 +201,18 @@ class WebSocketClient:
                 self._handle_best_bid_ask(event)
             elif event_type == "last_trade_price":
                 self._handle_last_trade(event)
-            elif event_type == "market_resolved":
-                self._handle_market_resolved(event)
-            elif event_type == "tick_size_change":
-                logger.info(
-                    "tick_size_change",
-                    asset_id=asset_id,
-                    old=event.get("old_tick_size"),
-                    new=event.get("new_tick_size"),
-                )
 
-            # Notify detector after any price-relevant update
-            # Throttle: skip if same token was checked < 2s ago (except resolutions)
-            if event_type in (
-                "book", "price_change", "best_bid_ask",
-                "last_trade_price", "market_resolved",
+            # Notify detector after processing
+            if self._on_opportunity_callback and event_type in (
+                "book", "price_change", "best_bid_ask", "last_trade_price",
             ):
-                if self._on_opportunity_callback:
-                    if event_type == "market_resolved":
-                        await self._on_opportunity_callback(asset_id, event_type)
-                    else:
-                        now = time.time()
-                        last = self._last_check_time.get(asset_id, 0)
-                        if now - last >= 2.0:
-                            self._last_check_time[asset_id] = now
-                            await self._on_opportunity_callback(asset_id, event_type)
+                await self._on_opportunity_callback(asset_id, event_type)
 
     def _handle_book(self, event: dict):
         asset_id = event.get("asset_id", "")
         bids = event.get("bids", [])
         asks = event.get("asks", [])
         self.tracker.update_book(asset_id, bids, asks)
-
-        state = self.tracker.get_by_token(asset_id)
-        if state:
-            side = "YES" if asset_id == state.yes_token_id else "NO"
-            logger.debug(
-                "book_snapshot",
-                asset_id=asset_id[:16],
-                side=side,
-                bids=len(bids),
-                asks=len(asks),
-            )
 
     def _handle_price_change(self, event: dict):
         changes = event.get("price_changes", event.get("changes", []))
