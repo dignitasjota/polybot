@@ -26,6 +26,39 @@
     </div>
 </div>
 
+{# Market Filter #}
+<div class="section">
+    <h3>MARKET FILTER</h3>
+    <form method="POST" action="/panel/directional/params">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Crypto Only</label>
+                <div style="display:flex;align-items:center;gap:10px;">
+                    <label class="toggle">
+                        <input type="checkbox" id="crypto_only_toggle" name="crypto_only" value="true"
+                            {{ 'checked' if params.crypto_only else '' }}
+                            onchange="updateMaxMarkets()">
+                        <span class="slider"></span>
+                    </label>
+                    <span style="color:#888;font-size:0.8em;">Solo mercados crypto (BTC, ETH, SOL, DOGE...)</span>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Max Markets Monitored</label>
+                <input type="number" id="max_markets_input" name="max_markets_monitored"
+                    value="{{ params.max_markets_monitored }}" min="1" max="500" step="1"
+                    {{ 'style=color:#555;background:#111; disabled' if params.crypto_only else '' }}>
+                <span id="max_markets_hint" style="color:#555;font-size:0.75em;display:{{ 'block' if params.crypto_only else 'none' }};">
+                    Limitado a 50 en modo crypto
+                </span>
+            </div>
+        </div>
+        <div style="margin-top:15px;">
+            <button type="submit" class="btn btn-success">Save Filter</button>
+        </div>
+    </form>
+</div>
+
 {# Parameters #}
 <div class="section">
     <h3>STRATEGY PARAMETERS</h3>
@@ -67,4 +100,24 @@
         </div>
     </form>
 </div>
+
+<script>
+function updateMaxMarkets() {
+    var cb = document.getElementById('crypto_only_toggle');
+    var input = document.getElementById('max_markets_input');
+    var hint = document.getElementById('max_markets_hint');
+    if (cb.checked) {
+        input.value = 50;
+        input.disabled = true;
+        input.style.color = '#555';
+        input.style.background = '#111';
+        hint.style.display = 'block';
+    } else {
+        input.disabled = false;
+        input.style.color = '';
+        input.style.background = '';
+        hint.style.display = 'none';
+    }
+}
+</script>
 {% endblock %}

@@ -132,6 +132,8 @@ class ConfigManager:
             "max_bet_per_trade": r.max_bet_per_trade,
             "max_daily_loss": r.max_daily_loss,
             "simulated_balance": balance,
+            "crypto_only": s.tag == "crypto",
+            "max_markets_monitored": self.config.data.max_markets_monitored,
         }
 
     def set_directional_params(self, params: dict):
@@ -160,6 +162,19 @@ class ConfigManager:
                 if acc.strategy_type == "directional":
                     acc.risk.simulated_balance = float(params["simulated_balance"])
 
+        if "crypto_only" in params:
+            crypto = str(params["crypto_only"]).lower() == "true"
+            s.tag = "crypto" if crypto else ""
+            if crypto:
+                self.config.data.max_markets_monitored = min(
+                    self.config.data.max_markets_monitored, 50
+                )
+        if "max_markets_monitored" in params:
+            val = int(params["max_markets_monitored"])
+            if s.tag == "crypto":
+                val = min(val, 50)
+            self.config.data.max_markets_monitored = val
+
         # Update live runner risk configs
         for runner in self.bot.accounts:
             if runner.strategy_type == "directional":
@@ -186,6 +201,11 @@ class ConfigManager:
         raw["strategy"]["max_price"] = s.max_price
         raw["strategy"]["min_buffer_pct"] = s.min_buffer_pct
         raw["strategy"]["max_concurrent_bets"] = s.max_concurrent_bets
+        raw["strategy"]["tag"] = s.tag
+
+        # Update data section
+        raw.setdefault("data", {})
+        raw["data"]["max_markets_monitored"] = self.config.data.max_markets_monitored
 
         # Update risk section
         r = self.config.risk

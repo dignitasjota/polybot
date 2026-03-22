@@ -147,9 +147,17 @@ async def panel_directional_params(request: web.Request) -> web.Response:
 
     params = {}
     for key in ("kill_switch", "min_margin_net", "max_price", "min_buffer_pct",
-                "max_concurrent_bets", "max_bet_per_trade", "max_daily_loss", "simulated_balance"):
+                "max_concurrent_bets", "max_bet_per_trade", "max_daily_loss",
+                "simulated_balance", "max_markets_monitored"):
         if key in data and data[key]:
             params[key] = data[key]
+
+    # Checkbox: if "crypto_only" field exists in the form but unchecked, it won't be in data
+    if "crypto_only" in data:
+        params["crypto_only"] = "true"
+    elif any(k in data for k in ("max_markets_monitored",)):
+        # Market filter form was submitted but crypto_only unchecked
+        params["crypto_only"] = "false"
 
     cm.set_directional_params(params)
     await add_audit(user, "directional_params", str(params))

@@ -30,6 +30,7 @@ class StrategyConfig:
     max_price: float = 0.60          # Max price for up/down directional bets
     min_buffer_pct: float = 0.10     # Min buffer % for price confirmation
     max_concurrent_bets: int = 3     # Max concurrent directional bets
+    tag: str = ""                    # Filter markets by tag (e.g. "crypto")
     probability_tiers: list[ProbabilityTier] = field(default_factory=lambda: [
         ProbabilityTier(max_hours=0.5, min_probability=0.93),
         ProbabilityTier(max_hours=2, min_probability=0.95),

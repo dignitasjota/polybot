@@ -282,6 +282,7 @@ class Bot:
         markets = await self.gamma.fetch_active_markets(
             max_time_to_resolution=self.config.strategy.max_time_to_resolution,
             max_results=self.config.data.max_markets_monitored,
+            tag=self.config.strategy.tag,
         )
 
         new_count = 0

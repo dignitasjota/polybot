@@ -71,6 +71,7 @@ class GammaClient:
         self,
         max_time_to_resolution: timedelta = timedelta(hours=24),
         max_results: int = 50,
+        tag: str = "",
     ) -> list[Market]:
         """Fetch active markets closing within max_time_to_resolution.
 
@@ -98,6 +99,8 @@ class GammaClient:
                 "limit": str(page_size),
                 "offset": str(offset),
             }
+            if tag:
+                params["tag"] = tag
 
             try:
                 async with session.get(

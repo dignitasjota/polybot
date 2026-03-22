@@ -5,8 +5,9 @@ enabled = true
 name = "closing_arbitrage"
 
 # Criterios de entrada
-max_time_to_resolution = "1h"     # Solo mercados que resuelven en <1h
+max_time_to_resolution = "5m"     # Solo mercados que resuelven en <5min
 min_margin_net = 0.008            # Margen minimo por share tras fees ($0.008)
+tag = "crypto"                    # Solo mercados con tag crypto
 max_price = 0.60                  # Precio maximo para bets Up/Down directional
 min_buffer_pct = 0.10             # Buffer minimo % para confirmacion de precio Binance
 max_concurrent_bets = 3           # Max bets directionales concurrentes
@@ -44,7 +45,7 @@ simulated_balance = 1000.0         # Capital inicial simulado para paper trading
 [data]
 stale_data_threshold_seconds = 5  # Pausar si datos >5s antiguos
 gamma_poll_interval_seconds = 60  # Polling Gamma API cada 1 min (necesario para mercados de 5 min)
-max_markets_monitored = 200        # Maximo mercados a monitorear
+max_markets_monitored = 50         # Maximo mercados a monitorear
 
 [websocket]
 ping_interval_seconds = 10
