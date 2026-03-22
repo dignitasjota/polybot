@@ -176,6 +176,8 @@ class PriceChecker:
         self._session: aiohttp.ClientSession | None = None
         self._running = False
         self._bg_task: asyncio.Task | None = None
+        # Cache parsed question results to avoid regex on every WS message
+        self._parse_cache: dict[str, dict | None] = {}
 
         # Caches (read by check_direction, written by background loop)
         self._current_prices: dict[str, float] = {}       # symbol -> price
@@ -245,7 +247,14 @@ class PriceChecker:
         This method is SYNCHRONOUS and reads from cache only — no I/O.
         Returns None if the question is not an Up/Down market or prices not yet cached.
         """
-        parsed = parse_up_down_question(question)
+        if question in self._parse_cache:
+            parsed = self._parse_cache[question]
+        else:
+            parsed = parse_up_down_question(question)
+            self._parse_cache[question] = parsed
+            # Prevent unbounded growth
+            if len(self._parse_cache) > 500:
+                self._parse_cache.clear()
         if not parsed:
             return None
 

@@ -31,6 +31,7 @@ class WebSocketClient:
         self._reconnect_attempt = 0
         self._last_pong: float = 0
         self._on_opportunity_callback = None
+        self._last_check_time: dict[str, float] = {}  # Throttle: token_id -> last check time
         self._fallback_active = False
         self._http_session: aiohttp.ClientSession | None = None
 
@@ -184,12 +185,20 @@ class WebSocketClient:
                 )
 
             # Notify detector after any price-relevant update
+            # Throttle: skip if same token was checked < 2s ago (except resolutions)
             if event_type in (
                 "book", "price_change", "best_bid_ask",
                 "last_trade_price", "market_resolved",
             ):
                 if self._on_opportunity_callback:
-                    await self._on_opportunity_callback(asset_id, event_type)
+                    if event_type == "market_resolved":
+                        await self._on_opportunity_callback(asset_id, event_type)
+                    else:
+                        now = time.time()
+                        last = self._last_check_time.get(asset_id, 0)
+                        if now - last >= 2.0:
+                            self._last_check_time[asset_id] = now
+                            await self._on_opportunity_callback(asset_id, event_type)
 
     def _handle_book(self, event: dict):
         asset_id = event.get("asset_id", "")
