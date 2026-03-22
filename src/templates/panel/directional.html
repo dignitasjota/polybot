@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Directional — Polymarket Bot{% endblock %}
+
+{% block content %}
+<h2>DIRECTIONAL CONFIGURATION</h2>
+
+{# Kill Switch #}
+<div class="section">
+    <h3>KILL SWITCH</h3>
+    <div style="display:flex;align-items:center;gap:15px;">
+        <form method="POST" action="/panel/directional/params">
+            <input type="hidden" name="_field" value="kill_switch">
+            <input type="hidden" name="kill_switch" value="{{ 'false' if params.kill_switch else 'true' }}">
+            {% if params.kill_switch %}
+            <button type="submit" class="btn btn-success" style="font-size:1em;padding:10px 20px;">
+                ACTIVATE TRADING
+            </button>
+            <span style="color:#ff4444;font-weight:bold;margin-left:10px;">TRADING STOPPED</span>
+            {% else %}
+            <button type="submit" class="btn btn-danger" style="font-size:1em;padding:10px 20px;">
+                STOP ALL TRADING
+            </button>
+            <span style="color:#00ff88;font-weight:bold;margin-left:10px;">TRADING ACTIVE</span>
+            {% endif %}
+        </form>
+    </div>
+</div>
+
+{# Parameters #}
+<div class="section">
+    <h3>STRATEGY PARAMETERS</h3>
+    <form method="POST" action="/panel/directional/params">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Min Margin Net ($)</label>
+                <input type="number" name="min_margin_net" value="{{ params.min_margin_net }}" step="0.001" min="0">
+            </div>
+            <div class="form-group">
+                <label>Max Price (Up/Down)</label>
+                <input type="number" name="max_price" value="{{ params.max_price }}" step="0.01" min="0" max="1">
+            </div>
+            <div class="form-group">
+                <label>Min Buffer Pct</label>
+                <input type="number" name="min_buffer_pct" value="{{ params.min_buffer_pct }}" step="0.01" min="0" max="1">
+            </div>
+        </div>
+        <div class="form-row" style="margin-top:12px;">
+            <div class="form-group">
+                <label>Max Concurrent Bets</label>
+                <input type="number" name="max_concurrent_bets" value="{{ params.max_concurrent_bets }}" min="1" max="20">
+            </div>
+            <div class="form-group">
+                <label>Max Bet Per Trade ($)</label>
+                <input type="number" name="max_bet_per_trade" value="{{ params.max_bet_per_trade }}" step="1" min="1">
+            </div>
+            <div class="form-group">
+                <label>Max Daily Loss ($)</label>
+                <input type="number" name="max_daily_loss" value="{{ params.max_daily_loss }}" step="1" min="1">
+            </div>
+        </div>
+        <div style="margin-top:15px;">
+            <button type="submit" class="btn btn-success">Save Parameters</button>
+        </div>
+    </form>
+</div>
+{% endblock %}

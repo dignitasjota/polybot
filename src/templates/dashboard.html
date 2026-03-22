@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Polymarket Bot{% endblock %}
+
+{% block extra_head %}
+<meta http-equiv="refresh" content="10">
+{% endblock %}
+
+{% block content %}
+<div class="subtitle">
+    Paper Trading | Auto-refresh 10s | {{ now_str }} CET |
+    <span class="ws-status">WS: {{ '🟢 LIVE' if ws_connected else '🔴 DOWN' }}</span> |
+    Markets: {{ markets_count }}
+</div>
+
+{% for acc in accounts_data %}
+<div class="account-section">
+    <div class="account-header">
+        <span class="account-name">{{ acc.name|upper }}</span>
+        <span class="{{ acc.badge_class }}">{{ acc.badge_text }}</span>
+        <span style="color:#666;font-size:0.8em;">({{ acc.exec_mode }})</span>
+    </div>
+    <div class="stats">
+        <div class="stat">
+            <div class="label">Balance</div>
+            <div class="value{{ ' off' if acc.balance < acc.starting else '' }}">${{ "%.2f"|format(acc.balance) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">P&amp;L</div>
+            <div class="value{{ ' off' if acc.pnl < 0 else '' }}">${{ "%+.2f"|format(acc.pnl) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">ROI</div>
+            <div class="value{{ ' off' if acc.roi < 0 else '' }}">{{ "%+.2f"|format(acc.roi) }}%</div>
+        </div>
+        <div class="stat">
+            <div class="label">Wins / Losses</div>
+            <div class="value">{{ acc.wins }} / {{ acc.losses }}</div>
+        </div>
+        {% if acc.is_copy %}
+        <div class="stat">
+            <div class="label">Trades Copied</div>
+            <div class="value">{{ acc.copied }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Polls</div>
+            <div class="value">{{ acc.polls }}</div>
+        </div>
+        {% else %}
+        <div class="stat">
+            <div class="label">Opportunities</div>
+            <div class="value">{{ acc.opportunities_found }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Scans</div>
+            <div class="value">{{ acc.total_scans }}</div>
+        </div>
+        {% endif %}
+    </div>
+
+    <h3>Bets (last 30)</h3>
+    {{ acc.opps_html|safe }}
+</div>
+{% endfor %}
+
+<h2>MONITORED MARKETS ({{ markets_count }})</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Market</th>
+            <th>Time Left</th>
+            <th>YES Ask</th>
+            <th>NO Ask</th>
+            <th>Best</th>
+            <th>Status</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{ markets_html|safe }}
+    </tbody>
+</table>
+
+<script>
+function toggleUpdates(groupIdx) {
+    const rows = document.querySelectorAll('.update-group-' + groupIdx);
+    const btn = event.currentTarget;
+    const isVisible = rows.length > 0 && rows[0].classList.contains('visible');
+    rows.forEach(r => r.classList.toggle('visible'));
+    btn.textContent = isVisible
+        ? '+ ' + rows.length
+        : '− ' + rows.length;
+}
+</script>
+{% endblock %}

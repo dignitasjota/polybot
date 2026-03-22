@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Settings — Polymarket Bot{% endblock %}
+
+{% block content %}
+<h2>SETTINGS</h2>
+
+{# Change Password #}
+<div class="section">
+    <h3>CHANGE PASSWORD</h3>
+    <form method="POST" action="/panel/settings/password">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Current Password</label>
+                <input type="password" name="current_password" required autocomplete="current-password">
+            </div>
+            <div class="form-group">
+                <label>New Password</label>
+                <input type="password" name="new_password" required minlength="4" autocomplete="new-password">
+            </div>
+            <div class="form-group">
+                <label>Confirm New Password</label>
+                <input type="password" name="confirm_password" required minlength="4" autocomplete="new-password">
+            </div>
+        </div>
+        <div style="margin-top:15px;">
+            <button type="submit" class="btn btn-warn">Change Password</button>
+        </div>
+    </form>
+</div>
+
+{# Audit Log #}
+<div class="section">
+    <h3>AUDIT LOG (last 50)</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Time</th>
+                <th>User</th>
+                <th>Action</th>
+                <th>Details</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for entry in audit_log %}
+            <tr>
+                <td>{{ entry.time_str }}</td>
+                <td>{{ entry.username }}</td>
+                <td>{{ entry.action }}</td>
+                <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ entry.details }}</td>
+            </tr>
+        {% endfor %}
+        {% if not audit_log %}
+            <tr><td colspan="4" style="color:#555;">No audit entries yet</td></tr>
+        {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

@@ -231,27 +231,27 @@ class CopyTrader:
         if key in self._bets:
             return  # Already copied this exact side
 
-        # Filter out low-price bets — data shows 0 wins and 11 losses below 0.35
-        if trade.price < 0.35:
+        # Filter out low-price bets — data shows 0 wins and 11 losses below min_price
+        if trade.price < self.config.min_price:
             logger.info(
                 "copy_trade_price_filter",
                 wallet=trade.maker_address[:10],
                 question=trade.question[:60],
                 price=f"${trade.price:.4f}",
-                min_price=0.35,
+                min_price=self.config.min_price,
             )
             return
 
         # Limit concurrent bets to reduce correlated drawdowns
         # (e.g., 6 consecutive losses 5:30-6:00AM from overlapping windows)
         concurrent = self._count_recent_pending_bets(window_seconds=300)
-        if concurrent >= 3:
+        if concurrent >= self.config.max_concurrent_bets:
             logger.info(
                 "copy_trade_concurrent_limit",
                 wallet=trade.maker_address[:10],
                 question=trade.question[:60],
                 concurrent_bets=concurrent,
-                max_allowed=3,
+                max_allowed=self.config.max_concurrent_bets,
             )
             return
 

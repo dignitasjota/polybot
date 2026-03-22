@@ -71,7 +71,7 @@ class ClosingArbitrageDetector:
         self._active_opportunities: dict[str, Opportunity] = {}  # "condition_id:side" -> latest opp
         self._bet_placed: dict[str, Opportunity] = {}  # "condition_id:side" -> first bet (for paper trading)
         self._settled_conditions: set[str] = set()  # Already settled condition_ids
-        self._price_checker = PriceChecker(min_buffer_pct=0.10)
+        self._price_checker = PriceChecker(min_buffer_pct=self.config.min_buffer_pct)
         self._on_opportunity_cb = None  # async callback(Opportunity) for executor
         self._stats = {
             "total_scans": 0,
@@ -331,8 +331,7 @@ class ClosingArbitrageDetector:
         price = market.best_ask_yes if is_yes else market.best_ask_no
 
         # Don't buy at extreme prices: too low = no data, too high = no margin
-        # Data shows 0.60+ zone has insufficient WR to overcome risk/reward
-        if price <= 0 or price >= 0.60:
+        if price <= 0 or price >= self.config.max_price:
             self._stats["price_checks_rejected"] += 1
             return
 
@@ -341,13 +340,13 @@ class ClosingArbitrageDetector:
         key = f"{market.condition_id}:{'YES' if is_yes else 'NO'}"
         if key not in self._bet_placed:
             concurrent = self._count_recent_updown_bets(window_seconds=300)
-            if concurrent >= 3:
+            if concurrent >= self.config.max_concurrent_bets:
                 self._stats["price_checks_rejected"] += 1
                 logger.info(
                     "updown_concurrent_limit",
                     question=market.question[:60],
                     concurrent_bets=concurrent,
-                    max_allowed=3,
+                    max_allowed=self.config.max_concurrent_bets,
                 )
                 return
 

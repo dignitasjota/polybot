@@ -8,4 +8,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY config/ ./config/
 COPY src/ ./src/
 
+RUN mkdir -p /app/data
+
 CMD ["python", "-m", "src.main"]

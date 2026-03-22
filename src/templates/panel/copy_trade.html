@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Copy Trade — Polymarket Bot{% endblock %}
+
+{% block content %}
+<h2>COPY TRADE CONFIGURATION</h2>
+
+{# Wallets section #}
+<div class="section">
+    <h3>TARGET WALLETS</h3>
+    <div id="wallet-list">
+    <table>
+        <thead>
+            <tr>
+                <th>Address</th>
+                <th>Alias</th>
+                <th>Enabled</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for w in wallets %}
+            <tr>
+                <td style="font-size:0.75em;">{{ w.address }}</td>
+                <td>{{ w.alias }}</td>
+                <td>
+                    <label class="toggle">
+                        <input type="checkbox" {{ 'checked' if w.enabled else '' }}
+                            hx-post="/panel/copy-trade/wallets"
+                            hx-vals='{"action": "toggle", "address": "{{ w.address }}", "enabled": "{{ 'false' if w.enabled else 'true' }}"}'
+                            hx-target="#wallet-flash"
+                            hx-swap="innerHTML">
+                        <span class="slider"></span>
+                    </label>
+                </td>
+                <td>
+                    <button class="btn btn-danger" style="font-size:0.7em;padding:4px 8px;"
+                        hx-post="/panel/copy-trade/wallets"
+                        hx-vals='{"action": "remove", "address": "{{ w.address }}"}'
+                        hx-target="#wallet-flash"
+                        hx-swap="innerHTML"
+                        hx-confirm="Remove wallet {{ w.address[:10] }}...?">
+                        Remove
+                    </button>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+
+    <div id="wallet-flash" style="margin:8px 0;"></div>
+
+    <h3 style="margin-top:15px;">ADD WALLET</h3>
+    <form hx-post="/panel/copy-trade/wallets" hx-target="#wallet-flash" hx-swap="innerHTML">
+        <input type="hidden" name="action" value="add">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Address (0x...)</label>
+                <input type="text" name="address" placeholder="0x..." required pattern="0x[a-fA-F0-9]{40}">
+            </div>
+            <div class="form-group">
+                <label>Alias</label>
+                <input type="text" name="alias" placeholder="optional">
+            </div>
+            <div class="form-group">
+                <button type="submit" class="btn btn-success">Add Wallet</button>
+            </div>
+        </div>
+    </form>
+</div>
+
+{# Parameters section #}
+<div class="section">
+    <h3>PARAMETERS</h3>
+    <form method="POST" action="/panel/copy-trade/params">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Fixed Bet Size ($)</label>
+                <input type="number" name="fixed_bet_size" value="{{ params.fixed_bet_size }}" step="0.5" min="0.5">
+            </div>
+            <div class="form-group">
+                <label>Poll Interval (ms)</label>
+                <input type="number" name="poll_interval_ms" value="{{ params.poll_interval_ms }}" step="100" min="100">
+            </div>
+            <div class="form-group">
+                <label>Min Price</label>
+                <input type="number" name="min_price" value="{{ params.min_price }}" step="0.01" min="0" max="1">
+            </div>
+        </div>
+        <div class="form-row" style="margin-top:12px;">
+            <div class="form-group">
+                <label>Max Concurrent Bets</label>
+                <input type="number" name="max_concurrent_bets" value="{{ params.max_concurrent_bets }}" min="1" max="20">
+            </div>
+            <div class="form-group">
+                <label>Max Bet Per Trade ($)</label>
+                <input type="number" name="max_bet_per_trade" value="{{ params.max_bet_per_trade }}" step="1" min="1">
+            </div>
+            <div class="form-group">
+                <label>Max Daily Loss ($)</label>
+                <input type="number" name="max_daily_loss" value="{{ params.max_daily_loss }}" step="1" min="1">
+            </div>
+        </div>
+        <div style="margin-top:15px;">
+            <button type="submit" class="btn btn-success">Save Parameters</button>
+            <span class="htmx-indicator">Saving...</span>
+        </div>
+    </form>
+</div>
+{% endblock %}

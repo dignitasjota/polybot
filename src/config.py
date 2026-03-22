@@ -27,6 +27,9 @@ class StrategyConfig:
     name: str = "closing_arbitrage"
     max_time_to_resolution: timedelta = field(default_factory=lambda: timedelta(hours=24))
     min_margin_net: float = 0.008
+    max_price: float = 0.60          # Max price for up/down directional bets
+    min_buffer_pct: float = 0.10     # Min buffer % for price confirmation
+    max_concurrent_bets: int = 3     # Max concurrent directional bets
     probability_tiers: list[ProbabilityTier] = field(default_factory=lambda: [
         ProbabilityTier(max_hours=0.5, min_probability=0.93),
         ProbabilityTier(max_hours=2, min_probability=0.95),
@@ -110,6 +113,8 @@ class CopyTradeConfig:
     copy_size_mode: str = "fixed"  # "fixed" or "proportional"
     fixed_bet_size: float = 5.0   # Fixed bet size in USD
     proportional_factor: float = 1.0  # Multiplier for proportional mode
+    min_price: float = 0.35       # Skip trades below this price
+    max_concurrent_bets: int = 3  # Max concurrent copy bets
 
 
 @dataclass
