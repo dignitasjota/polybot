@@ -19,7 +19,7 @@ CRYPTO_SYMBOLS = {
     "solana": "SOLUSDT",
     "bnb": "BNBUSDT",
     "dogecoin": "DOGEUSDT",
-    "xrp": "XRPUSDT",
+    # "xrp": "XRPUSDT",  # Disabled: 42.9% WR, -$7.47/trade in 8h backtest
     "cardano": "ADAUSDT",
     "avalanche": "AVAXUSDT",
     "polkadot": "DOTUSDT",

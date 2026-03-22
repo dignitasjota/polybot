@@ -71,7 +71,7 @@ class ClosingArbitrageDetector:
         self._active_opportunities: dict[str, Opportunity] = {}  # "condition_id:side" -> latest opp
         self._bet_placed: dict[str, Opportunity] = {}  # "condition_id:side" -> first bet (for paper trading)
         self._settled_conditions: set[str] = set()  # Already settled condition_ids
-        self._price_checker = PriceChecker(min_buffer_pct=0.03)
+        self._price_checker = PriceChecker(min_buffer_pct=0.10)
         self._on_opportunity_cb = None  # async callback(Opportunity) for executor
         self._stats = {
             "total_scans": 0,
@@ -313,7 +313,8 @@ class ClosingArbitrageDetector:
         price = market.best_ask_yes if is_yes else market.best_ask_no
 
         # Don't buy at extreme prices: too low = no data, too high = no margin
-        if price <= 0 or price >= 0.85:
+        # Data shows 0.60+ zone has insufficient WR to overcome risk/reward
+        if price <= 0 or price >= 0.60:
             self._stats["price_checks_rejected"] += 1
             return
 

@@ -14,6 +14,7 @@ logger = structlog.get_logger("polymarket.copy_trader")
 
 ACTIVITY_API = "https://data-api.polymarket.com/activity"
 GAMMA_MARKETS_API = "https://gamma-api.polymarket.com/markets"
+CLOB_MARKETS_API = "https://clob.polymarket.com/markets"
 
 # Taker fee formula: 0.003 * min(price, 1-price) * size
 FEE_RATE = 0.003
@@ -209,10 +210,11 @@ class CopyTrader:
         outcome_lower = trade.outcome.lower()
         token_side = "YES" if outcome_lower in ("yes", "y", "up") else "NO"
 
-        # Check if we already bet on this market+side
+        # Allow copying both sides of same market — VPS data shows this is
+        # the core profit driver for 0xbbc5z (buys both sides at extreme prices)
         key = f"{trade.condition_id}:{token_side}"
         if key in self._bets:
-            return  # Already copied this market
+            return  # Already copied this exact side
 
         # Calculate bet size
         if self.config.copy_size_mode == "proportional":
@@ -350,22 +352,20 @@ class CopyTrader:
         for bet in pending:
             age = now - bet.timestamp
             if age > 300:  # 5 min — market should have resolved by now
-                # Check via Gamma API if market is resolved
+                # Check via CLOB API if market is resolved
                 try:
-                    await self._check_resolution_gamma(bet)
+                    await self._check_resolution_clob(bet)
                 except Exception:
                     pass
 
-    async def _check_resolution_gamma(self, bet: CopyBet):
-        """Check market resolution via Gamma API."""
+    async def _check_resolution_clob(self, bet: CopyBet):
+        """Check market resolution via CLOB API (reliable source of truth)."""
         if not self._session:
             return
         try:
-            url = f"{GAMMA_MARKETS_API}"
-            params = {"condition_id": bet.condition_id}
+            url = f"{CLOB_MARKETS_API}/{bet.condition_id}"
             async with self._session.get(
-                url, params=params,
-                timeout=aiohttp.ClientTimeout(total=5),
+                url, timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status != 200:
                     return
@@ -374,32 +374,18 @@ class CopyTrader:
             if not data:
                 return
 
-            market = data[0] if isinstance(data, list) else data
-            if not market.get("resolved", False):
-                return
+            # Check if any token has winner=true
+            tokens = data.get("tokens", [])
+            winning_token_id = None
+            for t in tokens:
+                if t.get("winner", False):
+                    winning_token_id = str(t.get("token_id", ""))
+                    break
 
-            # Market is resolved — check if we won
-            winning_outcome = market.get("outcome", "").lower()
-            our_outcome = "yes" if bet.token_side == "YES" else "no"
+            if not winning_token_id:
+                return  # Not yet resolved
 
-            # For Up/Down: outcome could be "Up"/"Down"
-            if winning_outcome in ("up", "yes"):
-                won = bet.token_side == "YES"
-            elif winning_outcome in ("down", "no"):
-                won = bet.token_side == "NO"
-            else:
-                # Try winning_token_id
-                tokens = market.get("tokens", [])
-                winning_token = None
-                for t in tokens:
-                    if t.get("winner", False):
-                        winning_token = t.get("token_id", "")
-                        break
-                if winning_token:
-                    won = bet.token_id == winning_token
-                else:
-                    return  # Can't determine
-
+            won = bet.token_id == winning_token_id
             self._settle_bet(bet, won=won)
 
         except Exception:
