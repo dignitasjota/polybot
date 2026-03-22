@@ -16,7 +16,7 @@ BINANCE_API = "https://api.binance.com/api/v3"
 CRYPTO_SYMBOLS = {
     "bitcoin": "BTCUSDT",
     "ethereum": "ETHUSDT",
-    "solana": "SOLUSDT",
+    # "solana": "SOLUSDT",  # Disabled: ~41% WR, losing money in 8h backtest
     "bnb": "BNBUSDT",
     "dogecoin": "DOGEUSDT",
     # "xrp": "XRPUSDT",  # Disabled: 42.9% WR, -$7.47/trade in 8h backtest

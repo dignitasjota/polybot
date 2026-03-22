@@ -291,6 +291,24 @@ class ClosingArbitrageDetector:
                 self._evaluate_side(market, is_yes=False, min_prob=min_prob, hours_remaining=hours)
                 still_active.add(f"{market.condition_id}:NO")
 
+    def _count_recent_updown_bets(self, window_seconds: float = 300) -> int:
+        """Count how many Up/Down directional bets were placed in the last N seconds.
+
+        Used to limit correlated exposure: when BTC/ETH/SOL/DOGE all have
+        5-min windows at the same time, a wrong Binance signal causes
+        simultaneous losses across all cryptos.
+        """
+        now = time.time()
+        count = 0
+        for opp in self._bet_placed.values():
+            if opp.outcome != "pending":
+                continue
+            # Only count directional (Up/Down) bets, not closing arb
+            if opp.min_probability_required == 0.0 and not opp.resolved:
+                if now - opp.timestamp < window_seconds:
+                    count += 1
+        return count
+
     def _check_up_down_market(
         self, market: MarketState, price_check: dict, hours: float, still_active: set[str]
     ):
@@ -317,6 +335,21 @@ class ClosingArbitrageDetector:
         if price <= 0 or price >= 0.60:
             self._stats["price_checks_rejected"] += 1
             return
+
+        # Limit concurrent directional bets to reduce correlated drawdowns
+        # (e.g., BTC+ETH+DOGE+SOL all losing in same 5-min window)
+        key = f"{market.condition_id}:{'YES' if is_yes else 'NO'}"
+        if key not in self._bet_placed:
+            concurrent = self._count_recent_updown_bets(window_seconds=300)
+            if concurrent >= 3:
+                self._stats["price_checks_rejected"] += 1
+                logger.info(
+                    "updown_concurrent_limit",
+                    question=market.question[:60],
+                    concurrent_bets=concurrent,
+                    max_allowed=3,
+                )
+                return
 
         self._stats["price_checks_confirmed"] += 1
 
