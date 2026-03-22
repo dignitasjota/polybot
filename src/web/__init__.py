@@ -20,16 +20,19 @@ from src.web.routes_panel import routes as panel_routes
 
 
 def create_app(bot) -> web.Application:
-    app = web.Application(middlewares=[auth_middleware])
+    app = web.Application()
     app["bot"] = bot
 
-    # Session setup — key from env or generate ephemeral
+    # Session setup — MUST be registered before auth_middleware
     secret_key = os.environ.get("SESSION_SECRET")
     if secret_key:
         key = secret_key.encode()[:32].ljust(32, b"\0")
     else:
         key = Fernet.generate_key()[:32]
     aiohttp_session.setup(app, EncryptedCookieStorage(key))
+
+    # Auth middleware AFTER session middleware
+    app.middlewares.append(auth_middleware)
 
     # Jinja2 templates
     templates_dir = Path(__file__).parent.parent / "templates"
