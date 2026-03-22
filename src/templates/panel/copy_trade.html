@@ -100,6 +100,10 @@
                 <label>Max Daily Loss ($)</label>
                 <input type="number" name="max_daily_loss" value="{{ params.max_daily_loss }}" step="1" min="1">
             </div>
+            <div class="form-group">
+                <label>Simulated Balance ($)</label>
+                <input type="number" name="simulated_balance" value="{{ params.simulated_balance }}" step="10" min="10">
+            </div>
         </div>
         <div style="margin-top:15px;">
             <button type="submit" class="btn btn-success">Save Parameters</button>

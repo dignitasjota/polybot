@@ -4,7 +4,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from aiohttp import web
-from aiohttp_session import get_session
 import aiohttp_jinja2
 
 routes = web.RouteTableDef()
@@ -17,7 +16,7 @@ def _esc(text: str) -> str:
 @routes.get("/")
 async def handle_dashboard(request: web.Request) -> web.Response:
     bot = request.app["bot"]
-    session = await get_session(request)
+    session = request.get("session", {})
 
     tz_display = timezone(timedelta(hours=1))
     now = datetime.now(tz_display)

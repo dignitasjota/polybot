@@ -35,6 +35,7 @@ class ConfigManager:
             "max_concurrent_bets": cfg.max_concurrent_bets,
             "max_bet_per_trade": acc.risk.max_bet_per_trade,
             "max_daily_loss": acc.risk.max_daily_loss,
+            "simulated_balance": acc.risk.simulated_balance,
         }
 
     def set_copy_trade_params(self, params: dict):
@@ -54,6 +55,8 @@ class ConfigManager:
                 acc_cfg.risk.max_bet_per_trade = float(params["max_bet_per_trade"])
             if "max_daily_loss" in params:
                 acc_cfg.risk.max_daily_loss = float(params["max_daily_loss"])
+            if "simulated_balance" in params:
+                acc_cfg.risk.simulated_balance = float(params["simulated_balance"])
 
         # Also update live AccountRunner objects
         for runner in self.bot.accounts:
@@ -72,6 +75,8 @@ class ConfigManager:
                 cfg.risk.max_bet_per_trade = float(params["max_bet_per_trade"])
             if "max_daily_loss" in params:
                 cfg.risk.max_daily_loss = float(params["max_daily_loss"])
+            if "simulated_balance" in params:
+                cfg.risk.simulated_balance = float(params["simulated_balance"])
 
         self._persist()
 
@@ -112,6 +117,12 @@ class ConfigManager:
         """Return current directional params."""
         s = self.config.strategy
         r = self.config.risk
+        # Get balance from first directional account
+        balance = r.simulated_balance
+        for acc in self.config.accounts:
+            if acc.strategy_type == "directional":
+                balance = acc.risk.simulated_balance
+                break
         return {
             "kill_switch": r.kill_switch,
             "min_margin_net": s.min_margin_net,
@@ -120,6 +131,7 @@ class ConfigManager:
             "max_concurrent_bets": s.max_concurrent_bets,
             "max_bet_per_trade": r.max_bet_per_trade,
             "max_daily_loss": r.max_daily_loss,
+            "simulated_balance": balance,
         }
 
     def set_directional_params(self, params: dict):
@@ -143,12 +155,19 @@ class ConfigManager:
         if "max_daily_loss" in params:
             r.max_daily_loss = float(params["max_daily_loss"])
 
+        if "simulated_balance" in params:
+            for acc in self.config.accounts:
+                if acc.strategy_type == "directional":
+                    acc.risk.simulated_balance = float(params["simulated_balance"])
+
         # Update live runner risk configs
         for runner in self.bot.accounts:
             if runner.strategy_type == "directional":
                 runner.account.risk.kill_switch = r.kill_switch
                 runner.account.risk.max_bet_per_trade = r.max_bet_per_trade
                 runner.account.risk.max_daily_loss = r.max_daily_loss
+                if "simulated_balance" in params:
+                    runner.account.risk.simulated_balance = float(params["simulated_balance"])
 
         self._persist()
 
@@ -192,6 +211,7 @@ class ConfigManager:
             acc_raw.setdefault("risk", {})
             acc_raw["risk"]["max_bet_per_trade"] = acc_cfg.risk.max_bet_per_trade
             acc_raw["risk"]["max_daily_loss"] = acc_cfg.risk.max_daily_loss
+            acc_raw["risk"]["simulated_balance"] = acc_cfg.risk.simulated_balance
 
         with open(self._toml_path, "wb") as f:
             tomli_w.dump(raw, f)

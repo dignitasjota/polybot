@@ -1,20 +1,20 @@
 """Auth middleware — redirects unauthenticated requests to /login."""
 from aiohttp import web
-from aiohttp_session import get_session
 
-# Paths that don't require authentication
-PUBLIC_PATHS = {"/login", "/static"}
+from src.web.session import read_session_cookie, SESSION_COOKIE
 
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     path = request.path
-    # Allow public paths
     if path == "/login" or path.startswith("/static/"):
         return await handler(request)
 
-    session = await get_session(request)
-    if not session.get("user"):
+    cookie = request.cookies.get(SESSION_COOKIE, "")
+    session = read_session_cookie(cookie) if cookie else None
+
+    if not session or not session.get("user"):
         raise web.HTTPFound("/login")
 
+    request["session"] = session
     return await handler(request)

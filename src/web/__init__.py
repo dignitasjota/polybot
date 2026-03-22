@@ -1,15 +1,11 @@
-"""Web application factory with Jinja2 + session + auth middleware."""
+"""Web application factory with Jinja2 + lightweight session + auth middleware."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import aiohttp_jinja2
-import aiohttp_session
 import jinja2
 from aiohttp import web
-from aiohttp_session.cookie_storage import EncryptedCookieStorage
-from cryptography.fernet import Fernet
 
 from src.db import init_db
 from src.web.auth import routes as auth_routes
@@ -17,22 +13,14 @@ from src.web.middleware import auth_middleware
 from src.web.routes_api import routes as api_routes
 from src.web.routes_dashboard import routes as dashboard_routes
 from src.web.routes_panel import routes as panel_routes
+from src.web.session import init_session_secret
 
 
 def create_app(bot) -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[auth_middleware])
     app["bot"] = bot
 
-    # Session setup — MUST be registered before auth_middleware
-    secret_key = os.environ.get("SESSION_SECRET")
-    if secret_key:
-        key = secret_key.encode()[:32].ljust(32, b"\0")
-    else:
-        key = Fernet.generate_key()[:32]
-    aiohttp_session.setup(app, EncryptedCookieStorage(key))
-
-    # Auth middleware AFTER session middleware
-    app.middlewares.append(auth_middleware)
+    init_session_secret()
 
     # Jinja2 templates
     templates_dir = Path(__file__).parent.parent / "templates"

@@ -4,7 +4,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from aiohttp import web
-from aiohttp_session import get_session
 import aiohttp_jinja2
 
 from src.db import (
@@ -24,7 +23,7 @@ def _get_cm(request: web.Request) -> ConfigManager:
 
 
 async def _base_context(request: web.Request) -> dict:
-    session = await get_session(request)
+    session = request.get("session", {})
     bot = request.app["bot"]
     return {
         "session_user": session.get("user", ""),
@@ -72,7 +71,7 @@ async def panel_copy_trade(request: web.Request) -> web.Response:
 @routes.post("/panel/copy-trade/wallets")
 async def panel_copy_wallets(request: web.Request) -> web.Response:
     cm = _get_cm(request)
-    session = await get_session(request)
+    session = request.get("session", {})
     user = session.get("user", "unknown")
     data = await request.post()
     action = data.get("action", "")
@@ -110,13 +109,13 @@ async def panel_copy_wallets(request: web.Request) -> web.Response:
 @routes.post("/panel/copy-trade/params")
 async def panel_copy_params(request: web.Request) -> web.Response:
     cm = _get_cm(request)
-    session = await get_session(request)
+    session = request.get("session", {})
     user = session.get("user", "unknown")
     data = await request.post()
 
     params = {}
     for key in ("fixed_bet_size", "poll_interval_ms", "min_price", "max_concurrent_bets",
-                "max_bet_per_trade", "max_daily_loss"):
+                "max_bet_per_trade", "max_daily_loss", "simulated_balance"):
         if key in data and data[key]:
             params[key] = data[key]
 
@@ -142,13 +141,13 @@ async def panel_directional(request: web.Request) -> web.Response:
 @routes.post("/panel/directional/params")
 async def panel_directional_params(request: web.Request) -> web.Response:
     cm = _get_cm(request)
-    session = await get_session(request)
+    session = request.get("session", {})
     user = session.get("user", "unknown")
     data = await request.post()
 
     params = {}
     for key in ("kill_switch", "min_margin_net", "max_price", "min_buffer_pct",
-                "max_concurrent_bets", "max_bet_per_trade", "max_daily_loss"):
+                "max_concurrent_bets", "max_bet_per_trade", "max_daily_loss", "simulated_balance"):
         if key in data and data[key]:
             params[key] = data[key]
 
@@ -181,7 +180,7 @@ async def panel_settings(request: web.Request) -> web.Response:
 
 @routes.post("/panel/settings/password")
 async def panel_change_password(request: web.Request) -> web.Response:
-    session = await get_session(request)
+    session = request.get("session", {})
     user = session.get("user", "unknown")
     data = await request.post()
 
