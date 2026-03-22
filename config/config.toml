@@ -9,7 +9,7 @@ max_time_to_resolution = "15m"    # Busca mercados que resuelven en <15min (capt
 min_margin_net = 0.008            # Margen minimo por share tras fees ($0.008)
 tag = "crypto"                    # Solo mercados con tag crypto
 max_price = 0.60                  # Precio maximo para bets Up/Down directional
-min_buffer_pct = 0.10             # Buffer minimo % para confirmacion de precio Binance
+min_buffer_pct = 0.03             # Buffer minimo % para confirmacion de precio Binance (3%)
 max_concurrent_bets = 3           # Max bets directionales concurrentes
 
 # Probabilidad minima escalada segun tiempo restante

@@ -101,7 +101,7 @@ class ClosingArbitrageDetector:
         saturating CPU when WS sends hundreds of messages per second.
         """
         now = time.time()
-        if now - self._last_scan_time < 1.0:
+        if now - self._last_scan_time < 0.5:
             return
         self._last_scan_time = now
         self._stats["total_scans"] += 1

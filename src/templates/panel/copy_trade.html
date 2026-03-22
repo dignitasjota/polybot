@@ -77,32 +77,39 @@
             <div class="form-group">
                 <label>Fixed Bet Size ($)</label>
                 <input type="number" name="fixed_bet_size" value="{{ params.fixed_bet_size }}" step="0.5" min="0.5">
+                <span class="desc">Cantidad fija en $ que se apuesta en cada trade copiado</span>
             </div>
             <div class="form-group">
                 <label>Poll Interval (ms)</label>
                 <input type="number" name="poll_interval_ms" value="{{ params.poll_interval_ms }}" step="100" min="100">
+                <span class="desc">Cada cuantos milisegundos se consulta la actividad de las wallets</span>
             </div>
             <div class="form-group">
                 <label>Min Price</label>
                 <input type="number" name="min_price" value="{{ params.min_price }}" step="0.01" min="0" max="1">
+                <span class="desc">Ignora trades por debajo de este precio. Debajo de 0.35 el WR es 0%</span>
             </div>
         </div>
         <div class="form-row" style="margin-top:12px;">
             <div class="form-group">
                 <label>Max Concurrent Bets</label>
                 <input type="number" name="max_concurrent_bets" value="{{ params.max_concurrent_bets }}" min="1" max="20">
+                <span class="desc">Maximo de apuestas abiertas en 5 min para evitar drawdowns correlacionados</span>
             </div>
             <div class="form-group">
                 <label>Max Bet Per Trade ($)</label>
                 <input type="number" name="max_bet_per_trade" value="{{ params.max_bet_per_trade }}" step="1" min="1">
+                <span class="desc">Tope absoluto en $ por apuesta individual</span>
             </div>
             <div class="form-group">
                 <label>Max Daily Loss ($)</label>
                 <input type="number" name="max_daily_loss" value="{{ params.max_daily_loss }}" step="1" min="1">
+                <span class="desc">Stop-loss diario. Si las perdidas superan este valor, deja de copiar</span>
             </div>
             <div class="form-group">
                 <label>Simulated Balance ($)</label>
                 <input type="number" name="simulated_balance" value="{{ params.simulated_balance }}" step="10" min="10">
+                <span class="desc">Capital inicial simulado para paper trading</span>
             </div>
         </div>
         <div style="margin-top:15px;">

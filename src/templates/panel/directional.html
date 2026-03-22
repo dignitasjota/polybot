@@ -40,7 +40,7 @@
                             onchange="updateMaxMarkets()">
                         <span class="slider"></span>
                     </label>
-                    <span style="color:#888;font-size:0.8em;">Solo mercados crypto (BTC, ETH, SOL, DOGE...)</span>
+                    <span class="desc">Solo mercados crypto (BTC, ETH, SOL, DOGE...)</span>
                 </div>
             </div>
             <div class="form-group">
@@ -51,6 +51,7 @@
                 <span id="max_markets_hint" style="color:#555;font-size:0.75em;display:{{ 'block' if params.crypto_only else 'none' }};">
                     Limitado a 20 en modo crypto
                 </span>
+                <span class="desc">Numero maximo de mercados suscritos via WebSocket</span>
             </div>
         </div>
         <div style="margin-top:15px;">
@@ -67,32 +68,39 @@
             <div class="form-group">
                 <label>Min Margin Net ($)</label>
                 <input type="number" name="min_margin_net" value="{{ params.min_margin_net }}" step="0.001" min="0">
+                <span class="desc">Margen minimo por share despues de fees para abrir una posicion</span>
             </div>
             <div class="form-group">
                 <label>Max Price (Up/Down)</label>
                 <input type="number" name="max_price" value="{{ params.max_price }}" step="0.01" min="0" max="1">
+                <span class="desc">Precio maximo al que comprar. Por encima, el risk/reward no compensa</span>
             </div>
             <div class="form-group">
                 <label>Min Buffer Pct</label>
                 <input type="number" name="min_buffer_pct" value="{{ params.min_buffer_pct }}" step="0.01" min="0" max="1">
+                <span class="desc">Cambio minimo en Binance (%) para confirmar direccion antes de apostar</span>
             </div>
         </div>
         <div class="form-row" style="margin-top:12px;">
             <div class="form-group">
                 <label>Max Concurrent Bets</label>
                 <input type="number" name="max_concurrent_bets" value="{{ params.max_concurrent_bets }}" min="1" max="20">
+                <span class="desc">Maximo de apuestas abiertas en una ventana de 5 min para evitar drawdowns correlacionados</span>
             </div>
             <div class="form-group">
                 <label>Max Bet Per Trade ($)</label>
                 <input type="number" name="max_bet_per_trade" value="{{ params.max_bet_per_trade }}" step="1" min="1">
+                <span class="desc">Tope absoluto en $ por apuesta individual, independiente del % de balance</span>
             </div>
             <div class="form-group">
                 <label>Max Daily Loss ($)</label>
                 <input type="number" name="max_daily_loss" value="{{ params.max_daily_loss }}" step="1" min="1">
+                <span class="desc">Stop-loss diario. Si las perdidas superan este valor, deja de operar</span>
             </div>
             <div class="form-group">
                 <label>Simulated Balance ($)</label>
                 <input type="number" name="simulated_balance" value="{{ params.simulated_balance }}" step="10" min="10">
+                <span class="desc">Capital inicial simulado. Se usa para calcular el tamano de cada apuesta</span>
             </div>
         </div>
         <div style="margin-top:15px;">
@@ -107,7 +115,7 @@ function updateMaxMarkets() {
     var input = document.getElementById('max_markets_input');
     var hint = document.getElementById('max_markets_hint');
     if (cb.checked) {
-        input.value = 50;
+        input.value = 20;
         input.disabled = true;
         input.style.color = '#555';
         input.style.background = '#111';
