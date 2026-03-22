@@ -1,0 +1,31 @@
+- Perfil de @vague-sourdough
+
+  ┌───────────────┬────────────────────────────────────────────┐
+  │     Dato      │                   Valor                    │
+  ├───────────────┼────────────────────────────────────────────┤
+  │ Wallet        │ 0x70ec235a31eb35f243e2618d6ea3b5b8962bbb5d │
+  ├───────────────┼────────────────────────────────────────────┤
+  │ PnL total     │ +$384,893                                  │
+  ├───────────────┼────────────────────────────────────────────┤
+  │ Volumen       │ $30.6M                                     │
+  ├───────────────┼────────────────────────────────────────────┤
+  │ Mercados      │ 28,843                                     │
+  ├───────────────┼────────────────────────────────────────────┤
+  │ Mayor win     │ $5,070                                     │
+  ├───────────────┼────────────────────────────────────────────┤
+  │ Miembro desde │ Feb 2026 (~6 semanas)                      │
+  └───────────────┴────────────────────────────────────────────┘
+
+  Analisis
+
+  A favor:
+  - PnL de +$384K en 6 semanas es excepcional
+  - 28,843 mercados = opera a altísima frecuencia (~680 trades/día), probablemente bot automatizado
+  - ROI implícito ~1.3% sobre volumen, consistente
+  - Opera crypto + sports + politics (diversificado)
+
+  En contra:
+  - Su estrategia es de alto volumen/bajo margen — nuestro copy trader con $5 fixed bet y polling de 500ms probablemente no puede seguirle el ritmo
+  - Con 680 trades/día, copiarle generaría muchísimo ruido y comisiones
+  - Su edge puede depender de velocidad de ejecución (latencia) que no podemos replicar copiando
+

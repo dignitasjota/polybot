@@ -72,7 +72,6 @@ class ClosingArbitrageDetector:
         self._bet_placed: dict[str, Opportunity] = {}  # "condition_id:side" -> first bet (for paper trading)
         self._settled_conditions: set[str] = set()  # Already settled condition_ids
         self._price_checker = PriceChecker(min_buffer_pct=self.config.min_buffer_pct)
-        self._last_scan_time: float = 0.0  # Throttle: min 1s between scans
         self._on_opportunity_cb = None  # async callback(Opportunity) for executor
         self._stats = {
             "total_scans": 0,
@@ -95,32 +94,40 @@ class ClosingArbitrageDetector:
         await self._price_checker.close()
 
     async def check(self, token_id: str = "", event_type: str = ""):
-        """Check all markets for closing arbitrage opportunities.
+        """Check market(s) for closing arbitrage opportunities.
 
-        Throttled: skips if called less than 0.5s after last scan to avoid
-        saturating CPU when WS sends hundreds of messages per second.
+        If token_id is provided, only checks the specific market that was
+        updated — O(1) instead of O(N). Full scans run periodically or
+        on resolution events.
         """
-        now = time.time()
-        if now - self._last_scan_time < 0.5:
-            return
-        self._last_scan_time = now
         self._stats["total_scans"] += 1
-        still_active: set[str] = set()
 
+        if token_id and event_type != "resolution_check":
+            # Fast path: only check the market that received the update
+            market = self.tracker.get_by_token(token_id)
+            if market and not market.is_stale:
+                if market.resolved and market.winning_token_id:
+                    self._settle_pending(market)
+                    self._check_resolved_market(market)
+                else:
+                    still_active: set[str] = set()
+                    self._check_pre_resolution(market, still_active)
+                    # Check if any opportunities for this market disappeared
+                    self._cleanup_disappeared_for_market(market, still_active)
+            return
+
+        # Full scan: resolution checks, rest fallback, or periodic
+        still_active: set[str] = set()
         for market in self.tracker.all_markets:
             if market.is_stale:
                 continue
-
-            # When a market resolves, settle pending opportunities
             if market.resolved and market.winning_token_id:
                 self._settle_pending(market)
                 self._check_resolved_market(market)
                 continue
-
-            # Check pre-resolution (higher risk, token priced high)
             self._check_pre_resolution(market, still_active)
 
-        # Mark disappeared opportunities (were active, no longer detected)
+        # Mark disappeared opportunities
         now = time.time()
         for key in list(self._active_opportunities):
             if key not in still_active:
@@ -551,6 +558,24 @@ class ClosingArbitrageDetector:
             potential_profit=f"${opp.potential_profit:.2f}",
             resolved=opp.resolved,
         )
+
+    def _cleanup_disappeared_for_market(self, market, still_active: set[str]):
+        """Check if opportunities for a specific market have disappeared."""
+        now = time.time()
+        cid = market.condition_id
+        for key in list(self._active_opportunities):
+            if key.startswith(cid) and key not in still_active:
+                opp = self._active_opportunities.pop(key)
+                if opp.disappeared_at == 0:
+                    opp.disappeared_at = now
+                    opp.duration_seconds = round(now - opp.timestamp, 1)
+                    logger.info(
+                        "opportunity_disappeared",
+                        question=opp.question[:60],
+                        side=opp.token_side,
+                        price=f"${opp.token_price:.4f}",
+                        duration=f"{opp.duration_seconds:.0f}s",
+                    )
 
     def cleanup_market(self, condition_id: str):
         """Remove all tracking data for a market that's been cleaned up."""
