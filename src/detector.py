@@ -8,7 +8,12 @@ import structlog
 
 from src.config import RiskConfig, StrategyConfig
 from src.market_tracker import MarketState, MarketTracker
-from src.price_checker import PriceChecker
+from src.price_checker import CRYPTO_SYMBOLS, PriceChecker
+
+# All crypto names we recognize (CRYPTO_SYMBOLS keys + extras not on Binance)
+_CRYPTO_NAMES = set(CRYPTO_SYMBOLS.keys()) | {
+    "solana", "xrp", "hyperliquid", "toncoin", "shiba",
+}
 
 logger = structlog.get_logger("polymarket.detector")
 
@@ -216,6 +221,10 @@ class ClosingArbitrageDetector:
         has converged and we're truly buying the winner at a small discount.
         Low prices (e.g., $0.38) indicate stale/unconverged data — too risky.
         """
+        # When crypto_only is active, skip non-crypto markets
+        if self.config.tag == "crypto" and not self._is_crypto_market(market.question):
+            return
+
         winning_id = market.winning_token_id
         is_yes = winning_id == market.yes_token_id
         price = market.best_ask_yes if is_yes else market.best_ask_no
@@ -279,6 +288,11 @@ class ClosingArbitrageDetector:
                     balance=f"${self._balance:.2f}",
                 )
 
+    def _is_crypto_market(self, question: str) -> bool:
+        """Check if a market question mentions a known cryptocurrency."""
+        q_lower = question.lower()
+        return any(name in q_lower for name in _CRYPTO_NAMES)
+
     def _check_pre_resolution(self, market: MarketState, still_active: set[str]):
         """Pre-resolution: look for tokens priced >= min probability for their time remaining."""
         hours = market.hours_to_resolution
@@ -287,6 +301,10 @@ class ClosingArbitrageDetector:
 
         # Don't bet on markets that have reached resolution time — outcome is unknown
         if hours <= 0:
+            return
+
+        # When crypto_only is active, skip non-crypto markets entirely
+        if self.config.tag == "crypto" and not self._is_crypto_market(market.question):
             return
 
         min_prob = self.config.get_min_probability(hours)
