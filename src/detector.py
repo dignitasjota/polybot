@@ -72,7 +72,7 @@ class ClosingArbitrageDetector:
         self._bet_placed: dict[str, Opportunity] = {}  # "condition_id:side" -> first bet (for paper trading)
         self._settled_conditions: set[str] = set()  # Already settled condition_ids
         self._price_checker = PriceChecker(min_buffer_pct=self.config.min_buffer_pct)
-        self._last_scan_time: float = 0.0  # Throttle: min 0.5s between scans
+        self._last_scan_time: float = 0.0  # Throttle: min 1s between scans
         self._on_opportunity_cb = None  # async callback(Opportunity) for executor
         self._stats = {
             "total_scans": 0,
@@ -101,7 +101,7 @@ class ClosingArbitrageDetector:
         saturating CPU when WS sends hundreds of messages per second.
         """
         now = time.time()
-        if now - self._last_scan_time < 0.5:
+        if now - self._last_scan_time < 1.0:
             return
         self._last_scan_time = now
         self._stats["total_scans"] += 1
