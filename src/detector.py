@@ -72,6 +72,7 @@ class ClosingArbitrageDetector:
         self._bet_placed: dict[str, Opportunity] = {}  # "condition_id:side" -> first bet (for paper trading)
         self._settled_conditions: set[str] = set()  # Already settled condition_ids
         self._price_checker = PriceChecker(min_buffer_pct=self.config.min_buffer_pct)
+        self._last_scan_time: float = 0.0  # Throttle: min 0.5s between scans
         self._on_opportunity_cb = None  # async callback(Opportunity) for executor
         self._stats = {
             "total_scans": 0,
@@ -94,7 +95,15 @@ class ClosingArbitrageDetector:
         await self._price_checker.close()
 
     async def check(self, token_id: str = "", event_type: str = ""):
-        """Check all markets for closing arbitrage opportunities."""
+        """Check all markets for closing arbitrage opportunities.
+
+        Throttled: skips if called less than 0.5s after last scan to avoid
+        saturating CPU when WS sends hundreds of messages per second.
+        """
+        now = time.time()
+        if now - self._last_scan_time < 0.5:
+            return
+        self._last_scan_time = now
         self._stats["total_scans"] += 1
         still_active: set[str] = set()
 
