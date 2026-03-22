@@ -167,12 +167,12 @@ class ConfigManager:
             s.tag = "crypto" if crypto else ""
             if crypto:
                 self.config.data.max_markets_monitored = min(
-                    self.config.data.max_markets_monitored, 50
+                    self.config.data.max_markets_monitored, 20
                 )
         if "max_markets_monitored" in params:
             val = int(params["max_markets_monitored"])
             if s.tag == "crypto":
-                val = min(val, 50)
+                val = min(val, 20)
             self.config.data.max_markets_monitored = val
 
         # Update live runner risk configs
