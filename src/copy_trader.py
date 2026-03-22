@@ -206,6 +206,21 @@ class CopyTrader:
         except Exception:
             return None
 
+    def _count_recent_pending_bets(self, window_seconds: float = 300) -> int:
+        """Count pending copy-trade bets placed in the last N seconds.
+
+        Limits correlated exposure when a wallet bets on multiple
+        overlapping 5-min crypto windows simultaneously.
+        """
+        now = time.time()
+        count = 0
+        for bet in self._all_bets:
+            if bet.outcome != "pending" and now - bet.resolved_at > window_seconds:
+                continue
+            if bet.outcome == "pending" and now - bet.timestamp < window_seconds:
+                count += 1
+        return count
+
     async def _emit_opportunity(self, trade: WalletTrade):
         outcome_lower = trade.outcome.lower()
         token_side = "YES" if outcome_lower in ("yes", "y", "up") else "NO"
@@ -215,6 +230,30 @@ class CopyTrader:
         key = f"{trade.condition_id}:{token_side}"
         if key in self._bets:
             return  # Already copied this exact side
+
+        # Filter out low-price bets — data shows 0 wins and 11 losses below 0.35
+        if trade.price < 0.35:
+            logger.info(
+                "copy_trade_price_filter",
+                wallet=trade.maker_address[:10],
+                question=trade.question[:60],
+                price=f"${trade.price:.4f}",
+                min_price=0.35,
+            )
+            return
+
+        # Limit concurrent bets to reduce correlated drawdowns
+        # (e.g., 6 consecutive losses 5:30-6:00AM from overlapping windows)
+        concurrent = self._count_recent_pending_bets(window_seconds=300)
+        if concurrent >= 3:
+            logger.info(
+                "copy_trade_concurrent_limit",
+                wallet=trade.maker_address[:10],
+                question=trade.question[:60],
+                concurrent_bets=concurrent,
+                max_allowed=3,
+            )
+            return
 
         # Calculate bet size
         if self.config.copy_size_mode == "proportional":
