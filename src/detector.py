@@ -325,22 +325,20 @@ class ClosingArbitrageDetector:
                 self._evaluate_side(market, is_yes=False, min_prob=min_prob, hours_remaining=hours)
                 still_active.add(f"{market.condition_id}:NO")
 
-    def _count_recent_updown_bets(self, window_seconds: float = 300) -> int:
-        """Count how many Up/Down directional bets were placed in the last N seconds.
+    def _count_recent_bets(self, window_seconds: float = 300) -> int:
+        """Count ALL pending bets placed in the last N seconds.
 
-        Used to limit correlated exposure: when BTC/ETH/SOL/DOGE all have
-        5-min windows at the same time, a wrong Binance signal causes
-        simultaneous losses across all cryptos.
+        Counts both directional and closing arb bets to limit total
+        correlated exposure. A wrong signal or market reversal causes
+        simultaneous losses across all open positions.
         """
         now = time.time()
         count = 0
         for opp in self._bet_placed.values():
             if opp.outcome != "pending":
                 continue
-            # Only count directional (Up/Down) bets, not closing arb
-            if opp.min_probability_required == 0.0 and not opp.resolved:
-                if now - opp.timestamp < window_seconds:
-                    count += 1
+            if now - opp.timestamp < window_seconds:
+                count += 1
         return count
 
     def _check_up_down_market(
@@ -369,15 +367,14 @@ class ClosingArbitrageDetector:
             self._stats["price_checks_rejected"] += 1
             return
 
-        # Limit concurrent directional bets to reduce correlated drawdowns
-        # (e.g., BTC+ETH+DOGE+SOL all losing in same 5-min window)
+        # Limit concurrent bets (directional + closing arb) to reduce correlated drawdowns
         key = f"{market.condition_id}:{'YES' if is_yes else 'NO'}"
         if key not in self._bet_placed:
-            concurrent = self._count_recent_updown_bets(window_seconds=300)
+            concurrent = self._count_recent_bets(window_seconds=300)
             if concurrent >= self.config.max_concurrent_bets:
                 self._stats["price_checks_rejected"] += 1
                 logger.info(
-                    "updown_concurrent_limit",
+                    "concurrent_limit",
                     question=market.question[:60],
                     concurrent_bets=concurrent,
                     max_allowed=self.config.max_concurrent_bets,
@@ -395,11 +392,13 @@ class ClosingArbitrageDetector:
 
         # Dynamic bet sizing: scale based on signal strength
         # signal_strength = how far the price moved beyond the minimum buffer
+        # Conservative scaling: max 1.3x to avoid amplifying losses on wrong signals
         crypto_name = price_check.get("crypto", "")
         buffer_used = price_check.get("buffer_used", self.config.min_buffer_pct)
         signal_ratio = abs(change_pct) / buffer_used if buffer_used > 0 else 1.0
-        # Clamp: 1.0 (just barely confirmed) to 2.0 (very strong signal)
-        signal_multiplier = min(2.0, max(1.0, signal_ratio))
+        # Clamp: 1.0 (just barely confirmed) to 1.3 (strong signal)
+        # Gradual: sqrt scaling to dampen extreme ratios
+        signal_multiplier = min(1.3, max(1.0, 1.0 + (signal_ratio - 1.0) * 0.3))
 
         suggested_bet, potential_profit = self._calculate_bet(
             price, margin_net, depth, signal_multiplier=signal_multiplier,
@@ -460,7 +459,20 @@ class ClosingArbitrageDetector:
         if margin_net < self.config.min_margin_net:
             return
 
+        # Limit concurrent bets (shared with directional)
         side = "YES" if is_yes else "NO"
+        key = f"{market.condition_id}:{side}"
+        if key not in self._bet_placed:
+            concurrent = self._count_recent_bets(window_seconds=300)
+            if concurrent >= self.config.max_concurrent_bets:
+                logger.info(
+                    "concurrent_limit",
+                    question=market.question[:60],
+                    concurrent_bets=concurrent,
+                    max_allowed=self.config.max_concurrent_bets,
+                )
+                return
+
         depth = self._get_depth_at_best_ask(market, is_yes)
 
         suggested_bet, potential_profit = self._calculate_bet(price, margin_net, depth)
