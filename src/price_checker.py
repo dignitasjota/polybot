@@ -16,10 +16,10 @@ BINANCE_API = "https://api.binance.com/api/v3"
 CRYPTO_SYMBOLS = {
     "bitcoin": "BTCUSDT",
     "ethereum": "ETHUSDT",
-    # "solana": "SOLUSDT",  # Disabled: ~41% WR, losing money in 8h backtest
+    "solana": "SOLUSDT",
     "bnb": "BNBUSDT",
     "dogecoin": "DOGEUSDT",
-    # "xrp": "XRPUSDT",  # Disabled: 42.9% WR, -$7.47/trade in 8h backtest
+    "xrp": "XRPUSDT",
     "cardano": "ADAUSDT",
     "avalanche": "AVAXUSDT",
     "polkadot": "DOTUSDT",
@@ -30,6 +30,26 @@ CRYPTO_SYMBOLS = {
     "pepe": "PEPEUSDT",
     # Note: Hyperliquid (HYPE) is NOT on Binance — these markets
     # will fall back to order-book-only logic (no price verification)
+}
+
+# Per-crypto min buffer % for directional confirmation.
+# Less volatile cryptos need higher buffer to avoid noise.
+# More volatile cryptos can use lower buffer to capture more trades.
+CRYPTO_BUFFER_PCT = {
+    "bitcoin": 0.04,      # Baja volatilidad → buffer alto
+    "ethereum": 0.035,     # Media-baja
+    "bnb": 0.03,           # Media
+    "litecoin": 0.03,      # Media
+    "cardano": 0.03,       # Media
+    "polkadot": 0.03,      # Media
+    "chainlink": 0.03,     # Media
+    "polygon": 0.03,       # Media
+    "avalanche": 0.025,    # Media-alta volatilidad
+    "xrp": 0.025,          # Media-alta volatilidad
+    "solana": 0.025,       # Media-alta volatilidad
+    "sui": 0.02,           # Alta volatilidad
+    "dogecoin": 0.02,      # Alta volatilidad
+    "pepe": 0.02,          # Alta volatilidad (meme coin)
 }
 
 # Regex to parse "Crypto Up or Down - March 21, 6:05AM-6:10AM ET"
@@ -280,7 +300,11 @@ class PriceChecker:
         # Calculate direction
         change_pct = ((current_price - open_price) / open_price) * 100
 
-        if abs(change_pct) < self.min_buffer_pct:
+        # Use per-crypto buffer if available, otherwise fall back to global
+        crypto_name = parsed["crypto"]
+        buffer = CRYPTO_BUFFER_PCT.get(crypto_name, self.min_buffer_pct)
+
+        if abs(change_pct) < buffer:
             confirmed_side = None  # Too close to call
         elif change_pct > 0:
             confirmed_side = "YES"  # Up
@@ -293,4 +317,6 @@ class PriceChecker:
             "open_price": open_price,
             "change_pct": round(change_pct, 4),
             "symbol": symbol,
+            "crypto": crypto_name,
+            "buffer_used": buffer,
         }

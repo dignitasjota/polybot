@@ -8,11 +8,11 @@ import structlog
 
 from src.config import RiskConfig, StrategyConfig
 from src.market_tracker import MarketState, MarketTracker
-from src.price_checker import CRYPTO_SYMBOLS, PriceChecker
+from src.price_checker import CRYPTO_BUFFER_PCT, CRYPTO_SYMBOLS, PriceChecker
 
 # All crypto names we recognize (CRYPTO_SYMBOLS keys + extras not on Binance)
 _CRYPTO_NAMES = set(CRYPTO_SYMBOLS.keys()) | {
-    "solana", "xrp", "hyperliquid", "toncoin", "shiba",
+    "hyperliquid", "toncoin", "shiba",
 }
 
 logger = structlog.get_logger("polymarket.detector")
@@ -392,7 +392,18 @@ class ClosingArbitrageDetector:
 
         side = "YES" if is_yes else "NO"
         depth = self._get_depth_at_best_ask(market, is_yes)
-        suggested_bet, potential_profit = self._calculate_bet(price, margin_net, depth)
+
+        # Dynamic bet sizing: scale based on signal strength
+        # signal_strength = how far the price moved beyond the minimum buffer
+        crypto_name = price_check.get("crypto", "")
+        buffer_used = price_check.get("buffer_used", self.config.min_buffer_pct)
+        signal_ratio = abs(change_pct) / buffer_used if buffer_used > 0 else 1.0
+        # Clamp: 1.0 (just barely confirmed) to 2.0 (very strong signal)
+        signal_multiplier = min(2.0, max(1.0, signal_ratio))
+
+        suggested_bet, potential_profit = self._calculate_bet(
+            price, margin_net, depth, signal_multiplier=signal_multiplier,
+        )
         token_id = market.yes_token_id if is_yes else market.no_token_id
 
         opp = Opportunity(
@@ -429,6 +440,8 @@ class ClosingArbitrageDetector:
                 depth=f"{depth:.1f}",
                 bet=f"${suggested_bet:.2f}",
                 hours_left=f"{hours:.3f}",
+                buffer_pct=f"{buffer_used:.3f}%",
+                signal_strength=f"{signal_multiplier:.2f}x",
             )
 
         self._log_opportunity(opp)
@@ -476,13 +489,18 @@ class ClosingArbitrageDetector:
 
         self._log_opportunity(opp)
 
-    def _calculate_bet(self, price: float, margin_net: float, depth: float) -> tuple[float, float]:
+    def _calculate_bet(self, price: float, margin_net: float, depth: float,
+                       signal_multiplier: float = 1.0) -> tuple[float, float]:
         """Calculate suggested bet size (Kelly fractional) and potential profit.
 
         Returns (suggested_bet_usd, potential_profit_usd).
-        Bet = min(balance * max_bet_pct%, max_bet_per_trade, available_depth)
+        Bet = min(balance * max_bet_pct% * signal_multiplier, max_bet_per_trade, available_depth)
+
+        signal_multiplier scales the bet based on signal strength:
+        - 1.0 = signal just barely confirmed (change_pct == buffer)
+        - 2.0 = very strong signal (change_pct >= 2x buffer)
         """
-        kelly_bet = self._balance * self.risk.max_bet_pct / 100.0
+        kelly_bet = self._balance * self.risk.max_bet_pct / 100.0 * signal_multiplier
         bet = min(kelly_bet, self.risk.max_bet_per_trade)
         # Never bet more than current balance
         bet = min(bet, self._balance)
