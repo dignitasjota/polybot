@@ -190,9 +190,11 @@ class PriceChecker:
     check_direction() reads from cache only — zero I/O, zero latency.
     """
 
-    def __init__(self, min_buffer_pct: float = 0.10, poll_interval: float = 1.0):
+    def __init__(self, min_buffer_pct: float = 0.10, poll_interval: float = 1.0,
+                 crypto_configs: dict | None = None):
         self.min_buffer_pct = min_buffer_pct
         self._poll_interval = poll_interval
+        self._crypto_configs = crypto_configs or {}  # name -> CryptoDirectionalConfig
         self._session: aiohttp.ClientSession | None = None
         self._running = False
         self._bg_task: asyncio.Task | None = None
@@ -300,9 +302,20 @@ class PriceChecker:
         # Calculate direction
         change_pct = ((current_price - open_price) / open_price) * 100
 
-        # Use per-crypto buffer if available, otherwise fall back to global
+        # Check if this crypto is disabled via per-crypto config
         crypto_name = parsed["crypto"]
-        buffer = CRYPTO_BUFFER_PCT.get(crypto_name, self.min_buffer_pct)
+        cc = self._crypto_configs.get(crypto_name)
+        if cc is not None and not cc.enabled:
+            return {"confirmed_side": None, "current_price": current_price,
+                    "open_price": open_price, "change_pct": 0.0,
+                    "symbol": symbol, "crypto": crypto_name,
+                    "buffer_used": 0, "disabled": True}
+
+        # Use per-crypto buffer: config > hardcoded > global fallback
+        if cc is not None:
+            buffer = cc.buffer_pct
+        else:
+            buffer = CRYPTO_BUFFER_PCT.get(crypto_name, self.min_buffer_pct)
 
         if abs(change_pct) < buffer:
             confirmed_side = None  # Too close to call

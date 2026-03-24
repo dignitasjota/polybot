@@ -175,9 +175,16 @@ async def panel_copy_params(request: web.Request) -> web.Response:
 async def panel_directional(request: web.Request) -> web.Response:
     cm = _get_cm(request)
     ctx = await _base_context(request)
+    crypto_configs = cm.get_crypto_configs()
+    # Sort: enabled first, then alphabetical
+    crypto_list = [
+        {"name": name, **cfg}
+        for name, cfg in sorted(crypto_configs.items(), key=lambda x: (not x[1]["enabled"], x[0]))
+    ]
     ctx.update({
         "active_tab": "directional",
         "params": cm.get_directional_params(),
+        "crypto_configs": crypto_list,
     })
     return aiohttp_jinja2.render_template("panel/directional.html", request, ctx)
 
@@ -206,6 +213,41 @@ async def panel_directional_params(request: web.Request) -> web.Response:
     cm.set_directional_params(params)
     await add_audit(user, "directional_params", str(params))
 
+    raise web.HTTPFound("/panel/directional")
+
+
+@routes.post("/panel/directional/crypto")
+async def panel_directional_crypto(request: web.Request) -> web.Response:
+    cm = _get_cm(request)
+    session = request.get("session", {})
+    user = session.get("user", "unknown")
+    data = await request.post()
+
+    action = data.get("action", "")
+    crypto = data.get("crypto", "").strip().lower()
+
+    if action == "toggle" and crypto:
+        enabled = data.get("enabled", "true").lower() == "true"
+        cm.set_crypto_config(crypto, enabled=enabled)
+        await add_audit(user, "crypto_toggle", f"{crypto} enabled={enabled}")
+        state = "enabled" if enabled else "disabled"
+        msg = f'<div class="flash flash-info">{crypto.title()} {state}</div>'
+
+    elif action == "set_buffer" and crypto:
+        try:
+            buffer = float(data.get("buffer_pct", "0.03"))
+            buffer = max(0.005, min(0.20, buffer))  # Clamp to sane range
+        except ValueError:
+            buffer = 0.03
+        cm.set_crypto_config(crypto, buffer_pct=buffer)
+        await add_audit(user, "crypto_buffer", f"{crypto} buffer_pct={buffer}")
+        msg = f'<div class="flash flash-info">{crypto.title()} buffer: {buffer*100:.1f}%</div>'
+
+    else:
+        msg = '<div class="flash flash-error">Invalid action</div>'
+
+    if request.headers.get("HX-Request"):
+        return web.Response(text=msg, content_type="text/html")
     raise web.HTTPFound("/panel/directional")
 
 

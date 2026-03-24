@@ -76,7 +76,10 @@ class ClosingArbitrageDetector:
         self._active_opportunities: dict[str, Opportunity] = {}  # "condition_id:side" -> latest opp
         self._bet_placed: dict[str, Opportunity] = {}  # "condition_id:side" -> first bet (for paper trading)
         self._settled_conditions: set[str] = set()  # Already settled condition_ids
-        self._price_checker = PriceChecker(min_buffer_pct=self.config.min_buffer_pct)
+        self._price_checker = PriceChecker(
+            min_buffer_pct=self.config.min_buffer_pct,
+            crypto_configs=self.config.crypto_configs,
+        )
         self._on_opportunity_cb = None  # async callback(Opportunity) for executor
         self._stats = {
             "total_scans": 0,
@@ -225,6 +228,10 @@ class ClosingArbitrageDetector:
         if self.config.tag == "crypto" and not self._is_crypto_market(market.question):
             return
 
+        # Skip disabled cryptos
+        if self._is_crypto_disabled(market.question):
+            return
+
         winning_id = market.winning_token_id
         is_yes = winning_id == market.yes_token_id
         price = market.best_ask_yes if is_yes else market.best_ask_no
@@ -293,6 +300,14 @@ class ClosingArbitrageDetector:
         q_lower = question.lower()
         return any(name in q_lower for name in _CRYPTO_NAMES)
 
+    def _is_crypto_disabled(self, question: str) -> bool:
+        """Check if the crypto in this question is disabled via config."""
+        q_lower = question.lower()
+        for name, cc in self.config.crypto_configs.items():
+            if name in q_lower and not cc.enabled:
+                return True
+        return False
+
     def _check_pre_resolution(self, market: MarketState, still_active: set[str]):
         """Pre-resolution: look for tokens priced >= min probability for their time remaining."""
         hours = market.hours_to_resolution
@@ -305,6 +320,10 @@ class ClosingArbitrageDetector:
 
         # When crypto_only is active, skip non-crypto markets entirely
         if self.config.tag == "crypto" and not self._is_crypto_market(market.question):
+            return
+
+        # Skip disabled cryptos (e.g. Hyperliquid)
+        if self._is_crypto_disabled(market.question):
             return
 
         min_prob = self.config.get_min_probability(hours)
@@ -351,6 +370,10 @@ class ClosingArbitrageDetector:
         The edge comes from Binance confirming the direction before the
         Polymarket order book fully adjusts.
         """
+        # Skip disabled cryptos
+        if price_check.get("disabled"):
+            return
+
         confirmed = price_check["confirmed_side"]
         change_pct = price_check["change_pct"]
 

@@ -12,6 +12,69 @@ max_price = 0.60                  # Precio maximo para bets Up/Down directional
 min_buffer_pct = 0.03             # Buffer minimo % para confirmacion de precio Binance (3%)
 max_concurrent_bets = 3           # Max bets directionales concurrentes
 
+# Configuracion per-crypto para directional Up/Down
+# enabled = false desactiva el trading de esa crypto
+# buffer_pct = cambio minimo en Binance (%) para confirmar direccion
+[strategy.crypto_configs.bitcoin]
+enabled = true
+buffer_pct = 0.04
+
+[strategy.crypto_configs.ethereum]
+enabled = true
+buffer_pct = 0.05
+
+[strategy.crypto_configs.solana]
+enabled = true
+buffer_pct = 0.025
+
+[strategy.crypto_configs.bnb]
+enabled = true
+buffer_pct = 0.03
+
+[strategy.crypto_configs.dogecoin]
+enabled = true
+buffer_pct = 0.02
+
+[strategy.crypto_configs.xrp]
+enabled = true
+buffer_pct = 0.03
+
+[strategy.crypto_configs.cardano]
+enabled = true
+buffer_pct = 0.03
+
+[strategy.crypto_configs.avalanche]
+enabled = true
+buffer_pct = 0.025
+
+[strategy.crypto_configs.polkadot]
+enabled = true
+buffer_pct = 0.03
+
+[strategy.crypto_configs.polygon]
+enabled = true
+buffer_pct = 0.03
+
+[strategy.crypto_configs.chainlink]
+enabled = true
+buffer_pct = 0.03
+
+[strategy.crypto_configs.litecoin]
+enabled = true
+buffer_pct = 0.03
+
+[strategy.crypto_configs.sui]
+enabled = true
+buffer_pct = 0.02
+
+[strategy.crypto_configs.pepe]
+enabled = true
+buffer_pct = 0.02
+
+[strategy.crypto_configs.hyperliquid]
+enabled = false
+buffer_pct = 0.03
+
 # Probabilidad minima escalada segun tiempo restante
 # Cuanto menos tiempo queda, mas agresivos somos (menos prob exigimos)
 # porque hay menos probabilidad de que se de la vuelta

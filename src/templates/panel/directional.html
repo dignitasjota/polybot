@@ -60,6 +60,55 @@
     </form>
 </div>
 
+{# Per-Crypto Config #}
+<div class="section">
+    <h3>CRYPTO CONFIGURATION</h3>
+    <p class="desc" style="margin-bottom:10px;">
+        Habilita/deshabilita cada crypto y ajusta el buffer minimo de Binance para confirmar direccion.
+    </p>
+    <div id="crypto-flash" style="margin:8px 0;"></div>
+    <table>
+        <thead>
+            <tr>
+                <th>Crypto</th>
+                <th>Enabled</th>
+                <th>Buffer Pct (%)</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for cc in crypto_configs %}
+            <tr style="{{ 'opacity:0.4;' if not cc.enabled else '' }}">
+                <td style="font-weight:bold;text-transform:capitalize;">{{ cc.name }}</td>
+                <td>
+                    <label class="toggle">
+                        <input type="checkbox" {{ 'checked' if cc.enabled else '' }}
+                            hx-post="/panel/directional/crypto"
+                            hx-vals='{"action": "toggle", "crypto": "{{ cc.name }}", "enabled": "{{ 'false' if cc.enabled else 'true' }}"}'
+                            hx-target="#crypto-flash"
+                            hx-swap="innerHTML">
+                        <span class="slider"></span>
+                    </label>
+                </td>
+                <td>
+                    <form style="display:inline;">
+                        <input type="hidden" name="action" value="set_buffer">
+                        <input type="hidden" name="crypto" value="{{ cc.name }}">
+                        <input type="number" name="buffer_pct" value="{{ cc.buffer_pct }}"
+                            step="0.005" min="0.005" max="0.20"
+                            style="width:80px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;font-size:0.85em;padding:4px 6px;border-radius:3px;"
+                            hx-post="/panel/directional/crypto"
+                            hx-trigger="change"
+                            hx-include="closest form"
+                            hx-target="#crypto-flash"
+                            hx-swap="innerHTML">
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
 {# Parameters #}
 <div class="section">
     <h3>STRATEGY PARAMETERS</h3>

@@ -22,15 +22,23 @@ class ProbabilityTier:
 
 
 @dataclass
+class CryptoDirectionalConfig:
+    """Per-crypto configuration for directional Up/Down strategy."""
+    enabled: bool = True
+    buffer_pct: float = 0.03  # Min buffer % for price confirmation
+
+
+@dataclass
 class StrategyConfig:
     enabled: bool = True
     name: str = "closing_arbitrage"
     max_time_to_resolution: timedelta = field(default_factory=lambda: timedelta(hours=24))
     min_margin_net: float = 0.008
     max_price: float = 0.60          # Max price for up/down directional bets
-    min_buffer_pct: float = 0.10     # Min buffer % for price confirmation
+    min_buffer_pct: float = 0.10     # Min buffer % for price confirmation (global fallback)
     max_concurrent_bets: int = 3     # Max concurrent directional bets
     tag: str = ""                    # Filter markets by tag (e.g. "crypto")
+    crypto_configs: dict[str, CryptoDirectionalConfig] = field(default_factory=dict)
     probability_tiers: list[ProbabilityTier] = field(default_factory=lambda: [
         ProbabilityTier(max_hours=0.5, min_probability=0.93),
         ProbabilityTier(max_hours=2, min_probability=0.95),
@@ -164,6 +172,17 @@ class Config:
             strategy_raw["max_time_to_resolution"] = _parse_duration(
                 strategy_raw["max_time_to_resolution"]
             )
+
+        # Parse per-crypto directional configs
+        crypto_configs_raw = strategy_raw.pop("crypto_configs", None)
+        if crypto_configs_raw:
+            strategy_raw["crypto_configs"] = {
+                name: CryptoDirectionalConfig(
+                    enabled=cfg.get("enabled", True),
+                    buffer_pct=float(cfg.get("buffer_pct", 0.03)),
+                )
+                for name, cfg in crypto_configs_raw.items()
+            }
 
         # Parse probability tiers
         tiers_raw = strategy_raw.pop("probability_tiers", None)

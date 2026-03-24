@@ -191,6 +191,37 @@ class ConfigManager:
 
         self._persist()
 
+    # ── Crypto Configs ────────────────────────────────────────────
+
+    def get_crypto_configs(self) -> dict:
+        """Return per-crypto directional configs as serializable dicts."""
+        return {
+            name: {"enabled": cc.enabled, "buffer_pct": cc.buffer_pct}
+            for name, cc in self.config.strategy.crypto_configs.items()
+        }
+
+    def set_crypto_config(self, crypto_name: str, enabled: bool | None = None, buffer_pct: float | None = None):
+        """Update a single crypto's directional config."""
+        from src.config import CryptoDirectionalConfig
+
+        cc = self.config.strategy.crypto_configs.get(crypto_name)
+        if cc is None:
+            cc = CryptoDirectionalConfig()
+            self.config.strategy.crypto_configs[crypto_name] = cc
+
+        if enabled is not None:
+            cc.enabled = enabled
+        if buffer_pct is not None:
+            cc.buffer_pct = buffer_pct
+
+        # Update live runners' detector price_checker
+        for runner in self.bot.accounts:
+            if runner.strategy_type == "directional" and hasattr(runner, 'detector') and runner.detector:
+                runner.detector.config.crypto_configs = self.config.strategy.crypto_configs
+                runner.detector._price_checker._crypto_configs = self.config.strategy.crypto_configs
+
+        self._persist()
+
     # ── Persistence ────────────────────────────────────────────────
 
     def _persist(self):
@@ -207,6 +238,12 @@ class ConfigManager:
         raw["strategy"]["min_buffer_pct"] = s.min_buffer_pct
         raw["strategy"]["max_concurrent_bets"] = s.max_concurrent_bets
         raw["strategy"]["tag"] = s.tag
+
+        # Per-crypto directional configs
+        raw["strategy"]["crypto_configs"] = {
+            name: {"enabled": cc.enabled, "buffer_pct": cc.buffer_pct}
+            for name, cc in s.crypto_configs.items()
+        }
 
         # Update data section
         raw.setdefault("data", {})
