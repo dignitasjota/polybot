@@ -119,6 +119,30 @@ class CopyTrader:
     def set_live_balance(self, balance: float):
         """Update balance from live executor (replaces simulated balance)."""
         self._balance = balance
+        self._stats["current_balance"] = round(balance, 2)
+
+    def reset_stats(self, new_balance: float | None = None):
+        """Reset all stats and bets (e.g. when switching from paper to live)."""
+        self._bets.clear()
+        self._all_bets.clear()
+        if new_balance is not None:
+            self._balance = new_balance
+            self._starting_balance = new_balance
+        else:
+            self._balance = self._starting_balance
+        self._stats = {
+            "polls": self._stats.get("polls", 0),  # keep poll count
+            "trades_seen": 0,
+            "trades_copied": 0,
+            "settled_wins": 0,
+            "settled_losses": 0,
+            "errors": 0,
+            "simulated_pnl": 0.0,
+            "current_balance": round(self._balance, 2),
+            "starting_balance": round(self._starting_balance, 2),
+            "roi_pct": 0.0,
+        }
+        logger.info("copy_trader_stats_reset", balance=f"${self._balance:.2f}")
 
     async def start(self):
         if self._running:

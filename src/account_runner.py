@@ -158,8 +158,29 @@ class AccountRunner:
         self.account.execution_mode = mode_str
         await self.executor.set_mode(mode)
 
-        # Sync balance: live mode uses real balance, paper uses simulated
-        self._sync_live_balance()
+        # When switching to live/dry_run: reset paper stats and use real balance
+        if mode in (ExecutionMode.LIVE, ExecutionMode.DRY_RUN):
+            live_balance = self.executor.get_balance()
+            self.executor.reset_trades()
+            if self.detector:
+                self.detector.reset_stats(new_balance=live_balance)
+            if self.copy_trader:
+                self.copy_trader.reset_stats(new_balance=live_balance)
+            # Sync live balance to strategy components
+            self._sync_live_balance()
+            self.log.info(
+                "stats_reset_for_live",
+                account=self.name,
+                live_balance=f"${live_balance:.2f}" if live_balance is not None else "unknown",
+            )
+        else:
+            # Switching to paper: reset with simulated balance
+            sim_balance = self.account.risk.simulated_balance
+            self.executor.reset_trades()
+            if self.detector:
+                self.detector.reset_stats(new_balance=sim_balance)
+            if self.copy_trader:
+                self.copy_trader.reset_stats(new_balance=sim_balance)
 
         self.log.info(
             "execution_mode_changed",

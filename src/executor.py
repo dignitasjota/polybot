@@ -572,14 +572,37 @@ class Executor:
         old_mode = self.mode
         self.mode = mode
 
-        if mode in (ExecutionMode.LIVE, ExecutionMode.DRY_RUN) and self._client is None:
-            # Need to initialize CLOB client
-            self._initialized = False
-            await self.initialize()
+        if mode in (ExecutionMode.LIVE, ExecutionMode.DRY_RUN):
+            if self._client is None:
+                # Need to initialize CLOB client
+                self._initialized = False
+                try:
+                    await self.initialize()
+                except Exception as e:
+                    # Revert to old mode if initialization fails
+                    self.mode = old_mode
+                    self._initialized = (old_mode == ExecutionMode.PAPER)
+                    logger.error(
+                        "mode_switch_failed",
+                        target_mode=mode.value,
+                        reverted_to=old_mode.value,
+                        error=str(e),
+                    )
+                    raise
+            else:
+                # Client exists, force balance refresh
+                await self._refresh_balance()
         elif mode == ExecutionMode.PAPER:
             self._initialized = True
 
         logger.info("executor_mode_changed", old=old_mode.value, new=mode.value)
+
+    def reset_trades(self):
+        """Clear all trade history (e.g. when switching from paper to live)."""
+        self._trades.clear()
+        self._pending_orders.clear()
+        self._daily_pnl = 0.0
+        logger.info("executor_trades_reset")
 
     @property
     def trades(self) -> list[TradeRecord]:

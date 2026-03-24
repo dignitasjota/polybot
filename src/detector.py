@@ -101,6 +101,31 @@ class ClosingArbitrageDetector:
         """Update balance from live executor (replaces simulated balance)."""
         self._balance = balance
 
+    def reset_stats(self, new_balance: float | None = None):
+        """Reset all stats and bets (e.g. when switching from paper to live)."""
+        self._opportunities_log.clear()
+        self._active_opportunities.clear()
+        self._bet_placed.clear()
+        self._settled_conditions.clear()
+        self._last_logged.clear()
+        if new_balance is not None:
+            self._balance = new_balance
+            self._starting_balance = new_balance
+        else:
+            self._balance = self._starting_balance
+        self._stats = {
+            "total_scans": self._stats.get("total_scans", 0),  # keep scan count
+            "opportunities_found": 0,
+            "resolved_opportunities": 0,
+            "settled_wins": 0,
+            "settled_losses": 0,
+            "simulated_pnl": 0.0,
+            "price_checks_confirmed": 0,
+            "price_checks_rejected": 0,
+            "price_checks_uncertain": 0,
+        }
+        logger.info("detector_stats_reset", balance=f"${self._balance:.2f}")
+
     async def close(self):
         """Close resources (Binance session)."""
         await self._price_checker.close()
