@@ -194,20 +194,18 @@ class Executor:
                 return
 
             allowance_raw = float(resp.get("allowance", 0) or 0)
-            allowance = allowance_raw / 1e6  # USDC has 6 decimals
+            # Auto-detect format (same as balance)
+            allowance = allowance_raw / 1e6 if allowance_raw > 1000 else allowance_raw
 
             if allowance < 1.0:
                 logger.error(
                     "usdc_not_approved",
-                    allowance=f"${allowance:.2f}",
-                    msg="USDC not approved for trading. Deposit funds via Polymarket UI first.",
+                    allowance=f"${allowance:.6f}",
+                    raw_value=allowance_raw,
+                    msg="USDC allowance too low. Deposit funds via Polymarket UI to auto-approve.",
                 )
-                # Block live trading — fall back to paper
-                self._initialized = False
-                self.mode = ExecutionMode.PAPER
-                logger.warning("executor_fallback_paper", reason="insufficient USDC allowance")
             else:
-                logger.info("allowance_ok", allowance=f"${allowance:.2f}")
+                logger.info("allowance_ok", allowance=f"${allowance:.2f}", raw_value=allowance_raw)
 
         except Exception as e:
             logger.warning("allowance_check_error", error=str(e))
@@ -224,11 +222,14 @@ class Executor:
                 BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             )
             if resp and "balance" in resp:
-                # Balance comes in USDC units (6 decimals) as string
                 raw = float(resp["balance"])
-                self._live_balance = raw / 1e6
+                # Auto-detect format: if raw > 1000, it's in smallest units (6 decimals)
+                # e.g. $1.00 = 1000000 raw. If raw < 1000, it's already in USDC.
+                self._live_balance = raw / 1e6 if raw > 1000 else raw
                 self._last_balance_fetch = time.time()
-                logger.info("balance_refreshed", balance=f"${self._live_balance:.2f}")
+                logger.info("balance_refreshed",
+                            balance=f"${self._live_balance:.2f}",
+                            raw_value=raw)
                 if self._on_balance_update:
                     self._on_balance_update(self._live_balance)
             else:
