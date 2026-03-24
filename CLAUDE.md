@@ -6,7 +6,7 @@ Bot de trading automatizado para Polymarket que ejecuta dos estrategias independ
 - **Directional**: detecta oportunidades de arbitraje en mercados crypto de 5 minutos
 - **Copy Trade**: copia trades de wallets rentables con sistema de roles (primary/confirmation)
 
-Corre en Docker (VPS Alemania), desplegado via Portainer. Actualmente en **paper trading** (simulado).
+Corre en Docker (VPS Alemania), desplegado via Portainer. Soporta **paper trading** (simulado) y **live trading** (real contra Polymarket CLOB).
 
 ---
 
@@ -55,6 +55,71 @@ logs/
 
 ---
 
+## Modos de ejecución
+
+Cada cuenta tiene un `execution_mode` independiente:
+
+| Modo | Descripción |
+|------|-------------|
+| `paper` | Simulado. No interactúa con Polymarket. Balance y trades son ficticios. |
+| `dry_run` | Inicializa el cliente CLOB, valida órdenes, pero no las envía. |
+| `live` | Trading real contra Polymarket CLOB. Usa balance USDC real. |
+
+### Cambio de modo (paper ↔ live)
+
+Se cambia desde el panel web (Settings). Al cambiar de modo:
+
+1. **Paper → Live**: Se inicializa el cliente CLOB con credenciales, se refresca el balance USDC real, se **resetean todas las stats y apuestas del período paper** (bets, wins, losses, P&L), y se establece el balance real como nuevo `starting_balance`. Esto garantiza una vista limpia de la operativa live.
+2. **Live → Paper**: Se resetean stats y se vuelve al `simulated_balance` del config.
+3. **Métodos de reset**: `CopyTrader.reset_stats()`, `ClosingArbitrageDetector.reset_stats()`, `Executor.reset_trades()` — limpian todo el historial y reinician contadores. Mantienen `polls`/`total_scans` para diagnóstico.
+
+### Balance en modo live
+
+- El executor consulta `get_balance_allowance(COLLATERAL)` de la API CLOB para obtener USDC libre.
+- **USDC libre ≠ portfolio total**: solo devuelve USDC disponible para apostar, no el valor de posiciones abiertas.
+- Se refresca automáticamente cada hora (`BALANCE_REFRESH_INTERVAL = 3600s`).
+- Se refresca forzosamente al cambiar a modo live.
+- Si el balance real es $0, el bot no puede colocar órdenes (el copy_trader lo bloquea con `bet_size < 0.10`).
+
+---
+
+## Credenciales y tipos de wallet
+
+Polymarket soporta dos tipos de wallet, y el bot debe configurarse acorde:
+
+| Tipo | `WALLET_TYPE` | `signature_type` | Cómo obtener private key |
+|------|---------------|-------------------|--------------------------|
+| **Magic Link** (email login) | `magic_link` (default) | 1 (POLY_PROXY) | Polymarket → Settings → Advanced → Export Private Key |
+| **MetaMask** (wallet externa) | `metamask` | 0 (EOA) | Exportar desde MetaMask |
+
+### Flujo de credenciales
+
+1. El executor lee la private key desde env var (`PRIVATE_KEY` o `COPY_PRIVATE_KEY`)
+2. Intenta leer API key/secret/passphrase de env vars
+3. Si no están definidas → **auto-deriva** las API keys desde la private key usando `ClobClient.derive_api_key()`
+4. El `signature_type` se determina desde env var `WALLET_TYPE` (o `COPY_WALLET_TYPE` para la cuenta copy)
+
+### Configuración en `CredentialsConfig`
+
+```python
+@dataclass
+class CredentialsConfig:
+    private_key_env: str = "PRIVATE_KEY"
+    api_key_env: str = "POLYMARKET_API_KEY"
+    api_secret_env: str = "POLYMARKET_SECRET"
+    passphrase_env: str = "POLYMARKET_PASSPHRASE"
+    signature_type_env: str = "WALLET_TYPE"     # env var para tipo de wallet
+    signature_type: int = -1                     # -1=auto-detect desde env var
+```
+
+Auto-detección en `__post_init__`:
+- Lee `signature_type_env` (e.g. `COPY_WALLET_TYPE`)
+- Si vacío, fallback a `WALLET_TYPE`
+- Si vacío, default `magic_link` → `signature_type=1`
+- Valores aceptados: `magic_link`/`poly_proxy`/`1` → 1, `metamask`/`eoa`/`0` → 0
+
+---
+
 ## Estrategia 1: Directional (Closing Arbitrage + Up/Down)
 
 ### Closing Arbitrage
@@ -65,7 +130,7 @@ Compra tokens que cotizan a $0.97+ cuando el mercado está cerca de resolverse. 
 2. `WebSocketClient` se suscribe a precios en tiempo real
 3. En cada update de precio, `detector.check(token_id)` evalúa O(1) ese mercado
 4. Si precio >= probabilidad mínima según tier temporal → oportunidad
-5. `Executor` registra el paper trade
+5. `Executor` registra el paper trade o coloca orden real (según modo)
 
 **Tiers de probabilidad** (cuanto menos tiempo queda, menos probabilidad exigimos):
 - < 5 min: min 0.97
@@ -104,7 +169,7 @@ Monitorea wallets de traders rentables en Polymarket y copia sus trades BUY.
 2. Para cada wallet habilitada, busca trades recientes tipo BUY
 3. Aplica filtros: precio mínimo, latencia máxima, concurrent bets
 4. Aplica lógica de roles (ver abajo)
-5. Registra el paper trade y monitorea resolución
+5. Registra el paper trade o coloca orden real (según modo) y monitorea resolución
 
 ### Sistema de Roles de Wallets
 
@@ -155,7 +220,7 @@ Accesible en `http://host:8080`. Protegido por login con cookie HMAC-SHA256.
 | `/` | Dashboard (read-only, auto-refresh cada 5s) |
 | `/panel/copy-trade` | Gestión wallets (add/remove/toggle/set_role) + parámetros |
 | `/panel/directional` | Kill switch + market filter (crypto_only) + parámetros |
-| `/panel/settings` | Cambio password + audit log |
+| `/panel/settings` | Cambio password + execution mode (paper/live) + audit log |
 | `/api/report` | JSON completo de estado del bot |
 | `/api/report/{account}` | JSON por cuenta específica |
 
@@ -163,6 +228,13 @@ Accesible en `http://host:8080`. Protegido por login con cookie HMAC-SHA256.
 Los cambios desde el panel se aplican **inmediatamente** (mutación in-memory de dataclasses) y se persisten al archivo `config/config.toml` para sobrevivir reinicios.
 
 Los roles y estado de wallets se almacenan en SQLite (`data/panel.db`), no en TOML.
+
+### Cambio de execution mode desde el panel
+En Settings se puede cambiar el modo de cada cuenta (paper/live). El cambio:
+- Resetea todas las stats y apuestas del modo anterior
+- En live: inicializa el CLOB client, refresca balance real, usa balance real como starting_balance
+- En paper: vuelve al simulated_balance del config
+- Si la inicialización del CLOB falla, revierte al modo anterior y loguea el error
 
 ### Autenticación
 - Cookie HMAC-SHA256 firmada (sin dependencias externas de crypto)
@@ -211,16 +283,20 @@ Archivo TOML con secciones: `[strategy]`, `[risk]`, `[data]`, `[websocket]`, `[l
 
 Cada `[[accounts]]` es independiente con su propia estrategia, credenciales y riesgo:
 - `strategy_type`: "directional" o "copy_trade"
-- `execution_mode`: "paper" (actual), "dry_run", o "live"
-- `[accounts.credentials]`: env vars para private key y API keys
+- `execution_mode`: "paper", "dry_run", o "live" (cambiable en caliente desde panel)
+- `[accounts.credentials]`: env vars para private key, API keys y tipo de wallet
 - `[accounts.copy_trade]`: config específica de copy trading
 - `[accounts.risk]`: overrides de riesgo por cuenta
 
 **Parámetros que NO se exponen en panel** (requieren reinicio):
-- `execution_mode` (paper/live)
-- Credenciales API
+- Credenciales API / private key
 - `strategy_type`
 - Configuración WebSocket
+
+**Parámetros cambiables en caliente desde el panel:**
+- `execution_mode` (paper/live) — resetea stats al cambiar
+- Todos los parámetros de estrategia (tablas de arriba)
+- Kill switch, wallets, roles
 
 ---
 
@@ -229,16 +305,82 @@ Cada `[[accounts]]` es independiente con su propia estrategia, credenciales y ri
 ```bash
 # Build y deploy via Docker Compose / Portainer
 docker compose build && docker compose up -d
-
-# Env vars necesarias en docker-compose.yml:
-# PANEL_PASSWORD: password del admin (default: "admin")
-# SESSION_SECRET: secreto para firmar cookies (generado si vacío)
-# PRIVATE_KEY, POLYMARKET_API_KEY, etc.: credenciales (solo para modo live)
 ```
 
-Volúmenes persistentes:
+### Variables de entorno (docker-compose.yml)
+
+```yaml
+environment:
+  # Panel web
+  - PANEL_PASSWORD=tu_password        # Password del admin (default: "admin")
+  - SESSION_SECRET=                   # Secreto para cookies (generado si vacío)
+
+  # Tipo de wallet — afecta cómo se firma contra la API CLOB
+  - WALLET_TYPE=magic_link            # "magic_link" (default) o "metamask"
+
+  # Credenciales cuenta directional
+  - PRIVATE_KEY=0xabc123...           # Private key del wallet
+  - POLYMARKET_API_KEY=               # Opcional: se auto-deriva de la private key
+  - POLYMARKET_SECRET=                # Opcional: se auto-deriva de la private key
+  - POLYMARKET_PASSPHRASE=            # Opcional: se auto-deriva de la private key
+
+  # Credenciales cuenta copy-trade (puede ser el mismo wallet u otro)
+  - COPY_PRIVATE_KEY=0xabc123...      # Private key del wallet copy
+  - COPY_API_KEY=                     # Opcional: se auto-deriva
+  - COPY_SECRET=                      # Opcional: se auto-deriva
+  - COPY_PASSPHRASE=                  # Opcional: se auto-deriva
+  - COPY_WALLET_TYPE=                 # Opcional: hereda de WALLET_TYPE si vacío
+```
+
+**Mínimo requerido para operar en live:**
+- `PRIVATE_KEY` y/o `COPY_PRIVATE_KEY` (según qué cuentas usen live)
+- `WALLET_TYPE` configurado correctamente según cómo te logueas en Polymarket
+
+**Ejemplos:**
+
+```yaml
+# Ejemplo 1: Misma cuenta Magic Link para ambas estrategias
+- WALLET_TYPE=magic_link
+- PRIVATE_KEY=0x1234abcd...    # Exportada desde Polymarket → Settings → Export Private Key
+- COPY_PRIVATE_KEY=0x1234abcd... # Misma key
+
+# Ejemplo 2: Directional con MetaMask, Copy con Magic Link
+- WALLET_TYPE=metamask
+- PRIVATE_KEY=0xaaaa...        # Exportada desde MetaMask
+- COPY_PRIVATE_KEY=0xbbbb...   # Exportada desde Polymarket Settings
+- COPY_WALLET_TYPE=magic_link  # Override solo para la cuenta copy
+
+# Ejemplo 3: Solo paper trading (no requiere credenciales)
+- WALLET_TYPE=magic_link
+# No se necesitan PRIVATE_KEY ni COPY_PRIVATE_KEY en paper mode
+```
+
+### Volúmenes persistentes
 - `bot-logs`: `/app/logs` (logs JSON)
 - `bot-data`: `/app/data` (SQLite panel.db)
+
+---
+
+## Executor: ejecución de trades
+
+El `Executor` maneja tres modos y es responsable de:
+- **Paper**: Registra trades ficticios sin interactuar con Polymarket
+- **Dry Run**: Inicializa cliente CLOB, valida órdenes, no las envía
+- **Live**: Coloca órdenes reales contra Polymarket CLOB
+
+### Flujo de una orden live
+1. Risk checks: kill_switch, daily loss, max concurrent, balance suficiente
+2. Resuelve `token_id` (YES/NO) del mercado
+3. Crea y firma la orden con `ClobClient.create_order()`
+4. Envía con `ClobClient.post_order()`
+5. Monitorea estado (polling cada 5s) y cancela si no se llena en 30s
+6. Resta coste del balance optimistamente al colocar
+
+### Balance
+- `_live_balance`: USDC libre consultado via API (None en paper)
+- Se refresca cada hora automáticamente y al cambiar a modo live
+- En live, si `suggested_bet > _live_balance` → trade rechazado (`insufficient_balance`)
+- El dashboard muestra el balance real en live, o el simulado en paper
 
 ---
 

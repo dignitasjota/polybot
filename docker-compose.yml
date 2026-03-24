@@ -12,11 +12,15 @@ services:
       - POLYMARKET_API_KEY=${POLYMARKET_API_KEY:-}
       - POLYMARKET_SECRET=${POLYMARKET_SECRET:-}
       - POLYMARKET_PASSPHRASE=${POLYMARKET_PASSPHRASE:-}
+      # Wallet type: "magic_link" (default) or "metamask"
+      - WALLET_TYPE=${WALLET_TYPE:-magic_link}
       # Polymarket credentials (copy-trade account — same wallet or separate)
       - COPY_PRIVATE_KEY=${COPY_PRIVATE_KEY:-}
       - COPY_API_KEY=${COPY_API_KEY:-}
       - COPY_SECRET=${COPY_SECRET:-}
       - COPY_PASSPHRASE=${COPY_PASSPHRASE:-}
+      # Copy account wallet type (uses WALLET_TYPE if not set)
+      - COPY_WALLET_TYPE=${COPY_WALLET_TYPE:-}
     volumes:
       - bot-logs:/app/logs
       - bot-data:/app/data

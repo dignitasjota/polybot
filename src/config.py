@@ -99,7 +99,20 @@ class CredentialsConfig:
     api_key_env: str = "POLYMARKET_API_KEY"
     api_secret_env: str = "POLYMARKET_SECRET"
     passphrase_env: str = "POLYMARKET_PASSPHRASE"
-    signature_type: int = 1  # 0=EOA (MetaMask), 1=POLY_PROXY (Magic Link / Polymarket default)
+    signature_type_env: str = "WALLET_TYPE"  # env var name for wallet type
+    signature_type: int = -1  # -1=auto-detect from env var, 0=EOA (MetaMask), 1=POLY_PROXY (Magic Link)
+
+    def __post_init__(self):
+        if self.signature_type == -1:
+            # Read from env var, fallback to WALLET_TYPE, then default magic_link
+            wallet_type = os.environ.get(self.signature_type_env, "").strip()
+            if not wallet_type:
+                wallet_type = os.environ.get("WALLET_TYPE", "magic_link")
+            wallet_type = wallet_type.lower().strip()
+            if wallet_type in ("metamask", "eoa", "0"):
+                self.signature_type = 0
+            else:
+                self.signature_type = 1  # magic_link / poly_proxy / default
 
     def get_private_key(self) -> str:
         return get_secret(self.private_key_env)
