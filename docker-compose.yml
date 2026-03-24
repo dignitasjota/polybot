@@ -7,6 +7,16 @@ services:
     environment:
       - PANEL_PASSWORD=${PANEL_PASSWORD:-admin}
       - SESSION_SECRET=${SESSION_SECRET:-}
+      # Polymarket credentials (directional account)
+      - PRIVATE_KEY=${PRIVATE_KEY:-}
+      - POLYMARKET_API_KEY=${POLYMARKET_API_KEY:-}
+      - POLYMARKET_SECRET=${POLYMARKET_SECRET:-}
+      - POLYMARKET_PASSPHRASE=${POLYMARKET_PASSPHRASE:-}
+      # Polymarket credentials (copy-trade account — same wallet or separate)
+      - COPY_PRIVATE_KEY=${COPY_PRIVATE_KEY:-}
+      - COPY_API_KEY=${COPY_API_KEY:-}
+      - COPY_SECRET=${COPY_SECRET:-}
+      - COPY_PASSPHRASE=${COPY_PASSPHRASE:-}
     volumes:
       - bot-logs:/app/logs
       - bot-data:/app/data

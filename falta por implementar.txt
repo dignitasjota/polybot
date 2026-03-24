@@ -1,0 +1,67 @@
+  Lo que FALTA para operar en live
+
+  ┌─────┬───────────────────────────────────────────────────────────────────────────────────────────────────┬───────────┬─────────────────────────────────────────────┐
+  │  #  │                                               Tarea                                               │ Prioridad │                   Estado                    │
+  ├─────┼───────────────────────────────────────────────────────────────────────────────────────────────────┼───────────┼─────────────────────────────────────────────┤
+  │ 1   │ Order monitoring — verificar que órdenes se matchean, cancelar si no se llenan, manejar parciales │ Alta      │ No implementado                             │
+  ├─────┼───────────────────────────────────────────────────────────────────────────────────────────────────┼───────────┼─────────────────────────────────────────────┤
+  │ 2   │ Balance real USDC — consultar saldo en Polymarket via API en vez de simulated_balance             │ Alta      │ No implementado                             │
+  ├─────┼───────────────────────────────────────────────────────────────────────────────────────────────────┼───────────┼─────────────────────────────────────────────┤
+  │ 3   │ Approval check — verificar que USDC está aprobado para CTF Exchange antes de operar               │ Media     │ No implementado                             │
+  ├─────┼───────────────────────────────────────────────────────────────────────────────────────────────────┼───────────┼─────────────────────────────────────────────┤
+  │ 4   │ Settlement real / Redeem — llamar redeemPositions() para cobrar tokens ganadores                  │ Media     │ No implementado (paper settlement funciona) │
+  ├─────┼───────────────────────────────────────────────────────────────────────────────────────────────────┼───────────┼─────────────────────────────────────────────┤
+  │ 5   │ Slippage protection — max slippage configurable, protección contra precio movido                  │ Media     │ No implementado                             │
+  ├─────┼───────────────────────────────────────────────────────────────────────────────────────────────────┼───────────┼─────────────────────────────────────────────┤
+  │ 6   │ Alertas Telegram — notificaciones de trades ejecutados, errores, P&L diario                       │ Baja      │ No implementado                             │
+  ├─────┼───────────────────────────────────────────────────────────────────────────────────────────────────┼───────────┼─────────────────────────────────────────────┤
+  │ 7   │ Deploy con credenciales — configurar env vars reales en docker-compose para live                  │ Baja      │ Solo placeholders                           │
+  └─────┴───────────────────────────────────────────────────────────────────────────────────────────────────┴───────────┴─────────────────────────────────────────────┘
+
+  Notas sobre cada punto:
+
+  1. Order monitoring — Lo más importante. Ahora _live_trade() envía la orden y asume que se ejecutó. Necesita: poll del status, timeout+cancel, manejo de fills parciales.
+
+  2. Balance real — El bot usa simulated_balance para calcular bet sizes. En live debería consultar el saldo real via py-clob-client o la API REST de Polymarket.
+
+  3. Approval — Es un one-time tx pero conviene verificarlo al arrancar en modo live para fallar rápido si falta.
+
+  4. Settlement/Redeem — En paper, el bot detecta que el mercado resolvió y calcula P&L virtual. En live, hay que llamar al contrato para cobrar. Esto puede esperar porque Polymarket también lo hace
+  automáticamente en algunos casos.
+
+  5. Slippage — Ahora la orden va al best_ask exacto. Si el precio se mueve entre detección y envío, la orden podría no llenarse o llenarse a peor precio.
+
+  6. Telegram — Nice to have. La infraestructura de audit_log ya existe, sería añadir un webhook.
+
+  7. Deploy — Solo falta configurar las env vars reales en el docker-compose del VPS.
+
+
+
+
+
+   Estado del plan original (Fases 1-6)
+
+  Fase 1: Infraestructura base — COMPLETA
+
+  Fase 2: Migrar dashboard — COMPLETA
+
+  Fase 3: Config manager + params configurables — COMPLETA
+
+  Fase 4: Panel Copy Trading — COMPLETA
+
+  Fase 5: Panel Directional — COMPLETA
+
+  Fase 6: Settings + polish — COMPLETA
+
+  El plan original del panel de control está 100% completado.
+
+  ---
+  Funcionalidades añadidas FUERA del plan original (ya implementadas)
+
+  - Per-crypto config directional (enabled/buffer_pct) con UI
+  - Sistema de roles wallets (primary/confirmation)
+  - Spread arb boost para copy trading
+  - Dynamic bet sizing con signal_multiplier
+  - Alias de wallets en columna Source del dashboard
+  - Toggle execution_mode (paper/live) por cuenta desde Settings
+  - Fix token_id en executor para órdenes reales

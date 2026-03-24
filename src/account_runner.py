@@ -100,6 +100,12 @@ class AccountRunner:
             self.executor._credentials = self.account.credentials
         await self.executor.initialize()
 
+        # Register balance sync callback
+        self.executor.on_balance_update(self._on_balance_changed)
+
+        # Sync live balance to strategy components
+        self._sync_live_balance()
+
         if self.strategy_type == "directional":
             await self._start_directional()
         elif self.strategy_type == "copy_trade":
@@ -132,11 +138,59 @@ class AccountRunner:
             wallets=len(self.account.copy_trade.target_wallets),
         )
 
+    async def set_execution_mode(self, mode_str: str):
+        """Change execution mode at runtime (paper/live)."""
+        mode = {
+            "paper": ExecutionMode.PAPER,
+            "dry_run": ExecutionMode.DRY_RUN,
+            "live": ExecutionMode.LIVE,
+        }.get(mode_str, ExecutionMode.PAPER)
+
+        if mode == self.exec_mode:
+            return
+
+        # For live/dry_run, ensure credentials are set
+        if mode in (ExecutionMode.LIVE, ExecutionMode.DRY_RUN):
+            self.executor._credentials = self.account.credentials
+
+        old = self.exec_mode
+        self.exec_mode = mode
+        self.account.execution_mode = mode_str
+        await self.executor.set_mode(mode)
+
+        # Sync balance: live mode uses real balance, paper uses simulated
+        self._sync_live_balance()
+
+        self.log.info(
+            "execution_mode_changed",
+            account=self.name,
+            old=old.value,
+            new=mode.value,
+        )
+
+    def _on_balance_changed(self, balance: float):
+        """Called by executor when live balance is refreshed."""
+        if self.exec_mode == ExecutionMode.LIVE:
+            if self.detector:
+                self.detector.set_live_balance(balance)
+            if self.copy_trader:
+                self.copy_trader.set_live_balance(balance)
+
+    def _sync_live_balance(self):
+        """Push live USDC balance from executor to detector/copy_trader."""
+        live_balance = self.executor.get_balance()
+        if live_balance is not None and self.exec_mode == ExecutionMode.LIVE:
+            if self.detector:
+                self.detector.set_live_balance(live_balance)
+            if self.copy_trader:
+                self.copy_trader.set_live_balance(live_balance)
+
     async def stop(self):
         """Stop this account."""
         self.log.info("account_stopping", name=self.name)
         self._running = False
 
+        await self.executor.close()
         if self.detector:
             await self.detector.close()
         if self.copy_trader:

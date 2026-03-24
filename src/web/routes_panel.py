@@ -255,6 +255,7 @@ async def panel_directional_crypto(request: web.Request) -> web.Response:
 
 @routes.get("/panel/settings")
 async def panel_settings(request: web.Request) -> web.Response:
+    cm = _get_cm(request)
     ctx = await _base_context(request)
     tz_display = timezone(timedelta(hours=1))
 
@@ -266,6 +267,7 @@ async def panel_settings(request: web.Request) -> web.Response:
     ctx.update({
         "active_tab": "settings",
         "audit_log": log_entries,
+        "account_modes": cm.get_account_modes(),
         "flash_msg": None,
         "flash_type": None,
     })
@@ -297,7 +299,34 @@ async def panel_change_password(request: web.Request) -> web.Response:
     return await _settings_with_flash(request, "Password changed successfully", "success")
 
 
+@routes.post("/panel/settings/execution-mode")
+async def panel_execution_mode(request: web.Request) -> web.Response:
+    cm = _get_cm(request)
+    session = request.get("session", {})
+    user = session.get("user", "unknown")
+    data = await request.post()
+
+    account_name = data.get("account", "")
+    mode = data.get("mode", "")
+
+    if mode not in ("paper", "live"):
+        msg = '<div class="flash flash-error">Invalid mode</div>'
+    else:
+        ok = await cm.set_account_mode(account_name, mode)
+        if ok:
+            await add_audit(user, "execution_mode", f"{account_name} → {mode}")
+            color = "#ff4444" if mode == "live" else "#00ff88"
+            msg = f'<div class="flash flash-info">{account_name}: <span style="color:{color};font-weight:bold;">{mode.upper()}</span></div>'
+        else:
+            msg = f'<div class="flash flash-error">Account not found: {account_name}</div>'
+
+    if request.headers.get("HX-Request"):
+        return web.Response(text=msg, content_type="text/html")
+    raise web.HTTPFound("/panel/settings")
+
+
 async def _settings_with_flash(request, msg, flash_type):
+    cm = _get_cm(request)
     ctx = await _base_context(request)
     tz_display = timezone(timedelta(hours=1))
     log_entries = await get_audit_log(50)
@@ -308,6 +337,7 @@ async def _settings_with_flash(request, msg, flash_type):
     ctx.update({
         "active_tab": "settings",
         "audit_log": log_entries,
+        "account_modes": cm.get_account_modes(),
         "flash_msg": msg,
         "flash_type": flash_type,
     })

@@ -116,6 +116,10 @@ class CopyTrader:
         """Register callback for when a copy-trade opportunity is detected."""
         self._on_opportunity_cb = callback
 
+    def set_live_balance(self, balance: float):
+        """Update balance from live executor (replaces simulated balance)."""
+        self._balance = balance
+
     async def start(self):
         if self._running:
             return

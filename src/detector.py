@@ -97,6 +97,10 @@ class ClosingArbitrageDetector:
         """Register an async callback to be called when a new bet is placed."""
         self._on_opportunity_cb = callback
 
+    def set_live_balance(self, balance: float):
+        """Update balance from live executor (replaces simulated balance)."""
+        self._balance = balance
+
     async def close(self):
         """Close resources (Binance session)."""
         await self._price_checker.close()

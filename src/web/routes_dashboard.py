@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 from aiohttp import web
 import aiohttp_jinja2
 
+from src.db import get_wallet_overrides
+
 routes = web.RouteTableDef()
 
 
@@ -21,10 +23,14 @@ async def handle_dashboard(request: web.Request) -> web.Response:
     tz_display = timezone(timedelta(hours=1))
     now = datetime.now(tz_display)
 
+    # Load wallet aliases for copy trade source display
+    overrides = await get_wallet_overrides()
+    wallet_aliases = {addr: ov.get("alias", "") for addr, ov in overrides.items() if ov.get("alias")}
+
     # Build per-account data for template
     accounts_data = []
     for acc in bot.accounts:
-        accounts_data.append(_build_account_data(acc, tz_display))
+        accounts_data.append(_build_account_data(acc, tz_display, wallet_aliases))
 
     # Markets
     markets = bot.tracker.all_markets if bot.tracker else []
@@ -44,7 +50,7 @@ async def handle_dashboard(request: web.Request) -> web.Response:
     return aiohttp_jinja2.render_template("dashboard.html", request, context)
 
 
-def _build_account_data(acc, tz_display) -> dict:
+def _build_account_data(acc, tz_display, wallet_aliases: dict | None = None) -> dict:
     stats = acc.get_stats()
     is_copy = acc.strategy_type == "copy_trade"
 
@@ -55,11 +61,14 @@ def _build_account_data(acc, tz_display) -> dict:
     else:
         s = {}
 
-    balance = s.get("current_balance", s.get("starting_balance", 0))
+    # In live mode, show real USDC balance from executor
+    executor_stats = stats.get("executor", {})
+    live_balance = executor_stats.get("live_balance")
+    balance = live_balance if live_balance is not None else s.get("current_balance", s.get("starting_balance", 0))
     starting = s.get("starting_balance", 0)
 
     opps = acc.export_opportunities()
-    opps_html = _render_copy_table(opps, tz_display) if is_copy else _render_directional_table(opps, tz_display)
+    opps_html = _render_copy_table(opps, tz_display, wallet_aliases or {}) if is_copy else _render_directional_table(opps, tz_display)
 
     return {
         "name": acc.name,
@@ -109,7 +118,7 @@ def _render_markets(markets) -> str:
     return html
 
 
-def _render_copy_table(opportunities: list[dict], tz_display) -> str:
+def _render_copy_table(opportunities: list[dict], tz_display, wallet_aliases: dict) -> str:
     bets = [o for o in opportunities if o.get("suggested_bet", 0) > 0]
     bets.sort(key=lambda x: x["timestamp"], reverse=True)
     bets = bets[:30]
@@ -135,7 +144,13 @@ def _render_copy_table(opportunities: list[dict], tz_display) -> str:
 
         dur = b.get("duration_seconds", 0)
         dur_str = f"{dur:.0f}s" if dur > 0 else "-"
-        wallet = b.get("wallet_source", "")
+        wallet_src = b.get("wallet_source", "")
+        # Resolve alias: wallet_source has first 10 chars, match against full addresses
+        wallet_display = wallet_src
+        for addr, alias in wallet_aliases.items():
+            if addr.startswith(wallet_src):
+                wallet_display = alias
+                break
 
         rows += f"""
         <tr class="copy-row">
@@ -148,7 +163,7 @@ def _render_copy_table(opportunities: list[dict], tz_display) -> str:
             <td>{dur_str}</td>
             <td>{badge}</td>
             <td class="{pnl_class}">{f'${pnl:+.2f}' if outcome != 'pending' else '-'}</td>
-            <td style="color:#888;font-size:0.75em;">{wallet}</td>
+            <td style="color:#888;font-size:0.75em;">{_esc(wallet_display)}</td>
         </tr>"""
 
     return f"""

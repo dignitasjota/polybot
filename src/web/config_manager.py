@@ -191,6 +191,35 @@ class ConfigManager:
 
         self._persist()
 
+    # ── Execution Mode ─────────────────────────────────────────────
+
+    def get_account_modes(self) -> list[dict]:
+        """Return execution mode per account."""
+        return [
+            {
+                "name": runner.name,
+                "strategy_type": runner.strategy_type,
+                "execution_mode": runner.exec_mode.value,
+            }
+            for runner in self.bot.accounts
+        ]
+
+    async def set_account_mode(self, account_name: str, mode: str) -> bool:
+        """Change execution mode for a specific account. Returns True if changed."""
+        if mode not in ("paper", "live"):
+            return False
+
+        for runner in self.bot.accounts:
+            if runner.name == account_name:
+                await runner.set_execution_mode(mode)
+                # Update config and persist
+                for acc_cfg in self.config.accounts:
+                    if acc_cfg.name == account_name:
+                        acc_cfg.execution_mode = mode
+                self._persist()
+                return True
+        return False
+
     # ── Crypto Configs ────────────────────────────────────────────
 
     def get_crypto_configs(self) -> dict:
@@ -261,6 +290,8 @@ class ConfigManager:
             if i >= len(self.config.accounts):
                 break
             acc_cfg = self.config.accounts[i]
+
+            acc_raw["execution_mode"] = acc_cfg.execution_mode
 
             if acc_cfg.strategy_type == "copy_trade":
                 acc_raw.setdefault("copy_trade", {})

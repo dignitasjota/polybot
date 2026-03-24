@@ -4,6 +4,60 @@
 {% block content %}
 <h2>SETTINGS</h2>
 
+{# Execution Mode #}
+<div class="section">
+    <h3>EXECUTION MODE</h3>
+    <p class="desc" style="margin-bottom:10px;">
+        Cambia entre paper trading (simulado) y live (ordenes reales en Polymarket) para cada estrategia de forma independiente.
+    </p>
+    <div id="mode-flash" style="margin:8px 0;"></div>
+    <table>
+        <thead>
+            <tr>
+                <th>Account</th>
+                <th>Strategy</th>
+                <th>Mode</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for acc in account_modes %}
+            <tr>
+                <td style="font-weight:bold;">{{ acc.name }}</td>
+                <td>
+                    {% if acc.strategy_type == 'copy_trade' %}
+                    <span style="color:#ff6ac1;">COPY-TRADE</span>
+                    {% else %}
+                    <span style="color:#00d4ff;">DIRECTIONAL</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <form style="display:inline;">
+                        <input type="hidden" name="account" value="{{ acc.name }}">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <select name="mode"
+                                style="background:#1a1a2e;border:1px solid #333;color:{{ '#ff4444' if acc.execution_mode == 'live' else '#00ff88' }};font-size:0.9em;padding:6px 10px;border-radius:4px;font-weight:bold;font-family:'Courier New',monospace;"
+                                hx-post="/panel/settings/execution-mode"
+                                hx-include="closest form"
+                                hx-target="#mode-flash"
+                                hx-swap="innerHTML"
+                                hx-confirm="Change {{ acc.name }} to {{ 'LIVE' if acc.execution_mode == 'paper' else 'PAPER' }}?">
+                                <option value="paper" {{ 'selected' if acc.execution_mode == 'paper' else '' }} style="color:#00ff88;">PAPER</option>
+                                <option value="live" {{ 'selected' if acc.execution_mode == 'live' else '' }} style="color:#ff4444;">LIVE</option>
+                            </select>
+                            {% if acc.execution_mode == 'live' %}
+                            <span style="color:#ff4444;font-size:0.75em;">REAL MONEY</span>
+                            {% else %}
+                            <span style="color:#00ff88;font-size:0.75em;">SIMULATED</span>
+                            {% endif %}
+                        </div>
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
 {# Change Password #}
 <div class="section">
     <h3>CHANGE PASSWORD</h3>

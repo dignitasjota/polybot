@@ -7,7 +7,7 @@
 
 {% block content %}
 <div class="subtitle">
-    Paper Trading | Auto-refresh 10s | {{ now_str }} CET |
+    Auto-refresh 10s | {{ now_str }} CET |
     <span class="ws-status">WS: {{ '🟢 LIVE' if ws_connected else '🔴 DOWN' }}</span> |
     Markets: {{ markets_count }}
 </div>

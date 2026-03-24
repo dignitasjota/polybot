@@ -18,6 +18,11 @@ NEG_RISK_CTF_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
 CONDITIONAL_TOKENS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 
+# Order monitoring
+ORDER_CHECK_INTERVAL = 5       # seconds between order status polls
+ORDER_TIMEOUT = 30             # seconds before cancelling unfilled order
+BALANCE_REFRESH_INTERVAL = 3600  # seconds between balance refreshes (1 hour)
+
 
 class OrderStatus(Enum):
     PENDING = "pending"
@@ -43,6 +48,7 @@ class TradeRecord:
     status: OrderStatus = OrderStatus.PENDING
     created_at: float = 0.0
     matched_at: float = 0.0
+    size_matched: float = 0.0  # shares actually filled
     error: str = ""
 
 
@@ -53,17 +59,17 @@ class ExecutionMode(Enum):
 
 
 class Executor:
-    """Handles real order execution against Polymarket CLOB.
+    """Handles order execution against Polymarket CLOB.
 
     Supports three modes:
     - PAPER: No interaction with CLOB (current behavior)
     - DRY_RUN: Initializes CLOB client, validates orders, but doesn't submit
-    - LIVE: Places real orders
+    - LIVE: Places real orders with monitoring (status polling + auto-cancel)
 
-    Usage:
-        executor = Executor(risk_config, mode=ExecutionMode.LIVE)
-        await executor.initialize()  # derives API credentials
-        trade = await executor.execute(opportunity)
+    In LIVE mode:
+    - Queries real USDC balance from Polymarket for bet sizing
+    - Monitors placed orders and cancels after ORDER_TIMEOUT if unfilled
+    - Tracks filled amounts for partial fills
     """
 
     def __init__(
@@ -81,11 +87,17 @@ class Executor:
         self._daily_reset_time: float = 0.0
         self._initialized = False
 
-    async def initialize(self):
-        """Initialize the CLOB client with API credentials.
+        # Live balance tracking
+        self._live_balance: float | None = None  # USDC balance from Polymarket
+        self._last_balance_fetch: float = 0.0
 
-        Credentials are read from the CredentialsConfig (env var names).
-        """
+        # Order monitoring
+        self._pending_orders: dict[str, TradeRecord] = {}  # order_id -> TradeRecord
+        self._monitor_task: asyncio.Task | None = None
+        self._on_balance_update = None  # callback(balance: float)
+
+    async def initialize(self):
+        """Initialize the CLOB client with API credentials."""
         if self.mode == ExecutionMode.PAPER:
             self._initialized = True
             logger.info("executor_initialized", mode="paper")
@@ -96,9 +108,26 @@ class Executor:
             from py_clob_client.clob_types import ApiCreds
 
             private_key = self._credentials.get_private_key()
-            api_key = self._credentials.get_api_key()
-            api_secret = self._credentials.get_api_secret()
-            passphrase = self._credentials.get_passphrase()
+
+            # Try to get API credentials from env vars; if missing, derive from private key
+            try:
+                api_key = self._credentials.get_api_key()
+                api_secret = self._credentials.get_api_secret()
+                passphrase = self._credentials.get_passphrase()
+                logger.info("using_provided_api_creds")
+            except EnvironmentError:
+                # Auto-derive API credentials from private key
+                logger.info("deriving_api_creds", msg="API env vars not set, deriving from private key...")
+                client_tmp = ClobClient(
+                    host="https://clob.polymarket.com",
+                    key=private_key,
+                    chain_id=137,
+                )
+                creds = client_tmp.derive_api_key()
+                api_key = creds.api_key
+                api_secret = creds.api_secret
+                passphrase = creds.api_passphrase
+                logger.info("api_creds_derived", api_key=api_key[:8] + "...")
 
             self._client = ClobClient(
                 host="https://clob.polymarket.com",
@@ -112,7 +141,22 @@ class Executor:
             )
 
             self._initialized = True
-            logger.info("executor_initialized", mode=self.mode.value)
+
+            # Verify USDC allowance for CTF Exchange
+            await self._check_allowance()
+
+            # Fetch initial balance
+            await self._refresh_balance()
+
+            # Start order monitor loop
+            if self._monitor_task is None or self._monitor_task.done():
+                self._monitor_task = asyncio.create_task(self._order_monitor_loop())
+
+            logger.info(
+                "executor_initialized",
+                mode=self.mode.value,
+                balance=f"${self._live_balance:.2f}" if self._live_balance else "unknown",
+            )
 
         except ImportError:
             logger.error("executor_init_failed", error="py-clob-client not installed")
@@ -121,11 +165,89 @@ class Executor:
             logger.error("executor_init_failed", error=str(e))
             raise
 
-    async def execute(self, opp: Opportunity) -> TradeRecord | None:
-        """Execute a trade for the given opportunity.
+    async def close(self):
+        """Stop order monitor."""
+        if self._monitor_task and not self._monitor_task.done():
+            self._monitor_task.cancel()
+            try:
+                await self._monitor_task
+            except asyncio.CancelledError:
+                pass
 
-        Returns a TradeRecord or None if the trade was blocked by risk checks.
+    # ── Allowance ──────────────────────────────────────────────────
+
+    async def _check_allowance(self):
+        """Verify USDC is approved for the CTF Exchange.
+
+        If allowance is zero or too low, log an error and block live trading.
+        The user must approve USDC spending via Polymarket UI or manually.
         """
+        if not self._client:
+            return
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            resp = self._client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            if not resp:
+                logger.warning("allowance_check_empty", response=str(resp))
+                return
+
+            allowance_raw = float(resp.get("allowance", 0) or 0)
+            allowance = allowance_raw / 1e6  # USDC has 6 decimals
+
+            if allowance < 1.0:
+                logger.error(
+                    "usdc_not_approved",
+                    allowance=f"${allowance:.2f}",
+                    msg="USDC not approved for trading. Deposit funds via Polymarket UI first.",
+                )
+                # Block live trading — fall back to paper
+                self._initialized = False
+                self.mode = ExecutionMode.PAPER
+                logger.warning("executor_fallback_paper", reason="insufficient USDC allowance")
+            else:
+                logger.info("allowance_ok", allowance=f"${allowance:.2f}")
+
+        except Exception as e:
+            logger.warning("allowance_check_error", error=str(e))
+
+    # ── Balance ───────────────────────────────────────────────────
+
+    async def _refresh_balance(self):
+        """Fetch real USDC balance from Polymarket."""
+        if not self._client:
+            return
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            resp = self._client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            if resp and "balance" in resp:
+                # Balance comes in USDC units (6 decimals) as string
+                raw = float(resp["balance"])
+                self._live_balance = raw / 1e6
+                self._last_balance_fetch = time.time()
+                logger.info("balance_refreshed", balance=f"${self._live_balance:.2f}")
+                if self._on_balance_update:
+                    self._on_balance_update(self._live_balance)
+            else:
+                logger.warning("balance_fetch_empty", response=str(resp))
+        except Exception as e:
+            logger.warning("balance_fetch_error", error=str(e))
+
+    def get_balance(self) -> float | None:
+        """Return live USDC balance (None if not yet fetched or in paper mode)."""
+        return self._live_balance
+
+    def on_balance_update(self, callback):
+        """Register callback to be called when balance changes."""
+        self._on_balance_update = callback
+
+    # ── Execution ─────────────────────────────────────────────────
+
+    async def execute(self, opp: Opportunity) -> TradeRecord | None:
+        """Execute a trade for the given opportunity."""
         if not self._initialized:
             logger.error("executor_not_initialized")
             return None
@@ -179,6 +301,17 @@ class Executor:
             )
             return False
 
+        # In live mode, check against real balance
+        if self.mode == ExecutionMode.LIVE and self._live_balance is not None:
+            if opp.suggested_bet > self._live_balance:
+                logger.warning(
+                    "insufficient_balance",
+                    bet=f"${opp.suggested_bet:.2f}",
+                    balance=f"${self._live_balance:.2f}",
+                    question=opp.question[:60],
+                )
+                return False
+
         return True
 
     def _paper_trade(self, opp: Opportunity) -> TradeRecord:
@@ -188,7 +321,7 @@ class Executor:
             order_id=f"paper_{int(time.time()*1000)}",
             condition_id=opp.condition_id,
             question=opp.question,
-            token_id="",
+            token_id=self._resolve_token_id(opp),
             token_side=opp.token_side,
             price=opp.token_price,
             size=shares,
@@ -196,6 +329,7 @@ class Executor:
             status=OrderStatus.CONFIRMED,
             created_at=time.time(),
             matched_at=time.time(),
+            size_matched=shares,
         )
         self._trades.append(trade)
         return trade
@@ -226,11 +360,17 @@ class Executor:
     async def _live_trade(self, opp: Opportunity) -> TradeRecord | None:
         """Place a real order on Polymarket CLOB."""
         shares = opp.suggested_bet / opp.token_price if opp.token_price > 0 else 0
+        resolved_token_id = self._resolve_token_id(opp)
+
+        if not resolved_token_id:
+            logger.error("no_token_id", question=opp.question[:60], side=opp.token_side)
+            return None
+
         trade = TradeRecord(
             order_id="",
             condition_id=opp.condition_id,
             question=opp.question,
-            token_id="",  # Will be set from market tracker
+            token_id=resolved_token_id,
             token_side=opp.token_side,
             price=opp.token_price,
             size=round(shares, 2),
@@ -246,7 +386,7 @@ class Executor:
                 price=opp.token_price,
                 size=round(shares, 2),
                 side=BUY,
-                token_id=self._resolve_token_id(opp),
+                token_id=resolved_token_id,
             )
 
             # Create and sign the order
@@ -258,6 +398,11 @@ class Executor:
             if response and response.get("orderID"):
                 trade.order_id = response["orderID"]
                 trade.status = OrderStatus.LIVE
+                # Track for monitoring
+                self._pending_orders[trade.order_id] = trade
+                # Deduct from live balance optimistically
+                if self._live_balance is not None:
+                    self._live_balance -= opp.suggested_bet
                 logger.info(
                     "order_placed",
                     order_id=trade.order_id,
@@ -265,6 +410,7 @@ class Executor:
                     side=opp.token_side,
                     price=f"${opp.token_price:.4f}",
                     cost=f"${opp.suggested_bet:.2f}",
+                    balance=f"${self._live_balance:.2f}" if self._live_balance is not None else "?",
                 )
             else:
                 trade.status = OrderStatus.FAILED
@@ -279,6 +425,110 @@ class Executor:
         self._trades.append(trade)
         return trade
 
+    # ── Order Monitoring ──────────────────────────────────────────
+
+    async def _order_monitor_loop(self):
+        """Background loop: check pending orders, cancel if timed out."""
+        logger.info("order_monitor_started")
+        while True:
+            try:
+                await asyncio.sleep(ORDER_CHECK_INTERVAL)
+                await self._check_pending_orders()
+
+                # Periodically refresh balance
+                if time.time() - self._last_balance_fetch > BALANCE_REFRESH_INTERVAL:
+                    await self._refresh_balance()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("order_monitor_error", error=str(e))
+
+    async def _check_pending_orders(self):
+        """Poll status of all pending orders."""
+        if not self._client or not self._pending_orders:
+            return
+
+        now = time.time()
+        to_remove = []
+
+        for order_id, trade in list(self._pending_orders.items()):
+            try:
+                order_data = self._client.get_order(order_id)
+                if not order_data:
+                    continue
+
+                status = order_data.get("status", "").upper()
+                size_matched = float(order_data.get("size_matched", 0) or 0)
+
+                if status == "MATCHED" or (status == "CLOSED" and size_matched > 0):
+                    # Fully or partially filled
+                    trade.status = OrderStatus.MATCHED
+                    trade.matched_at = now
+                    trade.size_matched = size_matched
+                    # Recalculate actual cost based on fill
+                    trade.cost_usd = round(size_matched * trade.price, 2)
+                    to_remove.append(order_id)
+                    logger.info(
+                        "order_matched",
+                        order_id=order_id,
+                        question=trade.question[:60],
+                        size_matched=f"{size_matched:.2f}",
+                        cost=f"${trade.cost_usd:.2f}",
+                    )
+
+                elif status in ("CANCELLED", "EXPIRED"):
+                    trade.status = OrderStatus.CANCELLED
+                    trade.error = f"Order {status.lower()} by exchange"
+                    to_remove.append(order_id)
+                    # Refund balance
+                    if self._live_balance is not None:
+                        self._live_balance += trade.cost_usd
+                    logger.info(
+                        "order_cancelled_external",
+                        order_id=order_id,
+                        question=trade.question[:60],
+                    )
+
+                elif now - trade.created_at > ORDER_TIMEOUT:
+                    # Timed out — cancel it
+                    await self._cancel_order(order_id, trade)
+                    to_remove.append(order_id)
+
+            except Exception as e:
+                logger.warning(
+                    "order_check_error",
+                    order_id=order_id,
+                    error=str(e),
+                )
+
+        for oid in to_remove:
+            self._pending_orders.pop(oid, None)
+
+    async def _cancel_order(self, order_id: str, trade: TradeRecord):
+        """Cancel a single order and update trade record."""
+        try:
+            self._client.cancel(order_id)
+            trade.status = OrderStatus.CANCELLED
+            trade.error = f"Timed out after {ORDER_TIMEOUT}s"
+            # Refund balance
+            if self._live_balance is not None:
+                self._live_balance += trade.cost_usd
+            logger.info(
+                "order_cancelled_timeout",
+                order_id=order_id,
+                question=trade.question[:60],
+                age=f"{time.time() - trade.created_at:.0f}s",
+            )
+        except Exception as e:
+            logger.warning(
+                "order_cancel_failed",
+                order_id=order_id,
+                error=str(e),
+            )
+
+    # ── Helpers ───────────────────────────────────────────────────
+
     def _build_order(self, opp: Opportunity) -> dict:
         """Build order parameters (for validation in dry-run mode)."""
         shares = opp.suggested_bet / opp.token_price if opp.token_price > 0 else 0
@@ -291,13 +541,13 @@ class Executor:
         }
 
     def _resolve_token_id(self, opp: Opportunity) -> str:
-        """Resolve the token ID for the opportunity.
-
-        Must be set externally via set_token_resolver or on the opportunity itself.
-        """
+        """Resolve the token ID for the opportunity."""
+        # Try explicit override first (set by CopyTrader)
         if hasattr(opp, '_token_id') and opp._token_id:
             return opp._token_id
-        # Fallback: will need to be resolved from MarketTracker
+        # Use the token_id from the Opportunity itself (set by Detector)
+        if opp.token_id:
+            return opp.token_id
         return ""
 
     def _maybe_reset_daily(self):
@@ -312,18 +562,47 @@ class Executor:
         """Update daily P&L (called when a trade settles)."""
         self._daily_pnl += pnl
 
+    async def set_mode(self, mode: ExecutionMode):
+        """Change execution mode at runtime (hot-reload).
+
+        When switching to LIVE/DRY_RUN, initializes the CLOB client if needed.
+        When switching to PAPER, keeps the client but routes to paper handler.
+        """
+        old_mode = self.mode
+        self.mode = mode
+
+        if mode in (ExecutionMode.LIVE, ExecutionMode.DRY_RUN) and self._client is None:
+            # Need to initialize CLOB client
+            self._initialized = False
+            await self.initialize()
+        elif mode == ExecutionMode.PAPER:
+            self._initialized = True
+
+        logger.info("executor_mode_changed", old=old_mode.value, new=mode.value)
+
     @property
     def trades(self) -> list[TradeRecord]:
         return self._trades
 
     def get_stats(self) -> dict:
-        confirmed = [t for t in self._trades if t.status == OrderStatus.CONFIRMED]
+        confirmed = [t for t in self._trades if t.status in (
+            OrderStatus.CONFIRMED, OrderStatus.MATCHED,
+        )]
         failed = [t for t in self._trades if t.status == OrderStatus.FAILED]
-        return {
+        cancelled = [t for t in self._trades if t.status == OrderStatus.CANCELLED]
+        pending = [t for t in self._trades if t.status in (
+            OrderStatus.LIVE, OrderStatus.PENDING,
+        )]
+        stats = {
             "mode": self.mode.value,
             "total_trades": len(self._trades),
             "confirmed": len(confirmed),
             "failed": len(failed),
+            "cancelled": len(cancelled),
+            "pending_orders": len(pending),
             "total_cost_usd": sum(t.cost_usd for t in confirmed),
             "daily_pnl": round(self._daily_pnl, 2),
         }
+        if self._live_balance is not None:
+            stats["live_balance"] = round(self._live_balance, 2)
+        return stats
