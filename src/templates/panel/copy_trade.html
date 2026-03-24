@@ -138,6 +138,11 @@
                 <span class="desc">Maximo de apuestas abiertas en 5 min para evitar drawdowns correlacionados</span>
             </div>
             <div class="form-group">
+                <label>Spread Arb Multiplier</label>
+                <input type="number" name="spread_arb_multiplier" value="{{ params.spread_arb_multiplier }}" step="0.5" min="1" max="10">
+                <span class="desc">Multiplicador de bet en spread arb (ambos lados &lt; $1). 1.0 = desactivado</span>
+            </div>
+            <div class="form-group">
                 <label>Max Bet Per Trade ($)</label>
                 <input type="number" name="max_bet_per_trade" value="{{ params.max_bet_per_trade }}" step="1" min="1">
                 <span class="desc">Tope absoluto en $ por apuesta individual</span>

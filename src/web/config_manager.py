@@ -33,6 +33,7 @@ class ConfigManager:
             "poll_interval_ms": cfg.poll_interval_ms,
             "min_price": cfg.min_price,
             "max_concurrent_bets": cfg.max_concurrent_bets,
+            "spread_arb_multiplier": cfg.spread_arb_multiplier,
             "max_bet_per_trade": acc.risk.max_bet_per_trade,
             "max_daily_loss": acc.risk.max_daily_loss,
             "simulated_balance": acc.risk.simulated_balance,
@@ -51,6 +52,8 @@ class ConfigManager:
                 acc_cfg.copy_trade.min_price = float(params["min_price"])
             if "max_concurrent_bets" in params:
                 acc_cfg.copy_trade.max_concurrent_bets = int(params["max_concurrent_bets"])
+            if "spread_arb_multiplier" in params:
+                acc_cfg.copy_trade.spread_arb_multiplier = float(params["spread_arb_multiplier"])
             if "max_bet_per_trade" in params:
                 acc_cfg.risk.max_bet_per_trade = float(params["max_bet_per_trade"])
             if "max_daily_loss" in params:
@@ -71,6 +74,8 @@ class ConfigManager:
                 cfg.copy_trade.min_price = float(params["min_price"])
             if "max_concurrent_bets" in params:
                 cfg.copy_trade.max_concurrent_bets = int(params["max_concurrent_bets"])
+            if "spread_arb_multiplier" in params:
+                cfg.copy_trade.spread_arb_multiplier = float(params["spread_arb_multiplier"])
             if "max_bet_per_trade" in params:
                 cfg.risk.max_bet_per_trade = float(params["max_bet_per_trade"])
             if "max_daily_loss" in params:
@@ -227,6 +232,7 @@ class ConfigManager:
                 acc_raw["copy_trade"]["poll_interval_ms"] = acc_cfg.copy_trade.poll_interval_ms
                 acc_raw["copy_trade"]["min_price"] = acc_cfg.copy_trade.min_price
                 acc_raw["copy_trade"]["max_concurrent_bets"] = acc_cfg.copy_trade.max_concurrent_bets
+                acc_raw["copy_trade"]["spread_arb_multiplier"] = acc_cfg.copy_trade.spread_arb_multiplier
 
             acc_raw.setdefault("risk", {})
             acc_raw["risk"]["max_bet_per_trade"] = acc_cfg.risk.max_bet_per_trade

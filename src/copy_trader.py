@@ -54,6 +54,7 @@ class CopyBet:
     actual_pnl: float = 0.0
     resolved_at: float = 0.0
     duration_seconds: float = 0.0
+    is_arb_boost: bool = False  # True if bet was boosted due to spread arb detection
 
 
 class CopyTrader:
@@ -244,6 +245,19 @@ class CopyTrader:
                 count += 1
         return count
 
+    def _find_opposite_pending_bet(self, condition_id: str, opposite_side: str) -> CopyBet | None:
+        """Find an existing pending bet on the opposite side of a market.
+
+        Searches all bets (from any wallet) for a pending bet on the given
+        side of the same condition_id. Used to detect spread arb opportunities.
+        """
+        for key, bet in self._bets.items():
+            if (bet.condition_id == condition_id
+                    and bet.token_side == opposite_side
+                    and bet.outcome == "pending"):
+                return bet
+        return None
+
     async def _emit_opportunity(self, trade: WalletTrade):
         outcome_lower = trade.outcome.lower()
         token_side = "YES" if outcome_lower in ("yes", "y", "up") else "NO"
@@ -325,6 +339,51 @@ class CopyTrader:
         else:
             bet_size = self.config.fixed_bet_size
 
+        # Spread arb detection: check if we already have a pending bet on the
+        # OPPOSITE side of this same market. If yes, and prices sum < $1.00
+        # (minus fees), boost the bet size — it's a near-guaranteed profit.
+        is_arb = False
+        opposite_side = "NO" if token_side == "YES" else "YES"
+        existing_opposite = self._find_opposite_pending_bet(trade.condition_id, opposite_side)
+
+        if existing_opposite and self.config.spread_arb_multiplier > 1.0:
+            # Verify arb is still profitable:
+            # Total cost per share pair = price_A + price_B
+            # Revenue = $1.00 (one side always wins)
+            # Fee on winning side ≈ 0.3% * min(price, 1-price)
+            total_cost = existing_opposite.price + trade.price
+            # Worst-case fee: whichever side wins pays the higher fee
+            fee_if_this_wins = FEE_RATE * min(trade.price, 1 - trade.price)
+            fee_if_other_wins = FEE_RATE * min(existing_opposite.price, 1 - existing_opposite.price)
+            worst_fee = max(fee_if_this_wins, fee_if_other_wins)
+
+            arb_margin = 1.0 - total_cost - worst_fee - GAS_REDEEM_USD
+            if arb_margin > 0:
+                is_arb = True
+                bet_size *= self.config.spread_arb_multiplier
+                logger.info(
+                    "spread_arb_detected",
+                    wallet=wallet_prefix,
+                    question=trade.question[:60],
+                    this_side=token_side,
+                    this_price=f"${trade.price:.4f}",
+                    other_side=existing_opposite.token_side,
+                    other_price=f"${existing_opposite.price:.4f}",
+                    total_cost=f"${total_cost:.4f}",
+                    arb_margin=f"${arb_margin:.4f}",
+                    multiplier=self.config.spread_arb_multiplier,
+                    boosted_bet=f"${bet_size:.2f}",
+                )
+            else:
+                logger.info(
+                    "spread_arb_invalid",
+                    wallet=wallet_prefix,
+                    question=trade.question[:60],
+                    total_cost=f"${total_cost:.4f}",
+                    arb_margin=f"${arb_margin:.4f}",
+                    reason="prices sum >= $1.00 after fees",
+                )
+
         # Don't bet more than balance allows
         bet_size = min(bet_size, self._balance * 0.05)  # Max 5% per trade
         if bet_size < 0.10:
@@ -345,11 +404,14 @@ class CopyTrader:
             potential_profit=potential_profit,
             wallet_source=trade.maker_address[:10],
             timestamp=time.time(),
+            is_arb_boost=is_arb,
         )
         self._bets[key] = bet
         self._all_bets.append(bet)
         self._balance -= bet_size
         self._stats["trades_copied"] += 1
+        if is_arb:
+            self._stats["arb_boosts"] = self._stats.get("arb_boosts", 0) + 1
         self._update_balance_stats()
 
         logger.info(
@@ -362,6 +424,7 @@ class CopyTrader:
             profit=f"${potential_profit:.2f}",
             balance=f"${self._balance:.2f}",
             age_ms=int((time.time() - trade.timestamp) * 1000),
+            arb_boost=is_arb,
         )
 
         # Fire executor callback
@@ -566,6 +629,7 @@ class CopyTrader:
                 "disappeared_at": 0,
                 "duration_seconds": b.duration_seconds,
                 "wallet_source": b.wallet_source,
+                "is_arb_boost": b.is_arb_boost,
             }
             for b in self._all_bets
         ]
@@ -644,6 +708,7 @@ class CopyTrader:
                     "actual_pnl": b.actual_pnl,
                     "resolved_at": b.resolved_at,
                     "duration_seconds": b.duration_seconds,
+                    "is_arb_boost": b.is_arb_boost,
                 }
                 for b in bets
             ],

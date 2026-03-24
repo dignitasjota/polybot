@@ -159,7 +159,7 @@ async def panel_copy_params(request: web.Request) -> web.Response:
 
     params = {}
     for key in ("fixed_bet_size", "poll_interval_ms", "min_price", "max_concurrent_bets",
-                "max_bet_per_trade", "max_daily_loss", "simulated_balance"):
+                "spread_arb_multiplier", "max_bet_per_trade", "max_daily_loss", "simulated_balance"):
         if key in data and data[key]:
             params[key] = data[key]
 

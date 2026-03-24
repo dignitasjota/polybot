@@ -116,6 +116,7 @@ class CopyTradeConfig:
     proportional_factor: float = 1.0  # Multiplier for proportional mode
     min_price: float = 0.35       # Skip trades below this price
     max_concurrent_bets: int = 3  # Max concurrent copy bets
+    spread_arb_multiplier: float = 3.0  # Bet multiplier when spread arb detected (both sides < $1)
 
 
 @dataclass

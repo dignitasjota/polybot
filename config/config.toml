@@ -103,6 +103,7 @@ copy_size_mode = "fixed"
 fixed_bet_size = 5.0
 min_price = 0.40                  # Precio minimo para copiar trades
 max_concurrent_bets = 3           # Max bets copy concurrentes
+spread_arb_multiplier = 3.0       # Multiplicador de bet cuando detecta arb (ambos lados < $1)
 
 [accounts.risk]
 max_bet_per_trade = 50.0
