@@ -99,6 +99,7 @@ class CredentialsConfig:
     api_key_env: str = "POLYMARKET_API_KEY"
     api_secret_env: str = "POLYMARKET_SECRET"
     passphrase_env: str = "POLYMARKET_PASSPHRASE"
+    signature_type: int = 1  # 0=EOA (MetaMask), 1=POLY_PROXY (Magic Link / Polymarket default)
 
     def get_private_key(self) -> str:
         return get_secret(self.private_key_env)

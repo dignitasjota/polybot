@@ -108,20 +108,24 @@ class Executor:
             from py_clob_client.clob_types import ApiCreds
 
             private_key = self._credentials.get_private_key()
+            sig_type = self._credentials.signature_type  # 0=EOA, 1=POLY_PROXY
 
             # Try to get API credentials from env vars; if missing, derive from private key
             try:
                 api_key = self._credentials.get_api_key()
                 api_secret = self._credentials.get_api_secret()
                 passphrase = self._credentials.get_passphrase()
-                logger.info("using_provided_api_creds")
+                logger.info("using_provided_api_creds", signature_type=sig_type)
             except EnvironmentError:
                 # Auto-derive API credentials from private key
-                logger.info("deriving_api_creds", msg="API env vars not set, deriving from private key...")
+                logger.info("deriving_api_creds",
+                            msg="API env vars not set, deriving from private key...",
+                            signature_type=sig_type)
                 client_tmp = ClobClient(
                     host="https://clob.polymarket.com",
                     key=private_key,
                     chain_id=137,
+                    signature_type=sig_type,
                 )
                 creds = client_tmp.derive_api_key()
                 api_key = creds.api_key
@@ -133,6 +137,7 @@ class Executor:
                 host="https://clob.polymarket.com",
                 key=private_key,
                 chain_id=137,  # Polygon mainnet
+                signature_type=sig_type,
                 creds=ApiCreds(
                     api_key=api_key,
                     api_secret=api_secret,
