@@ -81,6 +81,7 @@ class ClosingArbitrageDetector:
             crypto_configs=self.config.crypto_configs,
         )
         self._on_opportunity_cb = None  # async callback(Opportunity) for executor
+        self._on_redeem_cb = None      # async callback(condition_id: str) for auto-redeem
         self._stats = {
             "total_scans": 0,
             "opportunities_found": 0,
@@ -96,6 +97,19 @@ class ClosingArbitrageDetector:
     def on_opportunity(self, callback):
         """Register an async callback to be called when a new bet is placed."""
         self._on_opportunity_cb = callback
+
+    def on_redeem(self, callback):
+        """Register async callback for redeeming winning positions."""
+        self._on_redeem_cb = callback
+
+    async def _safe_redeem(self, condition_id: str):
+        """Fire redeem callback, swallowing errors."""
+        if not self._on_redeem_cb:
+            return
+        try:
+            await self._on_redeem_cb(condition_id)
+        except Exception as e:
+            logger.warning("redeem_callback_error", error=str(e))
 
     def set_live_balance(self, balance: float):
         """Update balance from live executor (replaces simulated balance)."""
@@ -227,6 +241,10 @@ class ClosingArbitrageDetector:
                 cumulative_pnl=f"${self._stats['simulated_pnl']:+.2f}",
             )
 
+            # Auto-redeem winning positions
+            if outcome == "win" and self._on_redeem_cb:
+                asyncio.create_task(self._safe_redeem(market.condition_id))
+
             # Update the bet opportunity object
             bet_opp.outcome = outcome
             bet_opp.actual_pnl = pnl
@@ -323,6 +341,9 @@ class ClosingArbitrageDetector:
                     pnl=f"${pnl:+.2f}",
                     balance=f"${self._balance:.2f}",
                 )
+                # Auto-redeem winning position
+                if self._on_redeem_cb:
+                    asyncio.create_task(self._safe_redeem(market.condition_id))
 
     def _is_crypto_market(self, question: str) -> bool:
         """Check if a market question mentions a known cryptocurrency."""

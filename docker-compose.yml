@@ -25,6 +25,10 @@ services:
       - COPY_WALLET_TYPE=${COPY_WALLET_TYPE:-}
       # Copy account proxy address (uses POLYMARKET_PROXY_ADDRESS if not set)
       - COPY_PROXY_ADDRESS=${COPY_PROXY_ADDRESS:-}
+      # Builder Relayer credentials (for auto-redeem of winning positions)
+      - BUILDER_API_KEY=${BUILDER_API_KEY:-}
+      - BUILDER_SECRET=${BUILDER_SECRET:-}
+      - BUILDER_PASSPHRASE=${BUILDER_PASSPHRASE:-}
     volumes:
       - bot-logs:/app/logs
       - bot-data:/app/data

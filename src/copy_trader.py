@@ -75,6 +75,7 @@ class CopyTrader:
         self._settle_task: asyncio.Task | None = None
         self._seen_trades: set[str] = set()
         self._on_opportunity_cb = None
+        self._on_redeem_cb = None  # async callback(condition_id: str) for auto-redeem
 
         # Wallet roles: address -> "primary" or "confirmation"
         # Confirmation wallets only copy if their assigned primary already bet same side
@@ -115,6 +116,10 @@ class CopyTrader:
     def on_opportunity(self, callback):
         """Register callback for when a copy-trade opportunity is detected."""
         self._on_opportunity_cb = callback
+
+    def on_redeem(self, callback):
+        """Register async callback for redeeming winning positions."""
+        self._on_redeem_cb = callback
 
     def set_live_balance(self, balance: float):
         """Update balance from live executor (replaces simulated balance)."""
@@ -406,7 +411,52 @@ class CopyTrader:
         margin_net = (1.0 - trade.price) - fee / (bet_size / trade.price) - GAS_REDEEM_USD
         potential_profit = bet_size * margin_net / trade.price if trade.price > 0 else 0
 
-        # Record the bet
+        # Build opportunity for executor
+        opp = Opportunity(
+            timestamp=time.time(),
+            condition_id=trade.condition_id,
+            question=f"[COPY:{trade.maker_address[:8]}] {trade.question}",
+            token_side=token_side,
+            token_id=trade.token_id,
+            token_price=trade.price,
+            implied_probability=trade.price,
+            margin_gross=1.0 - trade.price,
+            fee_estimated=fee,
+            margin_net=margin_net,
+            depth_at_price=trade.size,
+            resolved=False,
+            winning_token_id="",
+            hours_remaining=0.0,
+            min_probability_required=0.0,
+            suggested_bet=bet_size,
+            potential_profit=potential_profit,
+        )
+        opp._token_id = trade.token_id
+
+        # Fire executor callback BEFORE recording the bet
+        # If executor fails (e.g. insufficient balance, order rejected),
+        # we don't record the bet — prevents phantom bets in stats
+        executed = True
+        if self._on_opportunity_cb:
+            try:
+                result = await self._on_opportunity_cb(opp)
+                if result is None:
+                    executed = False
+            except Exception as e:
+                logger.error("copy_trade_callback_error", error=str(e))
+                executed = False
+
+        if not executed:
+            logger.warning(
+                "copy_trade_bet_skipped",
+                wallet=trade.maker_address[:10],
+                question=trade.question[:60],
+                side=token_side,
+                reason="executor rejected or failed",
+            )
+            return
+
+        # Record the bet only after executor confirmation
         bet = CopyBet(
             condition_id=trade.condition_id,
             question=trade.question,
@@ -435,33 +485,6 @@ class CopyTrader:
             balance=f"${self._balance:.2f}",
             age_ms=int((time.time() - trade.timestamp) * 1000),
         )
-
-        # Fire executor callback
-        if self._on_opportunity_cb:
-            opp = Opportunity(
-                timestamp=time.time(),
-                condition_id=trade.condition_id,
-                question=f"[COPY:{trade.maker_address[:8]}] {trade.question}",
-                token_side=token_side,
-                token_id=trade.token_id,
-                token_price=trade.price,
-                implied_probability=trade.price,
-                margin_gross=1.0 - trade.price,
-                fee_estimated=fee,
-                margin_net=margin_net,
-                depth_at_price=trade.size,
-                resolved=False,
-                winning_token_id="",
-                hours_remaining=0.0,
-                min_probability_required=0.0,
-                suggested_bet=bet_size,
-                potential_profit=potential_profit,
-            )
-            opp._token_id = trade.token_id
-            try:
-                await self._on_opportunity_cb(opp)
-            except Exception as e:
-                logger.error("copy_trade_callback_error", error=str(e))
 
     # ── Settlement loop ───────────────────────────────────────────────
 
@@ -556,6 +579,15 @@ class CopyTrader:
         except Exception:
             pass
 
+    async def _safe_redeem(self, condition_id: str):
+        """Fire redeem callback, swallowing errors."""
+        if not self._on_redeem_cb:
+            return
+        try:
+            await self._on_redeem_cb(condition_id)
+        except Exception as e:
+            logger.warning("copy_redeem_callback_error", error=str(e))
+
     def _settle_bet(self, bet: CopyBet, won: bool):
         """Settle a bet as win or loss."""
         if bet.outcome != "pending":
@@ -574,6 +606,9 @@ class CopyTrader:
             bet.actual_pnl = round(payout - bet.bet_size - fee - GAS_REDEEM_USD, 4)
             self._balance += bet.bet_size + bet.actual_pnl  # Return cost + profit
             self._stats["settled_wins"] += 1
+            # Auto-redeem winning position
+            if self._on_redeem_cb:
+                asyncio.create_task(self._safe_redeem(bet.condition_id))
         else:
             bet.outcome = "loss"
             bet.actual_pnl = round(-bet.bet_size, 4)

@@ -118,6 +118,7 @@ class AccountRunner:
 
         # Wire callbacks
         self.detector.on_opportunity(self.executor.execute)
+        self.detector.on_redeem(self.executor.redeem_position)
         self.ws_client.on_opportunity(self.detector.check)
 
         self.log.info("account_directional_ready", name=self.name)
@@ -128,8 +129,9 @@ class AccountRunner:
         overrides = await get_wallet_overrides()
         self.copy_trader.set_wallet_overrides(overrides)
 
-        # Wire callback: copy trader -> executor
+        # Wire callbacks: copy trader -> executor
         self.copy_trader.on_opportunity(self.executor.execute)
+        self.copy_trader.on_redeem(self.executor.redeem_position)
         await self.copy_trader.start()
 
         self.log.info(

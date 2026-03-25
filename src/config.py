@@ -135,6 +135,23 @@ class CredentialsConfig:
     def get_passphrase(self) -> str:
         return get_secret(self.passphrase_env)
 
+    # Builder Relayer credentials (for auto-redeem of winning positions)
+    builder_key_env: str = "BUILDER_API_KEY"
+    builder_secret_env: str = "BUILDER_SECRET"
+    builder_passphrase_env: str = "BUILDER_PASSPHRASE"
+
+    def get_builder_creds(self) -> tuple[str, str, str] | None:
+        """Get Builder API credentials for the Relayer (gasless redeem).
+
+        Returns (key, secret, passphrase) or None if not configured.
+        """
+        key = os.environ.get(self.builder_key_env, "").strip()
+        secret = os.environ.get(self.builder_secret_env, "").strip()
+        passphrase = os.environ.get(self.builder_passphrase_env, "").strip()
+        if key and secret and passphrase:
+            return (key, secret, passphrase)
+        return None
+
 
 @dataclass
 class CopyTradeConfig:

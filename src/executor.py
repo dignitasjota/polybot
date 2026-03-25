@@ -23,6 +23,26 @@ ORDER_CHECK_INTERVAL = 5       # seconds between order status polls
 ORDER_TIMEOUT = 30             # seconds before cancelling unfilled order
 BALANCE_REFRESH_INTERVAL = 3600  # seconds between balance refreshes (1 hour)
 
+# Builder Relayer (gasless redeem via Safe/proxy)
+RELAYER_URL = "https://relayer-v2.polymarket.com"
+ZERO_BYTES32 = "0x" + "00" * 32
+
+# Minimal ABI for CTF redeemPositions
+REDEEM_ABI = [
+    {
+        "constant": False,
+        "inputs": [
+            {"name": "collateralToken", "type": "address"},
+            {"name": "parentCollectionId", "type": "bytes32"},
+            {"name": "conditionId", "type": "bytes32"},
+            {"name": "indexSets", "type": "uint256[]"},
+        ],
+        "name": "redeemPositions",
+        "outputs": [],
+        "type": "function",
+    }
+]
+
 
 class OrderStatus(Enum):
     PENDING = "pending"
@@ -96,6 +116,10 @@ class Executor:
         self._monitor_task: asyncio.Task | None = None
         self._on_balance_update = None  # callback(balance: float)
 
+        # Builder Relayer (auto-redeem)
+        self._relayer = None
+        self._redeem_available = False
+
     async def initialize(self):
         """Initialize the CLOB client with API credentials."""
         if self.mode == ExecutionMode.PAPER:
@@ -161,10 +185,14 @@ class Executor:
             if self._monitor_task is None or self._monitor_task.done():
                 self._monitor_task = asyncio.create_task(self._order_monitor_loop())
 
+            # Initialize Builder Relayer for auto-redeem
+            self._init_relayer()
+
             logger.info(
                 "executor_initialized",
                 mode=self.mode.value,
                 balance=f"${self._live_balance:.2f}" if self._live_balance else "unknown",
+                redeem_available=self._redeem_available,
             )
 
         except ImportError:
@@ -173,6 +201,140 @@ class Executor:
         except EnvironmentError as e:
             logger.error("executor_init_failed", error=str(e))
             raise
+
+    def _init_relayer(self):
+        """Initialize Builder Relayer for gasless auto-redeem of winning positions."""
+        builder_creds = self._credentials.get_builder_creds()
+        if not builder_creds:
+            logger.info("relayer_not_configured", msg="Builder API credentials not set, auto-redeem disabled")
+            return
+
+        try:
+            from poly_relay_client import RelayClient
+            from poly_relay_client.types import ApiCreds as BuilderApiCreds
+
+            api_key, api_secret, api_passphrase = builder_creds
+            creds = BuilderApiCreds(
+                api_key=api_key,
+                api_secret=api_secret,
+                api_passphrase=api_passphrase,
+            )
+            self._relayer = RelayClient(creds, url=RELAYER_URL)
+            self._redeem_available = True
+            logger.info("relayer_initialized", msg="Builder Relayer ready for auto-redeem")
+        except ImportError:
+            logger.warning("relayer_import_error", msg="py-builder-relayer-client not installed")
+        except Exception as e:
+            logger.warning("relayer_init_error", error=str(e))
+
+    async def redeem_position(self, condition_id: str) -> bool:
+        """Redeem a winning position via Builder Relayer (gasless).
+
+        Encodes redeemPositions(USDC, 0x00, conditionId, [1,2]) calldata
+        and sends it through the Relayer for execution via the proxy/Safe wallet.
+        """
+        if not self._redeem_available or not self._relayer:
+            return False
+        if self.mode != ExecutionMode.LIVE:
+            return False
+
+        try:
+            from web3 import Web3
+            from poly_relay_client.types import Transaction
+
+            w3 = Web3()
+            ctf = w3.eth.contract(
+                address=Web3.to_checksum_address(CONDITIONAL_TOKENS),
+                abi=REDEEM_ABI,
+            )
+
+            # Ensure condition_id is proper bytes32 hex
+            cid_hex = condition_id if condition_id.startswith("0x") else f"0x{condition_id}"
+
+            calldata = ctf.encodeABI(
+                fn_name="redeemPositions",
+                args=[
+                    Web3.to_checksum_address(USDC_ADDRESS),  # collateralToken
+                    bytes.fromhex(ZERO_BYTES32[2:]),          # parentCollectionId
+                    bytes.fromhex(cid_hex[2:]),               # conditionId
+                    [1, 2],                                    # indexSets (YES=1, NO=2)
+                ],
+            )
+
+            tx = Transaction(
+                to=Web3.to_checksum_address(CONDITIONAL_TOKENS),
+                data=calldata,
+                value="0",
+            )
+
+            response = await asyncio.to_thread(
+                self._relayer.execute, [tx], None
+            )
+
+            tx_id = None
+            if isinstance(response, dict):
+                tx_id = response.get("transactionId") or response.get("id")
+            elif hasattr(response, "transaction_id"):
+                tx_id = response.transaction_id
+
+            logger.info(
+                "redeem_submitted",
+                condition_id=condition_id[:20] + "...",
+                tx_id=str(tx_id)[:20] if tx_id else "unknown",
+            )
+
+            # Poll for confirmation in background
+            if tx_id:
+                asyncio.create_task(self._wait_redeem(tx_id, condition_id))
+
+            return True
+
+        except Exception as e:
+            logger.warning(
+                "redeem_failed",
+                condition_id=condition_id[:20] + "...",
+                error=str(e),
+            )
+            return False
+
+    async def _wait_redeem(self, tx_id: str, condition_id: str):
+        """Background: poll relayer until redeem tx is mined, then refresh balance."""
+        try:
+            for _ in range(30):  # Max 5 minutes (30 * 10s)
+                await asyncio.sleep(10)
+                try:
+                    status = await asyncio.to_thread(
+                        self._relayer.get_transaction, tx_id
+                    )
+                    state = None
+                    if isinstance(status, dict):
+                        state = status.get("state") or status.get("status")
+                    elif hasattr(status, "state"):
+                        state = status.state
+
+                    if state and state.upper() in ("STATE_MINED", "STATE_CONFIRMED", "MINED", "CONFIRMED"):
+                        logger.info(
+                            "redeem_confirmed",
+                            condition_id=condition_id[:20] + "...",
+                            tx_id=tx_id[:20],
+                        )
+                        # Refresh balance to reflect redeemed USDC
+                        await self._refresh_balance()
+                        return
+                    elif state and state.upper() in ("STATE_FAILED", "FAILED"):
+                        logger.warning(
+                            "redeem_tx_failed",
+                            condition_id=condition_id[:20] + "...",
+                            tx_id=tx_id[:20],
+                            state=state,
+                        )
+                        return
+                except Exception as e:
+                    logger.debug("redeem_poll_error", error=str(e))
+
+            logger.warning("redeem_poll_timeout", tx_id=tx_id[:20])
+        except asyncio.CancelledError:
+            pass
 
     async def close(self):
         """Stop order monitor."""
