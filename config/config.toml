@@ -17,15 +17,15 @@ max_concurrent_bets = 3           # Max bets directionales concurrentes
 # buffer_pct = cambio minimo en Binance (%) para confirmar direccion
 [strategy.crypto_configs.bitcoin]
 enabled = true
-buffer_pct = 0.04
+buffer_pct = 0.03
 
 [strategy.crypto_configs.ethereum]
 enabled = true
-buffer_pct = 0.05
+buffer_pct = 0.04
 
 [strategy.crypto_configs.solana]
 enabled = true
-buffer_pct = 0.025
+buffer_pct = 0.035
 
 [strategy.crypto_configs.bnb]
 enabled = true
@@ -33,7 +33,7 @@ buffer_pct = 0.03
 
 [strategy.crypto_configs.dogecoin]
 enabled = true
-buffer_pct = 0.02
+buffer_pct = 0.03
 
 [strategy.crypto_configs.xrp]
 enabled = true
@@ -45,7 +45,7 @@ buffer_pct = 0.03
 
 [strategy.crypto_configs.avalanche]
 enabled = true
-buffer_pct = 0.025
+buffer_pct = 0.03
 
 [strategy.crypto_configs.polkadot]
 enabled = true
@@ -65,11 +65,11 @@ buffer_pct = 0.03
 
 [strategy.crypto_configs.sui]
 enabled = true
-buffer_pct = 0.02
+buffer_pct = 0.03
 
 [strategy.crypto_configs.pepe]
 enabled = true
-buffer_pct = 0.02
+buffer_pct = 0.03
 
 [strategy.crypto_configs.hyperliquid]
 enabled = false
@@ -174,7 +174,7 @@ poll_interval_ms = 500
 max_latency_ms = 120000  # 120s para paper trading (en live bajar a 5000-10000)
 copy_size_mode = "fixed"
 fixed_bet_size = 5.0
-min_price = 0.40                  # Precio minimo para copiar trades
+min_price = 0.50                  # Precio minimo para copiar trades (hedges exentos)
 max_concurrent_bets = 3           # Max bets copy concurrentes
 spread_arb_multiplier = 3.0       # Multiplicador de bet cuando detecta arb (ambos lados < $1)
 

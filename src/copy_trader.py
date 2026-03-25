@@ -372,16 +372,31 @@ class CopyTrader:
                 mode=mode,
             )
 
-        # Filter out low-price bets — data shows 0 wins and 11 losses below min_price
+        # Filter out low-price bets — but allow if we already have a bet on the
+        # opposite side (hedge).  Data shows hedges at low prices are profitable
+        # (+$18/7 bets) while non-hedge low-price bets are 0% WR.
         if trade.price < self.config.min_price:
+            opposite = "NO" if token_side == "YES" else "YES"
+            has_opposite = any(
+                k.startswith(f"{trade.condition_id}:{opposite}:")
+                for k in self._bets
+            )
+            if not has_opposite:
+                logger.info(
+                    "copy_trade_price_filter",
+                    wallet=trade.maker_address[:10],
+                    question=trade.question[:60],
+                    price=f"${trade.price:.4f}",
+                    min_price=self.config.min_price,
+                )
+                return
             logger.info(
-                "copy_trade_price_filter",
+                "copy_trade_hedge_bypass_price_filter",
                 wallet=trade.maker_address[:10],
                 question=trade.question[:60],
                 price=f"${trade.price:.4f}",
-                min_price=self.config.min_price,
+                side=token_side,
             )
-            return
 
         # Limit concurrent bets to reduce correlated drawdowns
         # (e.g., 6 consecutive losses 5:30-6:00AM from overlapping windows)
