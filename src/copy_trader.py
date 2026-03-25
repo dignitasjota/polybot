@@ -296,6 +296,37 @@ class CopyTrader:
         if key in self._bets:
             return  # Already copied this exact trade
 
+        # Opposite-side hedge logic (Option B):
+        # Allow betting both sides ONLY when the combined price makes it a
+        # profitable hedge (sum < $0.98 → guaranteed profit after ~1% fees).
+        # Block when sum >= $0.98 (fees eat the spread → guaranteed loss).
+        opposite_side = "NO" if token_side == "YES" else "YES"
+        existing_opposite = self._find_opposite_pending_bet(trade.condition_id, opposite_side)
+        if existing_opposite:
+            combined_price = existing_opposite.price + trade.price
+            if combined_price >= 0.98:
+                logger.info(
+                    "copy_trade_opposite_side_blocked",
+                    wallet=wallet_prefix,
+                    question=trade.question[:60],
+                    side=token_side,
+                    existing_side=opposite_side,
+                    existing_wallet=existing_opposite.wallet_source,
+                    combined_price=f"${combined_price:.4f}",
+                    reason="combined price >= $0.98 — fees eat the spread",
+                )
+                return
+            logger.info(
+                "copy_trade_hedge_allowed",
+                wallet=wallet_prefix,
+                question=trade.question[:60],
+                side=token_side,
+                existing_side=opposite_side,
+                existing_wallet=existing_opposite.wallet_source,
+                combined_price=f"${combined_price:.4f}",
+                reason="combined price < $0.98 — profitable hedge",
+            )
+
         # Confirmation wallet logic: copy UNLESS the assigned primary wallet
         # already bet on the OPPOSITE side of the same market
         wallet_role = self._wallet_roles.get(trade.maker_address, "primary")
@@ -310,7 +341,6 @@ class CopyTrader:
                 return
 
             primary_prefix = primary_addr[:10]
-            opposite_side = "NO" if token_side == "YES" else "YES"
             primary_opp_key = f"{trade.condition_id}:{opposite_side}:{primary_prefix}"
 
             if primary_opp_key in self._bets:
@@ -367,51 +397,6 @@ class CopyTrader:
         else:
             bet_size = self.config.fixed_bet_size
 
-        # Spread arb detection: check if we already have a pending bet on the
-        # OPPOSITE side of this same market. If yes, and prices sum < $1.00
-        # (minus fees), boost the bet size — it's a near-guaranteed profit.
-        is_arb = False
-        opposite_side = "NO" if token_side == "YES" else "YES"
-        existing_opposite = self._find_opposite_pending_bet(trade.condition_id, opposite_side)
-
-        if existing_opposite and self.config.spread_arb_multiplier > 1.0:
-            # Verify arb is still profitable:
-            # Total cost per share pair = price_A + price_B
-            # Revenue = $1.00 (one side always wins)
-            # Fee on winning side ≈ 0.3% * min(price, 1-price)
-            total_cost = existing_opposite.price + trade.price
-            # Worst-case fee: whichever side wins pays the higher fee
-            fee_if_this_wins = FEE_RATE * min(trade.price, 1 - trade.price)
-            fee_if_other_wins = FEE_RATE * min(existing_opposite.price, 1 - existing_opposite.price)
-            worst_fee = max(fee_if_this_wins, fee_if_other_wins)
-
-            arb_margin = 1.0 - total_cost - worst_fee - GAS_REDEEM_USD
-            if arb_margin > 0:
-                is_arb = True
-                bet_size *= self.config.spread_arb_multiplier
-                logger.info(
-                    "spread_arb_detected",
-                    wallet=wallet_prefix,
-                    question=trade.question[:60],
-                    this_side=token_side,
-                    this_price=f"${trade.price:.4f}",
-                    other_side=existing_opposite.token_side,
-                    other_price=f"${existing_opposite.price:.4f}",
-                    total_cost=f"${total_cost:.4f}",
-                    arb_margin=f"${arb_margin:.4f}",
-                    multiplier=self.config.spread_arb_multiplier,
-                    boosted_bet=f"${bet_size:.2f}",
-                )
-            else:
-                logger.info(
-                    "spread_arb_invalid",
-                    wallet=wallet_prefix,
-                    question=trade.question[:60],
-                    total_cost=f"${total_cost:.4f}",
-                    arb_margin=f"${arb_margin:.4f}",
-                    reason="prices sum >= $1.00 after fees",
-                )
-
         # Don't bet more than balance allows
         bet_size = min(bet_size, self._balance * 0.05)  # Max 5% per trade
         if bet_size < 0.10:
@@ -432,14 +417,11 @@ class CopyTrader:
             potential_profit=potential_profit,
             wallet_source=trade.maker_address[:10],
             timestamp=time.time(),
-            is_arb_boost=is_arb,
         )
         self._bets[key] = bet
         self._all_bets.append(bet)
         self._balance -= bet_size
         self._stats["trades_copied"] += 1
-        if is_arb:
-            self._stats["arb_boosts"] = self._stats.get("arb_boosts", 0) + 1
         self._update_balance_stats()
 
         logger.info(
@@ -452,7 +434,6 @@ class CopyTrader:
             profit=f"${potential_profit:.2f}",
             balance=f"${self._balance:.2f}",
             age_ms=int((time.time() - trade.timestamp) * 1000),
-            arb_boost=is_arb,
         )
 
         # Fire executor callback
@@ -504,7 +485,8 @@ class CopyTrader:
         if not pending:
             return
 
-        # Check each target wallet for REDEEM events
+        # Check each target wallet for REDEEM events to discover resolved markets
+        resolved_cids: set[str] = set()
         for wallet in self.config.target_wallets:
             try:
                 params = {"user": wallet, "type": "REDEEM", "limit": 50}
@@ -519,34 +501,23 @@ class CopyTrader:
                 if not redeems:
                     continue
 
-                # Build map of redeemed condition_ids -> won (usdcSize > 0)
-                redeemed: dict[str, bool] = {}
                 for r in redeems:
                     cid = r.get("conditionId", "")
-                    usdc = float(r.get("usdcSize", 0))
                     if cid:
-                        # If any redeem for this cid has usdc > 0, it's a win
-                        if cid not in redeemed:
-                            redeemed[cid] = usdc > 0
-                        elif usdc > 0:
-                            redeemed[cid] = True
-
-                # Settle matching bets
-                for bet in pending:
-                    if bet.condition_id in redeemed:
-                        self._settle_bet(bet, won=redeemed[bet.condition_id])
+                        resolved_cids.add(cid)
 
             except Exception as e:
                 logger.debug("copy_settle_wallet_error", wallet=wallet[:10], error=str(e))
 
-        # Also check if markets have ended without a redeem (loss)
-        # If the target wallet has new trades on different markets but
-        # no redeem for our bet's market, and enough time passed, mark as loss
+        # For resolved markets AND old bets, check via CLOB API
+        # which compares OUR token_id vs the actual winner
         now = time.time()
         for bet in pending:
-            age = now - bet.timestamp
-            if age > 300:  # 5 min — market should have resolved by now
-                # Check via CLOB API if market is resolved
+            should_check = (
+                bet.condition_id in resolved_cids
+                or (now - bet.timestamp) > 300  # 5 min — market should have resolved
+            )
+            if should_check:
                 try:
                     await self._check_resolution_clob(bet)
                 except Exception:
