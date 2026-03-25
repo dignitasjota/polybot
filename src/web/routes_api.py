@@ -53,11 +53,14 @@ async def handle_account_report(request: web.Request) -> web.Response:
 
 @routes.get("/api/diag/wallet")
 async def handle_wallet_diag(request: web.Request) -> web.Response:
-    """Diagnostic: test signature types, balance, and order signing."""
+    """Diagnostic: test order signing with different configs."""
     import os
+    import traceback
     import importlib.metadata
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+    from py_clob_client.clob_types import OrderArgs
+    from py_clob_client.order_builder.constants import BUY
 
     pk = os.environ.get("COPY_PRIVATE_KEY", "") or os.environ.get("PRIVATE_KEY", "")
     if not pk:
@@ -68,80 +71,64 @@ async def handle_wallet_diag(request: web.Request) -> web.Response:
     except Exception:
         version = "unknown"
 
-    results = {"py_clob_client_version": version}
+    # Get a real token_id from the bot's copy_trader data
+    bot = request.app["bot"]
+    test_token_id = ""
+    for acc in bot.accounts:
+        opps = acc.export_opportunities()
+        for o in opps:
+            if o.get("token_id"):
+                test_token_id = o["token_id"]
+                break
+        if test_token_id:
+            break
 
-    # Test each signature type for balance
-    for sig_type in [0, 1, 2]:
-        label = {0: "EOA (MetaMask)", 1: "POLY_PROXY (Magic Link)", 2: "POLY_GNOSIS_SAFE"}[sig_type]
-        try:
-            c = ClobClient("https://clob.polymarket.com", key=pk, chain_id=137, signature_type=sig_type)
-            addr = c.get_address()
-            creds = c.derive_api_key()
-            c2 = ClobClient(
-                "https://clob.polymarket.com", key=pk, chain_id=137, signature_type=sig_type,
-                creds=ApiCreds(api_key=creds.api_key, api_secret=creds.api_secret, api_passphrase=creds.api_passphrase),
-            )
-            resp = c2.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
-            raw = float(resp.get("balance", 0))
-            balance = raw / 1e6 if raw > 1000 else raw
-            results[f"sig_{sig_type}"] = {
-                "label": label, "balance_usd": round(balance, 2),
-                "address": addr, "status": "OK",
-            }
+    results = {"py_clob_client_version": version, "test_token_id": test_token_id[:20] + "..." if test_token_id else "none"}
 
-            # If this sig_type has balance, test order creation
-            if balance > 0:
+    if not test_token_id:
+        results["error"] = "No token_id found from bot data to test with"
+        return web.json_response(results)
+
+    # Test sig_type=1 (the one with balance) with and without funder
+    sig_type = 1
+    try:
+        c = ClobClient("https://clob.polymarket.com", key=pk, chain_id=137, signature_type=sig_type)
+        addr = c.get_address()
+        creds = c.derive_api_key()
+        results["address"] = addr
+
+        for test_name, funder_val in [("without_funder", None), ("with_funder", addr)]:
+            try:
+                kwargs = {"host": "https://clob.polymarket.com", "key": pk, "chain_id": 137,
+                          "signature_type": sig_type,
+                          "creds": ApiCreds(api_key=creds.api_key, api_secret=creds.api_secret,
+                                           api_passphrase=creds.api_passphrase)}
+                if funder_val:
+                    kwargs["funder"] = funder_val
+                client = ClobClient(**kwargs)
+
+                # Step 1: create_order (signing)
+                order_args = OrderArgs(price=0.10, size=1.0, side=BUY, token_id=test_token_id)
                 try:
-                    from py_clob_client.order_builder.constants import BUY
-                    from py_clob_client.clob_types import OrderArgs
-                    # Get a real token_id from an active market
-                    markets = c2.get_markets()
-                    if markets and len(markets) > 0:
-                        test_market = markets[0]
-                        token_id = test_market.get("tokens", [{}])[0].get("token_id", "")
-                        if token_id:
-                            order_args = OrderArgs(price=0.01, size=1.0, side=BUY, token_id=token_id)
-                            signed = c2.create_order(order_args)
-                            # Try posting (will likely fail due to min size, but signature error is different)
-                            try:
-                                resp_order = c2.post_order(signed)
-                                results[f"sig_{sig_type}"]["order_test"] = f"OK: {resp_order}"
-                            except Exception as oe:
-                                err = str(oe)
-                                results[f"sig_{sig_type}"]["order_test"] = err
-                                results[f"sig_{sig_type}"]["order_is_sig_error"] = "invalid signature" in err.lower()
-                except Exception as oe:
-                    results[f"sig_{sig_type}"]["order_test"] = f"create_order error: {oe}"
+                    signed = client.create_order(order_args)
+                    results[test_name] = {"create_order": "OK", "signed_keys": list(signed.keys()) if isinstance(signed, dict) else str(type(signed))}
+                except Exception as e:
+                    results[test_name] = {"create_order": f"FAILED: {e}", "traceback": traceback.format_exc()[-500:]}
+                    continue
 
-            # Also test with funder parameter
-            if balance > 0:
+                # Step 2: post_order
                 try:
-                    c3 = ClobClient(
-                        "https://clob.polymarket.com", key=pk, chain_id=137,
-                        signature_type=sig_type, funder=addr,
-                        creds=ApiCreds(api_key=creds.api_key, api_secret=creds.api_secret, api_passphrase=creds.api_passphrase),
-                    )
-                    from py_clob_client.order_builder.constants import BUY
-                    from py_clob_client.clob_types import OrderArgs
-                    markets = c3.get_markets()
-                    if markets and len(markets) > 0:
-                        token_id = markets[0].get("tokens", [{}])[0].get("token_id", "")
-                        if token_id:
-                            order_args = OrderArgs(price=0.01, size=1.0, side=BUY, token_id=token_id)
-                            signed = c3.create_order(order_args)
-                            try:
-                                resp_order = c3.post_order(signed)
-                                results[f"sig_{sig_type}_with_funder"] = f"OK: {resp_order}"
-                            except Exception as oe:
-                                err = str(oe)
-                                results[f"sig_{sig_type}_with_funder"] = {
-                                    "order_test": err,
-                                    "is_sig_error": "invalid signature" in err.lower(),
-                                }
-                except Exception as oe:
-                    results[f"sig_{sig_type}_with_funder"] = f"error: {oe}"
+                    resp = client.post_order(signed)
+                    results[test_name]["post_order"] = f"OK: {resp}"
+                except Exception as e:
+                    err = str(e)
+                    results[test_name]["post_order"] = err
+                    results[test_name]["is_sig_error"] = "invalid signature" in err.lower()
 
-        except Exception as e:
-            results[f"sig_{sig_type}"] = {"label": label, "status": "ERROR", "error": str(e)}
+            except Exception as e:
+                results[test_name] = {"error": str(e), "traceback": traceback.format_exc()[-500:]}
+
+    except Exception as e:
+        results["init_error"] = str(e)
 
     return web.json_response(results)
