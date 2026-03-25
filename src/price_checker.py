@@ -33,23 +33,24 @@ CRYPTO_SYMBOLS = {
 }
 
 # Per-crypto min buffer % for directional confirmation.
+# These are FALLBACK values — actual values come from config.toml [strategy.crypto_configs]
 # Less volatile cryptos need higher buffer to avoid noise.
 # More volatile cryptos can use lower buffer to capture more trades.
 CRYPTO_BUFFER_PCT = {
-    "bitcoin": 0.04,      # Baja volatilidad → buffer alto
-    "ethereum": 0.035,     # Media-baja
-    "bnb": 0.03,           # Media
-    "litecoin": 0.03,      # Media
-    "cardano": 0.03,       # Media
-    "polkadot": 0.03,      # Media
-    "chainlink": 0.03,     # Media
-    "polygon": 0.03,       # Media
-    "avalanche": 0.025,    # Media-alta volatilidad
-    "xrp": 0.025,          # Media-alta volatilidad
-    "solana": 0.025,       # Media-alta volatilidad
-    "sui": 0.02,           # Alta volatilidad
-    "dogecoin": 0.02,      # Alta volatilidad
-    "pepe": 0.02,          # Alta volatilidad (meme coin)
+    "bitcoin": 0.06,       # 6% — baja volatilidad, buffer alto para filtrar ruido
+    "ethereum": 0.07,      # 7% — menos volátil
+    "bnb": 0.06,           # 6%
+    "litecoin": 0.06,      # 6%
+    "cardano": 0.06,       # 6%
+    "polkadot": 0.06,      # 6%
+    "chainlink": 0.06,     # 6%
+    "polygon": 0.06,       # 6%
+    "avalanche": 0.06,     # 6%
+    "xrp": 0.06,           # 6%
+    "solana": 0.06,        # 6% — volátil pero movimientos rápidos
+    "sui": 0.05,           # 5% — alta volatilidad
+    "dogecoin": 0.05,      # 5% — meme coin
+    "pepe": 0.05,          # 5% — meme coin
 }
 
 # Regex to parse "Crypto Up or Down - March 21, 6:05AM-6:10AM ET"
