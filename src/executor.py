@@ -109,6 +109,7 @@ class Executor:
 
             private_key = self._credentials.get_private_key()
             sig_type = self._credentials.signature_type  # 0=EOA, 1=POLY_PROXY
+            proxy_address = self._credentials.get_proxy_address()
 
             # Try to get API credentials from env vars; if missing, derive from private key
             try:
@@ -120,12 +121,14 @@ class Executor:
                 # Auto-derive API credentials from private key
                 logger.info("deriving_api_creds",
                             msg="API env vars not set, deriving from private key...",
-                            signature_type=sig_type)
+                            signature_type=sig_type,
+                            funder=proxy_address or "none")
                 client_tmp = ClobClient(
                     host="https://clob.polymarket.com",
                     key=private_key,
                     chain_id=137,
                     signature_type=sig_type,
+                    funder=proxy_address,
                 )
                 creds = client_tmp.derive_api_key()
                 api_key = creds.api_key
@@ -138,6 +141,7 @@ class Executor:
                 key=private_key,
                 chain_id=137,  # Polygon mainnet
                 signature_type=sig_type,
+                funder=proxy_address,
                 creds=ApiCreds(
                     api_key=api_key,
                     api_secret=api_secret,

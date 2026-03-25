@@ -14,6 +14,8 @@ services:
       - POLYMARKET_PASSPHRASE=${POLYMARKET_PASSPHRASE:-}
       # Wallet type: "magic_link" (default) or "metamask"
       - WALLET_TYPE=${WALLET_TYPE:-magic_link}
+      # Polymarket proxy address (Magic Link users: shown on your Polymarket profile)
+      - POLYMARKET_PROXY_ADDRESS=${POLYMARKET_PROXY_ADDRESS:-}
       # Polymarket credentials (copy-trade account — same wallet or separate)
       - COPY_PRIVATE_KEY=${COPY_PRIVATE_KEY:-}
       - COPY_API_KEY=${COPY_API_KEY:-}
@@ -21,6 +23,8 @@ services:
       - COPY_PASSPHRASE=${COPY_PASSPHRASE:-}
       # Copy account wallet type (uses WALLET_TYPE if not set)
       - COPY_WALLET_TYPE=${COPY_WALLET_TYPE:-}
+      # Copy account proxy address (uses POLYMARKET_PROXY_ADDRESS if not set)
+      - COPY_PROXY_ADDRESS=${COPY_PROXY_ADDRESS:-}
     volumes:
       - bot-logs:/app/logs
       - bot-data:/app/data

@@ -100,6 +100,7 @@ class CredentialsConfig:
     api_secret_env: str = "POLYMARKET_SECRET"
     passphrase_env: str = "POLYMARKET_PASSPHRASE"
     signature_type_env: str = "WALLET_TYPE"  # env var name for wallet type
+    proxy_address_env: str = "POLYMARKET_PROXY_ADDRESS"  # env var for proxy address (Magic Link)
     signature_type: int = -1  # -1=auto-detect from env var, 0=EOA (MetaMask), 1=POLY_PROXY (Magic Link)
 
     def __post_init__(self):
@@ -122,6 +123,14 @@ class CredentialsConfig:
 
     def get_api_secret(self) -> str:
         return get_secret(self.api_secret_env)
+
+    def get_proxy_address(self) -> str | None:
+        """Get Polymarket proxy address (needed for Magic Link wallets to sign orders)."""
+        # Try account-specific env var first, then fallback to global
+        addr = os.environ.get(self.proxy_address_env, "").strip()
+        if not addr:
+            addr = os.environ.get("POLYMARKET_PROXY_ADDRESS", "").strip()
+        return addr or None
 
     def get_passphrase(self) -> str:
         return get_secret(self.passphrase_env)

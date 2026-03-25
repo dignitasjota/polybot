@@ -89,15 +89,23 @@ async def handle_wallet_diag(request: web.Request) -> web.Response:
         results["error"] = "No token_id found from bot data to test with"
         return web.json_response(results)
 
-    # Test sig_type=1 (the one with balance) with and without funder
+    # Get proxy address from env var
+    proxy_addr = os.environ.get("POLYMARKET_PROXY_ADDRESS", "") or os.environ.get("COPY_PROXY_ADDRESS", "")
+
+    # Test sig_type=1 (the one with balance) with different funder values
     sig_type = 1
     try:
         c = ClobClient("https://clob.polymarket.com", key=pk, chain_id=137, signature_type=sig_type)
         addr = c.get_address()
         creds = c.derive_api_key()
-        results["address"] = addr
+        results["eoa_address"] = addr
+        results["proxy_address"] = proxy_addr or "not configured"
 
-        for test_name, funder_val in [("without_funder", None), ("with_funder", addr)]:
+        funder_tests = [("no_funder", None), ("funder_eoa", addr)]
+        if proxy_addr:
+            funder_tests.append(("funder_proxy", proxy_addr))
+
+        for test_name, funder_val in funder_tests:
             try:
                 kwargs = {"host": "https://clob.polymarket.com", "key": pk, "chain_id": 137,
                           "signature_type": sig_type,

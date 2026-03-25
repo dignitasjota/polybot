@@ -141,6 +141,7 @@ api_key_env = "POLYMARKET_API_KEY"
 api_secret_env = "POLYMARKET_SECRET"
 passphrase_env = "POLYMARKET_PASSPHRASE"
 signature_type_env = "WALLET_TYPE"
+proxy_address_env = "POLYMARKET_PROXY_ADDRESS"
 
 # Cuenta 2: Copy-trading (paper trading para evaluar rentabilidad)
 [[accounts]]
@@ -155,6 +156,7 @@ api_key_env = "COPY_API_KEY"
 api_secret_env = "COPY_SECRET"
 passphrase_env = "COPY_PASSPHRASE"
 signature_type_env = "COPY_WALLET_TYPE"
+proxy_address_env = "COPY_PROXY_ADDRESS"
 
 [accounts.copy_trade]
 target_wallets = [
