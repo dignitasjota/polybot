@@ -12,6 +12,7 @@ from src.detector import ClosingArbitrageDetector
 from src.executor import Executor, ExecutionMode
 from src.gamma_client import GammaClient
 from src.market_tracker import MarketTracker
+from src.wallet_scanner import WalletScanner
 from src.websocket_client import WebSocketClient
 
 
@@ -53,6 +54,7 @@ class AccountRunner:
         self.strategy_type = account.strategy_type
         self.detector: ClosingArbitrageDetector | None = None
         self.copy_trader: CopyTrader | None = None
+        self.wallet_scanner = WalletScanner()  # Always initialized, used for profitability tracking
 
         # For directional strategy, share market infra or create own
         if self.strategy_type == "directional":
@@ -129,9 +131,11 @@ class AccountRunner:
         overrides = await get_wallet_overrides()
         self.copy_trader.set_wallet_overrides(overrides)
 
-        # Wire callbacks: copy trader -> executor
+        # Wire callbacks: copy trader -> executor + scanner
         self.copy_trader.on_opportunity(self.executor.execute)
         self.copy_trader.on_redeem(self.executor.redeem_position)
+        self.copy_trader.on_trade(self.wallet_scanner.on_trade)
+        self.copy_trader.on_resolve(self.wallet_scanner.on_market_resolved_with_side)
         await self.copy_trader.start()
 
         self.log.info(

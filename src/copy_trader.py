@@ -76,6 +76,8 @@ class CopyTrader:
         self._seen_trades: set[str] = set()
         self._on_opportunity_cb = None
         self._on_redeem_cb = None  # async callback(condition_id: str) for auto-redeem
+        self._on_trade_cb = None  # async callback(condition_id, coin, wallet, side, price, size) for scanner
+        self._on_resolve_cb = None  # async callback(condition_id, winning_side, coin) for scanner
 
         # Wallet roles: address -> "primary" or "confirmation"
         # Confirmation wallets only copy if their assigned primary already bet same side
@@ -120,6 +122,14 @@ class CopyTrader:
     def on_redeem(self, callback):
         """Register async callback for redeeming winning positions."""
         self._on_redeem_cb = callback
+
+    def on_trade(self, callback):
+        """Register async callback for wallet scanner (tracks all detected trades)."""
+        self._on_trade_cb = callback
+
+    def on_resolve(self, callback):
+        """Register async callback for market resolution (for scanner)."""
+        self._on_resolve_cb = callback
 
     def set_live_balance(self, balance: float):
         """Update balance from live executor (replaces simulated balance)."""
@@ -294,6 +304,29 @@ class CopyTrader:
     async def _emit_opportunity(self, trade: WalletTrade):
         outcome_lower = trade.outcome.lower()
         token_side = "YES" if outcome_lower in ("yes", "y", "up") else "NO"
+
+        # Notify wallet scanner (for profitability tracking)
+        if self._on_trade_cb:
+            try:
+                # Extract coin from question (e.g. "Bitcoin Up or Down" -> "BTC")
+                question_upper = trade.question.upper()
+                coin = None
+                for c in ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "DOT", "MATIC", "LINK", "LTC", "SUI", "PEPE", "HNT"]:
+                    if c in question_upper:
+                        coin = c
+                        break
+
+                if coin:
+                    await self._on_trade_cb(
+                        condition_id=trade.condition_id,
+                        coin=coin,
+                        wallet=trade.maker_address,
+                        side=token_side,
+                        price=trade.price,
+                        size=trade.size * trade.price,  # Convert shares to USDC
+                    )
+            except Exception as e:
+                logger.error("copy_trade_scanner_error", error=str(e))
 
         # Key includes wallet to allow confirmation bets alongside primary bets
         wallet_prefix = trade.maker_address[:10]
@@ -611,6 +644,29 @@ class CopyTrader:
         now = time.time()
         bet.resolved_at = now
         bet.duration_seconds = now - bet.timestamp
+
+        # Notify wallet scanner of market resolution
+        if self._on_resolve_cb:
+            try:
+                # Extract coin from question
+                question_upper = bet.question.upper()
+                coin = None
+                for c in ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "DOT", "MATIC", "LINK", "LTC", "SUI", "PEPE", "HNT"]:
+                    if c in question_upper:
+                        coin = c
+                        break
+
+                if coin:
+                    winning_side = bet.token_side if won else ("NO" if bet.token_side == "YES" else "YES")
+                    asyncio.create_task(
+                        self._on_resolve_cb(
+                            condition_id=bet.condition_id,
+                            winning_side=winning_side,
+                            coin=coin,
+                        )
+                    )
+            except Exception as e:
+                logger.error("copy_trade_resolve_scanner_error", error=str(e))
 
         if won:
             bet.outcome = "win"
