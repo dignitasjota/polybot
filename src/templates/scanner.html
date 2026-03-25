@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{% block title %}Wallet Scanner — Polymarket Bot{% endblock %}
+
+{% block extra_head %}
+<meta http-equiv="refresh" content="30">
+<style>
+.scanner-info {
+    background: rgba(0,255,150, 0.05);
+    border-left: 3px solid #0f0;
+    padding: 12px 15px;
+    margin: 20px 0;
+    font-size: 0.9em;
+    color: #0f0;
+}
+.criteria-box {
+    background: rgba(100,100,100, 0.1);
+    border: 1px solid #555;
+    padding: 12px;
+    margin: 20px 0;
+    border-radius: 4px;
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 15px;
+    font-size: 0.85em;
+}
+.criteria-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.criteria-label {
+    color: #888;
+    font-size: 0.8em;
+    text-transform: uppercase;
+}
+.criteria-value {
+    color: #0f0;
+    font-weight: bold;
+}
+table th {
+    background: rgba(0,255,150, 0.1);
+    color: #0f0;
+    border-bottom: 2px solid #0f0;
+    padding: 10px;
+    text-align: left;
+    font-weight: bold;
+}
+table td {
+    padding: 10px;
+    border-bottom: 1px solid #333;
+}
+table tbody tr:hover {
+    background: rgba(0,255,150, 0.03);
+}
+.wallet-addr {
+    font-family: monospace;
+    font-size: 0.85em;
+    color: #0f0;
+}
+.win-rate {
+    font-weight: bold;
+}
+.win-rate.high {
+    color: #0f0;
+}
+.win-rate.medium {
+    color: #ff0;
+}
+.win-rate.low {
+    color: #f00;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="subtitle">
+    Auto-refresh 30s | Wallet Scanner Profitability Ranking
+</div>
+
+{% if error %}
+<div class="scanner-info" style="border-color: #f00; color: #f00; background: rgba(255,0,0, 0.05);">
+    ⚠️ {{ error }}
+</div>
+{% else %}
+
+<div class="scanner-info">
+    📊 Analyzing traders to find profitable copy-trade targets. Data collected from all observed crypto 5-min markets.
+</div>
+
+<div class="criteria-box">
+    <div class="criteria-item">
+        <div class="criteria-label">Min Trades</div>
+        <div class="criteria-value">{{ criteria.min_trades }}</div>
+    </div>
+    <div class="criteria-item">
+        <div class="criteria-label">Min Win Rate</div>
+        <div class="criteria-value">{{ criteria.min_win_rate }}</div>
+    </div>
+    <div class="criteria-item">
+        <div class="criteria-label">Market Type</div>
+        <div class="criteria-value">{{ criteria.market_type }}</div>
+    </div>
+    <div class="criteria-item">
+        <div class="criteria-label">Price Range</div>
+        <div class="criteria-value">{{ criteria.price_range }}</div>
+    </div>
+</div>
+
+{% if traders %}
+<h2>TOP TRADERS ({{ total_found }})</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Wallet</th>
+            <th>Trades</th>
+            <th>Win Rate</th>
+            <th>Wins</th>
+            <th>Losses</th>
+            <th>Avg Price</th>
+            <th>Total Volume</th>
+            <th>Coins</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for trader in traders %}
+        <tr>
+            <td class="wallet-addr">{{ trader.wallet_display }}</td>
+            <td style="text-align: center;">{{ trader.trades }}</td>
+            <td class="win-rate {% if trader.win_rate|float > 65 %}high{% elif trader.win_rate|float > 55 %}medium{% else %}low{% endif %}">
+                {{ trader.win_rate }}
+            </td>
+            <td style="text-align: center; color: #0f0;">{{ trader.wins }}</td>
+            <td style="text-align: center; color: #f00;">{{ trader.losses }}</td>
+            <td style="text-align: center;">{{ trader.avg_price }}</td>
+            <td style="text-align: center;">{{ trader.volume }}</td>
+            <td style="font-size: 0.85em; color: #888;">{{ trader.coins }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<div style="margin-top: 30px; padding: 15px; background: rgba(100,100,100, 0.1); border-left: 3px solid #666;">
+    <strong>How to use:</strong>
+    <ul style="margin: 10px 0 0 20px; color: #888; font-size: 0.9em;">
+        <li>Top traders appear when they reach {{ criteria.min_trades }} trades and {{ criteria.min_win_rate }} win rate</li>
+        <li>Add them to <strong>target_wallets</strong> in config to start copying</li>
+        <li>Data persists between bot redeploys — longer running = better accuracy</li>
+        <li>Check API: <code style="background: #222; padding: 2px 5px;">/api/scanner/top-traders</code></li>
+    </ul>
+</div>
+
+{% else %}
+<div style="padding: 20px; text-align: center; color: #888; margin-top: 40px;">
+    <p>🔍 No traders found matching criteria yet</p>
+    <p style="font-size: 0.9em;">Scanner collects data as copy-trade observes markets.</p>
+</div>
+{% endif %}
+
+{% endif %}
+{% endblock %}

@@ -50,6 +50,73 @@ async def handle_dashboard(request: web.Request) -> web.Response:
     return aiohttp_jinja2.render_template("dashboard.html", request, context)
 
 
+@routes.get("/scanner")
+async def handle_scanner(request: web.Request) -> web.Response:
+    """Wallet scanner — profitability ranking."""
+    bot = request.app["bot"]
+    session = request.get("session", {})
+
+    # Find copy_trade account with scanner
+    copy_account = None
+    for acc in bot.accounts:
+        if acc.strategy_type == "copy_trade" and acc.wallet_scanner:
+            copy_account = acc
+            break
+
+    if not copy_account:
+        context = {
+            "active_tab": "scanner",
+            "session_user": session.get("user", ""),
+            "error": "No copy-trade account found",
+            "traders": [],
+        }
+        return aiohttp_jinja2.render_template("scanner.html", request, context)
+
+    # Get top traders
+    try:
+        traders = await copy_account.wallet_scanner.get_top_traders(
+            min_trades=10,
+            min_wr=0.50,
+        )
+
+        # Format for template
+        formatted = []
+        for t in traders:
+            formatted.append({
+                "wallet": t["wallet"],
+                "wallet_display": t["wallet"][:6] + "..." + t["wallet"][-4:],
+                "trades": t["total_trades"],
+                "wins": t["total_wins"],
+                "losses": t["total_losses"],
+                "win_rate": f"{t['win_rate']*100:.1f}%",
+                "avg_price": f"${t['avg_price']:.2f}",
+                "volume": f"${t['total_volume']:.0f}",
+                "coins": t["coins_traded"] or "—",
+            })
+
+        context = {
+            "active_tab": "scanner",
+            "session_user": session.get("user", ""),
+            "traders": formatted,
+            "total_found": len(formatted),
+            "criteria": {
+                "min_trades": 10,
+                "min_win_rate": "50%",
+                "market_type": "Crypto 5min",
+                "price_range": "$0.40–$0.75",
+            },
+        }
+        return aiohttp_jinja2.render_template("scanner.html", request, context)
+    except Exception as e:
+        context = {
+            "active_tab": "scanner",
+            "session_user": session.get("user", ""),
+            "error": f"Scanner error: {str(e)}",
+            "traders": [],
+        }
+        return aiohttp_jinja2.render_template("scanner.html", request, context)
+
+
 def _build_account_data(acc, tz_display, wallet_aliases: dict | None = None) -> dict:
     stats = acc.get_stats()
     is_copy = acc.strategy_type == "copy_trade"
