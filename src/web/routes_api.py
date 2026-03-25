@@ -49,3 +49,40 @@ async def handle_account_report(request: web.Request) -> web.Response:
                 return web.json_response(report)
             return web.json_response({"error": "no data"}, status=404)
     return web.json_response({"error": "account not found"}, status=404)
+
+
+@routes.get("/api/diag/wallet")
+async def handle_wallet_diag(request: web.Request) -> web.Response:
+    """Diagnostic: test all signature types to find the correct one."""
+    import os
+    from py_clob_client.client import ClobClient
+    from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+
+    pk = os.environ.get("COPY_PRIVATE_KEY", "") or os.environ.get("PRIVATE_KEY", "")
+    if not pk:
+        return web.json_response({"error": "no private key configured"}, status=400)
+
+    results = {}
+    for sig_type in [0, 1, 2]:
+        label = {0: "EOA (MetaMask)", 1: "POLY_PROXY (Magic Link)", 2: "POLY_GNOSIS_SAFE"}[sig_type]
+        try:
+            c = ClobClient("https://clob.polymarket.com", key=pk, chain_id=137, signature_type=sig_type)
+            creds = c.derive_api_key()
+            c2 = ClobClient(
+                "https://clob.polymarket.com", key=pk, chain_id=137, signature_type=sig_type,
+                creds=ApiCreds(api_key=creds.api_key, api_secret=creds.api_secret, api_passphrase=creds.api_passphrase),
+            )
+            resp = c2.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+            raw = float(resp.get("balance", 0))
+            balance = raw / 1e6 if raw > 1000 else raw
+            results[f"sig_{sig_type}"] = {
+                "label": label,
+                "balance_usd": round(balance, 2),
+                "balance_raw": raw,
+                "address": c.get_address(),
+                "status": "OK",
+            }
+        except Exception as e:
+            results[f"sig_{sig_type}"] = {"label": label, "status": "ERROR", "error": str(e)}
+
+    return web.json_response(results)
