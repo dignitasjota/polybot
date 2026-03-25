@@ -53,6 +53,9 @@ class Opportunity:
     disappeared_at: float = 0.0  # When opportunity was no longer detected
     duration_seconds: float = 0.0  # How long the opportunity lasted
 
+    # Strategy type for analytics
+    strategy_type: str = "updown_directional"  # "updown_directional", "closing_arb_pre", "closing_arb_post"
+
 
 class ClosingArbitrageDetector:
     """Detects closing arbitrage opportunities.
@@ -317,6 +320,7 @@ class ClosingArbitrageDetector:
             winning_token_id=winning_id,
             suggested_bet=suggested_bet,
             potential_profit=potential_profit,
+            strategy_type="closing_arb_post",  # Post-resolution closing arbitrage
         )
 
         self._log_opportunity(opp)
@@ -388,7 +392,8 @@ class ClosingArbitrageDetector:
             best_price = max(market.best_ask_yes, market.best_ask_no)
             if best_price >= min_prob:
                 is_yes = market.best_ask_yes >= market.best_ask_no
-                self._evaluate_side(market, is_yes=is_yes, min_prob=min_prob, hours_remaining=hours)
+                self._evaluate_side(market, is_yes=is_yes, min_prob=min_prob, hours_remaining=hours,
+                                   strategy_type="closing_arb_pre")
                 side = "YES" if is_yes else "NO"
                 still_active.add(f"{market.condition_id}:{side}")
                 return
@@ -509,6 +514,7 @@ class ClosingArbitrageDetector:
             min_probability_required=0.0,
             suggested_bet=suggested_bet,
             potential_profit=potential_profit,
+            strategy_type="updown_directional",  # Up/Down with Binance confirmation
         )
 
         # Only log if this is a new bet (not a price update for an existing one)
@@ -532,7 +538,8 @@ class ClosingArbitrageDetector:
         self._log_opportunity(opp)
         still_active.add(f"{market.condition_id}:{side}")
 
-    def _evaluate_side(self, market: MarketState, is_yes: bool, min_prob: float = 0.95, hours_remaining: float = 0.0):
+    def _evaluate_side(self, market: MarketState, is_yes: bool, min_prob: float = 0.95, hours_remaining: float = 0.0,
+                       strategy_type: str = "closing_arb_pre"):
         price = market.best_ask_yes if is_yes else market.best_ask_no
 
         if price <= 0 or price >= 1.0:
@@ -583,6 +590,7 @@ class ClosingArbitrageDetector:
             min_probability_required=min_prob,
             suggested_bet=suggested_bet,
             potential_profit=potential_profit,
+            strategy_type=strategy_type,
         )
 
         self._log_opportunity(opp)
@@ -761,9 +769,72 @@ class ClosingArbitrageDetector:
                 "resolved_at": o.resolved_at,
                 "disappeared_at": o.disappeared_at,
                 "duration_seconds": o.duration_seconds,
+                "strategy_type": o.strategy_type,  # Distinguish Up/Down vs Closing Arb
             }
             for o in self._opportunities_log
         ]
+
+    def get_stats_by_strategy(self) -> dict:
+        """Aggregate stats by strategy type: updown_directional, closing_arb_pre, closing_arb_post."""
+        stats_by_type = {
+            "updown_directional": {
+                "total_bets": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate_pct": 0.0,
+                "total_pnl": 0.0,
+                "avg_pnl": 0.0,
+                "avg_price": 0.0,
+            },
+            "closing_arb_pre": {
+                "total_bets": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate_pct": 0.0,
+                "total_pnl": 0.0,
+                "avg_pnl": 0.0,
+                "avg_price": 0.0,
+            },
+            "closing_arb_post": {
+                "total_bets": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate_pct": 0.0,
+                "total_pnl": 0.0,
+                "avg_pnl": 0.0,
+                "avg_price": 0.0,
+            },
+        }
+
+        # Only count bets (first opportunity per market+side)
+        for opp in self._bet_placed.values():
+            strategy = opp.strategy_type
+            if strategy not in stats_by_type:
+                continue
+
+            stats_by_type[strategy]["total_bets"] += 1
+            if opp.outcome == "win":
+                stats_by_type[strategy]["wins"] += 1
+            elif opp.outcome == "loss":
+                stats_by_type[strategy]["losses"] += 1
+
+            stats_by_type[strategy]["total_pnl"] += opp.actual_pnl
+
+        # Calculate derived metrics
+        for strategy in stats_by_type:
+            stats = stats_by_type[strategy]
+            total = stats["total_bets"]
+            if total > 0:
+                stats["win_rate_pct"] = round((stats["wins"] / total) * 100, 1)
+                stats["avg_pnl"] = round(stats["total_pnl"] / total, 2)
+
+        # Calculate average price (from all opportunities, not just bets)
+        for strategy in stats_by_type:
+            prices = [o.token_price for o in self._opportunities_log if o.strategy_type == strategy and o.token_price > 0]
+            if prices:
+                stats_by_type[strategy]["avg_price"] = round(sum(prices) / len(prices), 4)
+
+        return stats_by_type
 
     def export_full_report(self) -> dict:
         """Export complete report with summary analytics for strategy evaluation."""
@@ -892,6 +963,7 @@ class ClosingArbitrageDetector:
                 "min_duration_seconds": round(min_duration, 1),
                 "max_duration_seconds": round(max_duration, 1),
             },
+            "by_strategy": self.get_stats_by_strategy(),  # Separate stats for Up/Down vs Closing Arb
             "balance_history": balance_history,
             "by_market": list(markets.values()),
             "bets": bets,
