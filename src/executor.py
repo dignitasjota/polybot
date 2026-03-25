@@ -210,16 +210,25 @@ class Executor:
             return
 
         try:
-            from poly_relay_client import RelayClient
-            from poly_relay_client.types import ApiCreds as BuilderApiCreds
+            from py_builder_relayer_client.client import RelayClient
+            from py_builder_signing_sdk.config import BuilderConfig, BuilderApiKeyCreds
 
             api_key, api_secret, api_passphrase = builder_creds
-            creds = BuilderApiCreds(
-                api_key=api_key,
-                api_secret=api_secret,
-                api_passphrase=api_passphrase,
+            private_key = self._credentials.get_private_key()
+
+            builder_config = BuilderConfig(
+                local_builder_creds=BuilderApiKeyCreds(
+                    key=api_key,
+                    secret=api_secret,
+                    passphrase=api_passphrase,
+                )
             )
-            self._relayer = RelayClient(creds, url=RELAYER_URL)
+            self._relayer = RelayClient(
+                relayer_url=RELAYER_URL,
+                chain_id=137,
+                private_key=private_key,
+                builder_config=builder_config,
+            )
             self._redeem_available = True
             logger.info("relayer_initialized", msg="Builder Relayer ready for auto-redeem")
         except ImportError:
@@ -240,7 +249,7 @@ class Executor:
 
         try:
             from web3 import Web3
-            from poly_relay_client.types import Transaction
+            from py_builder_relayer_client.models import Transaction
 
             w3 = Web3()
             ctf = w3.eth.contract(
@@ -268,24 +277,19 @@ class Executor:
             )
 
             response = await asyncio.to_thread(
-                self._relayer.execute, [tx], None
+                self._relayer.execute, [tx], "auto-redeem"
             )
 
-            tx_id = None
-            if isinstance(response, dict):
-                tx_id = response.get("transactionId") or response.get("id")
-            elif hasattr(response, "transaction_id"):
-                tx_id = response.transaction_id
+            tx_id = getattr(response, "transaction_id", None) or str(response)
 
             logger.info(
                 "redeem_submitted",
                 condition_id=condition_id[:20] + "...",
-                tx_id=str(tx_id)[:20] if tx_id else "unknown",
+                tx_id=str(tx_id)[:20],
             )
 
-            # Poll for confirmation in background
-            if tx_id:
-                asyncio.create_task(self._wait_redeem(tx_id, condition_id))
+            # Poll for confirmation in background using response.wait()
+            asyncio.create_task(self._wait_redeem(response, condition_id))
 
             return True
 
@@ -297,44 +301,24 @@ class Executor:
             )
             return False
 
-    async def _wait_redeem(self, tx_id: str, condition_id: str):
+    async def _wait_redeem(self, response, condition_id: str):
         """Background: poll relayer until redeem tx is mined, then refresh balance."""
         try:
-            for _ in range(30):  # Max 5 minutes (30 * 10s)
-                await asyncio.sleep(10)
-                try:
-                    status = await asyncio.to_thread(
-                        self._relayer.get_transaction, tx_id
-                    )
-                    state = None
-                    if isinstance(status, dict):
-                        state = status.get("state") or status.get("status")
-                    elif hasattr(status, "state"):
-                        state = status.state
-
-                    if state and state.upper() in ("STATE_MINED", "STATE_CONFIRMED", "MINED", "CONFIRMED"):
-                        logger.info(
-                            "redeem_confirmed",
-                            condition_id=condition_id[:20] + "...",
-                            tx_id=tx_id[:20],
-                        )
-                        # Refresh balance to reflect redeemed USDC
-                        await self._refresh_balance()
-                        return
-                    elif state and state.upper() in ("STATE_FAILED", "FAILED"):
-                        logger.warning(
-                            "redeem_tx_failed",
-                            condition_id=condition_id[:20] + "...",
-                            tx_id=tx_id[:20],
-                            state=state,
-                        )
-                        return
-                except Exception as e:
-                    logger.debug("redeem_poll_error", error=str(e))
-
-            logger.warning("redeem_poll_timeout", tx_id=tx_id[:20])
-        except asyncio.CancelledError:
-            pass
+            # response.wait() polls until STATE_MINED/CONFIRMED (blocking)
+            result = await asyncio.to_thread(response.wait)
+            if result:
+                logger.info(
+                    "redeem_confirmed",
+                    condition_id=condition_id[:20] + "...",
+                )
+                await self._refresh_balance()
+            else:
+                logger.warning(
+                    "redeem_wait_failed",
+                    condition_id=condition_id[:20] + "...",
+                )
+        except Exception as e:
+            logger.warning("redeem_wait_error", condition_id=condition_id[:20] + "...", error=str(e))
 
     async def close(self):
         """Stop order monitor."""
