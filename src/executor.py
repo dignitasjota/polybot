@@ -249,7 +249,7 @@ class Executor:
 
         try:
             from web3 import Web3
-            from py_builder_relayer_client.models import Transaction
+            from py_builder_relayer_client.models import SafeTransaction
 
             w3 = Web3()
             ctf = w3.eth.contract(
@@ -270,7 +270,7 @@ class Executor:
                 ],
             )
 
-            tx = Transaction(
+            tx = SafeTransaction(
                 to=Web3.to_checksum_address(CONDITIONAL_TOKENS),
                 data=calldata,
                 value="0",

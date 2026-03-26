@@ -33,7 +33,7 @@ buffer_pct = 0.06      # 6%
 
 [strategy.crypto_configs.dogecoin]
 enabled = true
-buffer_pct = 0.05      # 5% — meme coin, alta volatilidad ayuda
+buffer_pct = 0.06      # 6% — increased from 5% to reduce noise (prevents contradictory wins/losses)
 
 [strategy.crypto_configs.xrp]
 enabled = true
