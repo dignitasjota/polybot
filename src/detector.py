@@ -382,23 +382,10 @@ class ClosingArbitrageDetector:
 
         min_prob = self.config.get_min_probability(hours)
 
-        # For Up/Down crypto markets: hybrid strategy
-        # 1. If a side is priced >= min_probability (e.g. $0.97+), treat as Closing Arb
-        #    (no Binance confirmation needed — the order book already shows the winner)
-        # 2. Otherwise, use Binance directional strategy with buffer confirmation
+        # For Up/Down crypto markets: only use Binance directional confirmation
+        # Closing Arb Pre disabled (insufficient margin, high latency disadvantage)
         price_check = self._price_checker.check_direction(market.question)
         if price_check is not None:
-            # Check if either side qualifies for closing arb first
-            best_price = max(market.best_ask_yes, market.best_ask_no)
-            if best_price >= min_prob:
-                is_yes = market.best_ask_yes >= market.best_ask_no
-                self._evaluate_side(market, is_yes=is_yes, min_prob=min_prob, hours_remaining=hours,
-                                   strategy_type="closing_arb_pre")
-                side = "YES" if is_yes else "NO"
-                still_active.add(f"{market.condition_id}:{side}")
-                return
-
-            # Below closing arb threshold: use Binance directional
             self._check_up_down_market(market, price_check, hours, still_active)
             return
 

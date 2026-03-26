@@ -96,7 +96,7 @@ max_hours = 1      # < 1h
 min_probability = 0.99
 
 [risk]
-max_bet_pct = 2.0                 # % del balance por apuesta (Kelly fraccionado)
+max_bet_pct = 3.0                 # % del balance por apuesta (Kelly fraccionado) — increased to 3% for better returns
 max_bet_per_trade = 200.0         # Tope absoluto por trade ($) — aplica aunque el % sea mayor
 max_position_per_market = 400.0   # Exposicion maxima por mercado ($)
 max_total_exposure = 1000.0       # Exposicion total abierta ($)
