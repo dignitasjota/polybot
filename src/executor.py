@@ -287,7 +287,7 @@ class Executor:
             # Ensure condition_id is proper bytes32 hex
             cid_hex = condition_id if condition_id.startswith("0x") else f"0x{condition_id}"
 
-            calldata = ctf.encodeABI(
+            calldata = ctf.encode_abi(
                 fn_name="redeemPositions",
                 args=[
                     Web3.to_checksum_address(USDC_ADDRESS),
@@ -338,7 +338,7 @@ class Executor:
             from web3 import Web3
             from eth_account import Account
 
-            w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
+            w3 = Web3(Web3.HTTPProvider("https://rpc.ankr.com/polygon"))
 
             private_key = self._credentials.get_private_key()
             account = Account.from_key(private_key)
