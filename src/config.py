@@ -148,6 +148,21 @@ class CredentialsConfig:
         key = os.environ.get(self.builder_key_env, "").strip()
         secret = os.environ.get(self.builder_secret_env, "").strip()
         passphrase = os.environ.get(self.builder_passphrase_env, "").strip()
+
+        # Debug: log which env vars are being looked for
+        if not (key and secret and passphrase):
+            import structlog
+            log = structlog.get_logger("config")
+            log.debug(
+                "builder_creds_incomplete",
+                looking_for_key=self.builder_key_env,
+                key_found=bool(key),
+                looking_for_secret=self.builder_secret_env,
+                secret_found=bool(secret),
+                looking_for_passphrase=self.builder_passphrase_env,
+                passphrase_found=bool(passphrase),
+            )
+
         if key and secret and passphrase:
             return (key, secret, passphrase)
         return None

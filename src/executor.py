@@ -188,11 +188,12 @@ class Executor:
             # Initialize Builder Relayer for auto-redeem
             self._init_relayer()
 
+            redeem_status = "gasless (Builder Relayer)" if self._redeem_available else "fallback (direct web3, pays gas)"
             logger.info(
                 "executor_initialized",
                 mode=self.mode.value,
                 balance=f"${self._live_balance:.2f}" if self._live_balance else "unknown",
-                redeem_available=self._redeem_available,
+                auto_redeem=redeem_status,
             )
 
         except ImportError:
@@ -237,16 +238,30 @@ class Executor:
             logger.warning("relayer_init_error", error=str(e))
 
     async def redeem_position(self, condition_id: str) -> bool:
-        """Redeem a winning position via Builder Relayer (gasless).
+        """Redeem a winning position.
 
-        Encodes redeemPositions(USDC, 0x00, conditionId, [1,2]) calldata
-        and sends it through the Relayer for execution via the proxy/Safe wallet.
+        Tries two strategies:
+        1. Builder Relayer (gasless) if credentials available
+        2. Direct CLOB redeem (pays gas) as fallback
+
+        Returns True if redeem was submitted (whether gasless or paid).
         """
-        if not self._redeem_available or not self._relayer:
-            return False
         if self.mode != ExecutionMode.LIVE:
             return False
 
+        # Try gasless redeem via Builder Relayer first
+        if self._redeem_available and self._relayer:
+            if await self._redeem_via_builder(condition_id):
+                return True
+
+        # Fallback: direct redeem via CLOB (pays gas)
+        if self._client:
+            return await self._redeem_via_clob(condition_id)
+
+        return False
+
+    async def _redeem_via_builder(self, condition_id: str) -> bool:
+        """Try gasless redeem via Builder Relayer."""
         try:
             from web3 import Web3
             from py_builder_relayer_client.models import SafeTransaction
@@ -263,10 +278,10 @@ class Executor:
             calldata = ctf.encodeABI(
                 fn_name="redeemPositions",
                 args=[
-                    Web3.to_checksum_address(USDC_ADDRESS),  # collateralToken
-                    bytes.fromhex(ZERO_BYTES32[2:]),          # parentCollectionId
-                    bytes.fromhex(cid_hex[2:]),               # conditionId
-                    [1, 2],                                    # indexSets (YES=1, NO=2)
+                    Web3.to_checksum_address(USDC_ADDRESS),
+                    bytes.fromhex(ZERO_BYTES32[2:]),
+                    bytes.fromhex(cid_hex[2:]),
+                    [1, 2],
                 ],
             )
 
@@ -283,23 +298,85 @@ class Executor:
             tx_id = getattr(response, "transaction_id", None) or str(response)
 
             logger.info(
-                "redeem_submitted",
+                "redeem_submitted_gasless",
                 condition_id=condition_id[:20] + "...",
                 tx_id=str(tx_id)[:20],
             )
 
-            # Poll for confirmation in background using response.wait()
+            # Poll for confirmation in background
             asyncio.create_task(self._wait_redeem(response, condition_id))
-
             return True
 
         except Exception as e:
             logger.warning(
-                "redeem_failed",
+                "redeem_via_builder_failed",
                 condition_id=condition_id[:20] + "...",
                 error=str(e),
             )
             return False
+
+    async def _redeem_via_clob(self, condition_id: str) -> bool:
+        """Redeem directly via CLOB client (pays gas, no relayer needed).
+
+        Note: This requires calling the CTF contract directly via web3.
+        py_clob_client doesn't expose a direct redeem method, so we use web3 to encode
+        and submit the redeemPositions call directly.
+        """
+        try:
+            from web3 import Web3
+            from eth_account import Account
+
+            w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
+
+            private_key = self._credentials.get_private_key()
+            account = Account.from_key(private_key)
+
+            ctf = w3.eth.contract(
+                address=Web3.to_checksum_address(CONDITIONAL_TOKENS),
+                abi=REDEEM_ABI,
+            )
+
+            # Ensure condition_id is proper bytes32 hex
+            cid_hex = condition_id if condition_id.startswith("0x") else f"0x{condition_id}"
+
+            # Build the transaction
+            tx_data = ctf.functions.redeemPositions(
+                Web3.to_checksum_address(USDC_ADDRESS),
+                bytes.fromhex(ZERO_BYTES32[2:]),
+                bytes.fromhex(cid_hex[2:]),
+                [1, 2],
+            ).build_transaction({
+                "from": account.address,
+                "nonce": w3.eth.get_transaction_count(account.address),
+                "gasPrice": w3.eth.gas_price,
+            })
+
+            # Sign and send
+            signed_tx = w3.eth.account.sign_transaction(tx_data, private_key)
+            tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+
+            logger.info(
+                "redeem_submitted_clob",
+                condition_id=condition_id[:20] + "...",
+                tx_hash=tx_hash.hex()[:20],
+            )
+
+            # Refresh balance after ~30s (tx confirmation time)
+            asyncio.create_task(self._refresh_balance_delayed(delay_seconds=30))
+            return True
+
+        except Exception as e:
+            logger.warning(
+                "redeem_via_clob_failed",
+                condition_id=condition_id[:20] + "...",
+                error=str(e),
+            )
+            return False
+
+    async def _refresh_balance_delayed(self, delay_seconds: int = 30):
+        """Refresh balance after a redeem tx is likely confirmed."""
+        await asyncio.sleep(delay_seconds)
+        await self._refresh_balance()
 
     async def _wait_redeem(self, response, condition_id: str):
         """Background: poll relayer until redeem tx is mined, then refresh balance."""

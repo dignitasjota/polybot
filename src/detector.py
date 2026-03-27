@@ -389,6 +389,11 @@ class ClosingArbitrageDetector:
             self._check_up_down_market(market, price_check, hours, still_active)
             return
 
+        # If this IS an Up/Down market but Binance data isn't cached yet, skip it.
+        # Don't let it fall through to closing arb logic (tiny margins, bad risk/reward).
+        if "up or down" in market.question.lower():
+            return
+
         # Non Up/Down markets: use order book price only (original logic)
         if market.best_ask_yes >= market.best_ask_no:
             if market.best_ask_yes >= min_prob:
@@ -476,7 +481,7 @@ class ClosingArbitrageDetector:
         signal_ratio = abs(change_pct) / buffer_used if buffer_used > 0 else 1.0
         # Clamp: 1.0 (just barely confirmed) to 1.3 (strong signal)
         # Gradual: sqrt scaling to dampen extreme ratios
-        signal_multiplier = min(1.3, max(1.0, 1.0 + (signal_ratio - 1.0) * 0.3))
+        signal_multiplier = min(1.5, max(1.0, 1.0 + (signal_ratio - 1.0) * 0.3))
 
         suggested_bet, potential_profit = self._calculate_bet(
             price, margin_net, depth, signal_multiplier=signal_multiplier,
