@@ -9,7 +9,7 @@ max_time_to_resolution = "15m"    # Busca mercados que resuelven en <15min (capt
 min_margin_net = 0.008            # Margen minimo por share tras fees ($0.008)
 tag = "crypto"                    # Solo mercados con tag crypto
 max_price = 0.65                  # Precio maximo para bets Up/Down directional
-min_buffer_pct = 0.03             # Buffer minimo % para confirmacion de precio Binance (3%)
+min_buffer_pct = 0.05             # Buffer minimo % para confirmacion de precio Binance (5%). Aumentado para evitar ruido inicial en mercados de 5min
 max_concurrent_bets = 5           # Max bets directionales concurrentes
 
 # Configuracion per-crypto para directional Up/Down
@@ -17,19 +17,19 @@ max_concurrent_bets = 5           # Max bets directionales concurrentes
 # buffer_pct = cambio minimo en Binance (%) para confirmar direccion
 [strategy.crypto_configs.bitcoin]
 enabled = true
-buffer_pct = 0.03      # 3% — lowered to capture more signals including night hours
+buffer_pct = 0.05      # 3% — lowered to capture more signals including night hours
 
 [strategy.crypto_configs.ethereum]
 enabled = true
-buffer_pct = 0.03      # 3%
+buffer_pct = 0.05      # 3%
 
 [strategy.crypto_configs.solana]
 enabled = true
-buffer_pct = 0.03      # 3% — volátil pero movimientos rápidos
+buffer_pct = 0.05      # 3% — volátil pero movimientos rápidos
 
 [strategy.crypto_configs.bnb]
 enabled = true
-buffer_pct = 0.03      # 3%
+buffer_pct = 0.05      # 3%
 
 [strategy.crypto_configs.dogecoin]
 enabled = true
@@ -37,31 +37,31 @@ buffer_pct = 0.04      # 4% — meme coin, un poco más de buffer para evitar ru
 
 [strategy.crypto_configs.xrp]
 enabled = true
-buffer_pct = 0.03      # 3%
+buffer_pct = 0.05      # 3%
 
 [strategy.crypto_configs.cardano]
 enabled = true
-buffer_pct = 0.03      # 3%
+buffer_pct = 0.05      # 3%
 
 [strategy.crypto_configs.avalanche]
 enabled = true
-buffer_pct = 0.03      # 3%
+buffer_pct = 0.05      # 3%
 
 [strategy.crypto_configs.polkadot]
 enabled = true
-buffer_pct = 0.03      # 3%
+buffer_pct = 0.05      # 3%
 
 [strategy.crypto_configs.polygon]
 enabled = true
-buffer_pct = 0.03      # 3%
+buffer_pct = 0.05      # 3%
 
 [strategy.crypto_configs.chainlink]
 enabled = true
-buffer_pct = 0.03      # 3%
+buffer_pct = 0.05      # 3%
 
 [strategy.crypto_configs.litecoin]
 enabled = true
-buffer_pct = 0.03      # 3%
+buffer_pct = 0.05      # 3%
 
 [strategy.crypto_configs.sui]
 enabled = true
@@ -73,7 +73,7 @@ buffer_pct = 0.04      # 4% — meme coin, pequeño buffer extra
 
 [strategy.crypto_configs.hyperliquid]
 enabled = false
-buffer_pct = 0.03
+buffer_pct = 0.05
 
 # Probabilidad minima escalada segun tiempo restante
 # Cuanto menos tiempo queda, mas agresivos somos (menos prob exigimos)
