@@ -630,7 +630,15 @@ class CopyTrader:
     async def _safe_redeem(self, condition_id: str):
         """Fire redeem callback, swallowing errors."""
         if not self._on_redeem_cb:
+            logger.warning(
+                "copy_redeem_callback_not_registered",
+                condition_id=condition_id[:20] + "...",
+            )
             return
+        logger.info(
+            "copy_redeem_callback_calling",
+            condition_id=condition_id[:20] + "...",
+        )
         try:
             await self._on_redeem_cb(condition_id)
         except Exception as e:

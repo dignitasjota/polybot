@@ -250,11 +250,18 @@ class WebSocketClient:
         winning_asset_id = event.get("winning_asset_id", "")
 
         if condition_id and winning_asset_id:
+            logger.info(
+                "market_resolved_event_received",
+                condition_id=condition_id[:20] + "...",
+                winning_asset_id=winning_asset_id[:20] + "...",
+            )
             self.tracker.mark_resolved(condition_id, winning_asset_id)
         else:
             logger.warning(
                 "market_resolved_incomplete",
                 event_keys=list(event.keys()),
+                has_condition_id=bool(condition_id),
+                has_winning_asset_id=bool(winning_asset_id),
             )
 
     async def _run_rest_fallback(self, duration_seconds: float):

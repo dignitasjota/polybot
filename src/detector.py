@@ -108,7 +108,15 @@ class ClosingArbitrageDetector:
     async def _safe_redeem(self, condition_id: str):
         """Fire redeem callback, swallowing errors."""
         if not self._on_redeem_cb:
+            logger.warning(
+                "redeem_callback_not_registered",
+                condition_id=condition_id[:20] + "...",
+            )
             return
+        logger.info(
+            "redeem_callback_calling",
+            condition_id=condition_id[:20] + "...",
+        )
         try:
             await self._on_redeem_cb(condition_id)
         except Exception as e:
@@ -172,14 +180,23 @@ class ClosingArbitrageDetector:
 
         # Full scan: resolution checks, rest fallback, or periodic
         still_active: set[str] = set()
+        resolved_count = 0
         for market in self.tracker.all_markets:
             if market.is_stale:
                 continue
             if market.resolved and market.winning_token_id:
+                resolved_count += 1
+                logger.debug(
+                    "resolved_market_detected",
+                    condition_id=market.condition_id[:20] + "...",
+                    question=market.question[:40] + "...",
+                )
                 self._settle_pending(market)
                 self._check_resolved_market(market)
                 continue
             self._check_pre_resolution(market, still_active)
+        if resolved_count > 0:
+            logger.debug("full_scan_resolved_count", count=resolved_count)
 
         # Mark disappeared opportunities
         now = time.time()
@@ -204,8 +221,17 @@ class ClosingArbitrageDetector:
         All log entries for the same market get their outcome updated for display.
         """
         if market.condition_id in self._settled_conditions:
+            logger.debug(
+                "settle_already_processed",
+                condition_id=market.condition_id[:20] + "...",
+            )
             return
         self._settled_conditions.add(market.condition_id)
+        logger.info(
+            "settle_pending_start",
+            condition_id=market.condition_id[:20] + "...",
+            question=market.question[:40] + "...",
+        )
 
         winning_id = market.winning_token_id
         winning_side = "YES" if winning_id == market.yes_token_id else "NO"

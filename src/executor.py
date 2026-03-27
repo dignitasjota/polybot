@@ -246,7 +246,19 @@ class Executor:
 
         Returns True if redeem was submitted (whether gasless or paid).
         """
+        logger.info(
+            "redeem_callback_invoked",
+            condition_id=condition_id[:20] + "...",
+            mode=self.mode.value,
+            relayer_available=self._redeem_available,
+        )
+
         if self.mode != ExecutionMode.LIVE:
+            logger.info(
+                "redeem_skipped_not_live",
+                condition_id=condition_id[:20] + "...",
+                mode=self.mode.value,
+            )
             return False
 
         # Try gasless redeem via Builder Relayer first

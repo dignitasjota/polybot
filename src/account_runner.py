@@ -123,7 +123,12 @@ class AccountRunner:
         self.detector.on_redeem(self.executor.redeem_position)
         self.ws_client.on_opportunity(self.detector.check)
 
-        self.log.info("account_directional_ready", name=self.name)
+        self.log.info(
+            "account_directional_ready",
+            name=self.name,
+            redeem_callback_registered=bool(self.detector._on_redeem_cb),
+            mode=self.exec_mode.value,
+        )
 
     async def _start_copy_trade(self):
         """Start copy-trading strategy."""
@@ -142,6 +147,8 @@ class AccountRunner:
             "account_copy_trade_ready",
             name=self.name,
             wallets=len(self.account.copy_trade.target_wallets),
+            redeem_callback_registered=bool(self.copy_trader._on_redeem_cb),
+            mode=self.exec_mode.value,
         )
 
     async def set_execution_mode(self, mode_str: str):
