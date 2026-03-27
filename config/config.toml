@@ -133,7 +133,7 @@ rotate_count = 5
 name = "directional_main"
 enabled = true
 strategy_type = "directional"
-execution_mode = "live"  # Auto-redeem enabled in live mode
+execution_mode = "paper"  # Cambiar a "live" manualmente cuando esté listo
 
 [accounts.credentials]
 private_key_env = "PRIVATE_KEY"
@@ -146,12 +146,12 @@ builder_key_env = "BUILDER_API_KEY"
 builder_secret_env = "BUILDER_SECRET"
 builder_passphrase_env = "BUILDER_PASSPHRASE"
 
-# Cuenta 2: Copy-trading
+# Cuenta 2: Copy-trading (paper trading para evaluar rentabilidad)
 [[accounts]]
 name = "copy_vidarx"
 enabled = true
 strategy_type = "copy_trade"
-execution_mode = "live"  # Auto-redeem enabled in live mode
+execution_mode = "paper"  # Cambiar a "live" manualmente después de validar
 
 [accounts.credentials]
 private_key_env = "COPY_PRIVATE_KEY"
