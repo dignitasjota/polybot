@@ -686,8 +686,19 @@ class CopyTrader:
             self._balance += bet.bet_size + bet.actual_pnl  # Return cost + profit
             self._stats["settled_wins"] += 1
             # Auto-redeem winning position
+            logger.info(
+                "copy_redeem_check",
+                condition_id=bet.condition_id[:20] + "...",
+                callback_registered=bool(self._on_redeem_cb),
+            )
             if self._on_redeem_cb:
                 asyncio.create_task(self._safe_redeem(bet.condition_id))
+            else:
+                logger.warning(
+                    "copy_redeem_callback_missing",
+                    condition_id=bet.condition_id[:20] + "...",
+                    msg="Win detected but redeem callback not registered",
+                )
         else:
             bet.outcome = "loss"
             bet.actual_pnl = round(-bet.bet_size, 4)

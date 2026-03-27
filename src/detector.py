@@ -271,8 +271,20 @@ class ClosingArbitrageDetector:
             )
 
             # Auto-redeem winning positions
-            if outcome == "win" and self._on_redeem_cb:
-                asyncio.create_task(self._safe_redeem(market.condition_id))
+            if outcome == "win":
+                logger.info(
+                    "redeem_check",
+                    condition_id=market.condition_id[:20] + "...",
+                    callback_registered=bool(self._on_redeem_cb),
+                )
+                if self._on_redeem_cb:
+                    asyncio.create_task(self._safe_redeem(market.condition_id))
+                else:
+                    logger.warning(
+                        "redeem_callback_missing",
+                        condition_id=market.condition_id[:20] + "...",
+                        msg="Win detected but redeem callback not registered",
+                    )
 
             # Update the bet opportunity object
             bet_opp.outcome = outcome
