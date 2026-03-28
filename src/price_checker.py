@@ -300,8 +300,8 @@ class PriceChecker:
         if current_price is None:
             return None
 
-        # Calculate direction
-        change_pct = ((current_price - open_price) / open_price) * 100
+        # Calculate direction (as decimal, e.g. 0.05 = 5%)
+        change_pct = (current_price - open_price) / open_price
 
         # Check if this crypto is disabled via per-crypto config
         crypto_name = parsed["crypto"]

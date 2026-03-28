@@ -204,26 +204,51 @@ class Executor:
             raise
 
     def _init_relayer(self):
-        """Initialize Builder Relayer for gasless auto-redeem of winning positions."""
-        builder_creds = self._credentials.get_builder_creds()
-        if not builder_creds:
-            logger.info("relayer_not_configured", msg="Builder API credentials not set, auto-redeem disabled")
-            return
+        """Initialize Builder Relayer for gasless auto-redeem of winning positions.
+
+        For Magic Link (POLY_PROXY): uses POLYMARKET_PROXY_ADDRESS
+        For MetaMask (EOA): uses BUILDER_API_KEY/SECRET/PASSPHRASE credentials
+        """
+        sig_type = self._credentials.signature_type
+        private_key = self._credentials.get_private_key()
+
+        # For Magic Link: use proxy address
+        if sig_type == 1:
+            proxy_address = self._credentials.get_proxy_address()
+            if not proxy_address:
+                logger.info("relayer_not_configured",
+                           wallet_type="magic_link",
+                           msg="POLYMARKET_PROXY_ADDRESS not set, auto-redeem disabled")
+                return
+            logger.info("relayer_initializing", wallet_type="magic_link", proxy=proxy_address[:10] + "...")
+        # For MetaMask: use builder credentials
+        else:
+            builder_creds = self._credentials.get_builder_creds()
+            if not builder_creds:
+                logger.info("relayer_not_configured",
+                           wallet_type="metamask",
+                           msg="BUILDER_API_KEY/SECRET/PASSPHRASE not set, auto-redeem disabled")
+                return
+            logger.info("relayer_initializing", wallet_type="metamask", msg="Using Builder credentials")
 
         try:
             from py_builder_relayer_client.client import RelayClient
             from py_builder_signing_sdk.config import BuilderConfig, BuilderApiKeyCreds
 
-            api_key, api_secret, api_passphrase = builder_creds
-            private_key = self._credentials.get_private_key()
-
-            builder_config = BuilderConfig(
-                local_builder_creds=BuilderApiKeyCreds(
-                    key=api_key,
-                    secret=api_secret,
-                    passphrase=api_passphrase,
+            if sig_type == 1:
+                # Magic Link: proxy address is built-in
+                builder_config = BuilderConfig()
+            else:
+                # MetaMask: use builder credentials
+                api_key, api_secret, api_passphrase = builder_creds
+                builder_config = BuilderConfig(
+                    local_builder_creds=BuilderApiKeyCreds(
+                        key=api_key,
+                        secret=api_secret,
+                        passphrase=api_passphrase,
+                    )
                 )
-            )
+
             self._relayer = RelayClient(
                 relayer_url=RELAYER_URL,
                 chain_id=137,
@@ -231,25 +256,31 @@ class Executor:
                 builder_config=builder_config,
             )
             self._redeem_available = True
-            logger.info("relayer_initialized", msg="Builder Relayer ready for auto-redeem")
+            wallet_label = "Magic Link (via proxy)" if sig_type == 1 else "MetaMask (via Builder)"
+            logger.info("relayer_initialized",
+                       wallet_type=wallet_label,
+                       msg="Builder Relayer ready for auto-redeem")
         except ImportError:
             logger.warning("relayer_import_error", msg="py-builder-relayer-client not installed")
         except Exception as e:
-            logger.warning("relayer_init_error", error=str(e))
+            logger.warning("relayer_init_error", wallet_type="magic_link" if sig_type == 1 else "metamask", error=str(e))
 
     async def redeem_position(self, condition_id: str) -> bool:
         """Redeem a winning position.
 
-        Tries two strategies:
-        1. Builder Relayer (gasless) if credentials available
-        2. Direct CLOB redeem (pays gas) as fallback
+        Strategy depends on wallet type:
+        - Magic Link (POLY_PROXY): MUST use Builder Relayer (positions are under proxy)
+        - MetaMask (EOA): Can use Builder Relayer or fallback to direct CLOB redeem
 
-        Returns True if redeem was submitted (whether gasless or paid).
+        Returns True if redeem was submitted.
         """
+        sig_type = self._credentials.signature_type
+
         logger.info(
             "redeem_callback_invoked",
             condition_id=condition_id[:20] + "...",
             mode=self.mode.value,
+            wallet_type="magic_link" if sig_type == 1 else "metamask",
             relayer_available=self._redeem_available,
         )
 
@@ -261,14 +292,27 @@ class Executor:
             )
             return False
 
-        # Try gasless redeem via Builder Relayer first
-        if self._redeem_available and self._relayer:
-            if await self._redeem_via_builder(condition_id):
-                return True
+        # Magic Link: MUST use Builder Relayer (positions are under proxy)
+        if sig_type == 1:
+            if self._redeem_available and self._relayer:
+                return await self._redeem_via_builder(condition_id)
+            else:
+                logger.error(
+                    "redeem_impossible",
+                    condition_id=condition_id[:20] + "...",
+                    reason="Magic Link requires Builder Relayer, but it's not configured",
+                )
+                return False
 
-        # Fallback: direct redeem via CLOB (pays gas)
-        if self._client:
-            return await self._redeem_via_clob(condition_id)
+        # MetaMask: try Builder Relayer first, fallback to direct CLOB
+        elif sig_type == 0:
+            if self._redeem_available and self._relayer:
+                if await self._redeem_via_builder(condition_id):
+                    return True
+
+            # Fallback: direct redeem via CLOB (pays gas)
+            if self._client:
+                return await self._redeem_via_clob(condition_id)
 
         return False
 
@@ -277,6 +321,7 @@ class Executor:
         try:
             from web3 import Web3
             from py_builder_relayer_client.models import SafeTransaction
+            from eth_utils import encode_hex
 
             w3 = Web3()
             ctf = w3.eth.contract(
@@ -287,15 +332,14 @@ class Executor:
             # Ensure condition_id is proper bytes32 hex
             cid_hex = condition_id if condition_id.startswith("0x") else f"0x{condition_id}"
 
-            calldata = ctf.encode_abi(
-                fn_name="redeemPositions",
-                args=[
-                    Web3.to_checksum_address(USDC_ADDRESS),
-                    bytes.fromhex(ZERO_BYTES32[2:]),
-                    bytes.fromhex(cid_hex[2:]),
-                    [1, 2],
-                ],
-            )
+            # Encode the function call to get calldata
+            encoded = ctf.functions.redeemPositions(
+                Web3.to_checksum_address(USDC_ADDRESS),
+                bytes.fromhex(ZERO_BYTES32[2:]),
+                bytes.fromhex(cid_hex[2:]),
+                [1, 2],
+            ).encode()
+            calldata = encode_hex(encoded)
 
             tx = SafeTransaction(
                 to=Web3.to_checksum_address(CONDITIONAL_TOKENS),
@@ -338,7 +382,7 @@ class Executor:
             from web3 import Web3
             from eth_account import Account
 
-            w3 = Web3(Web3.HTTPProvider("https://rpc.ankr.com/polygon"))
+            w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com/"))
 
             private_key = self._credentials.get_private_key()
             account = Account.from_key(private_key)
