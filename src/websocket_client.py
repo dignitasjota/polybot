@@ -247,10 +247,17 @@ class WebSocketClient:
 
             best_bid = change.get("best_bid")
             best_ask = change.get("best_ask")
+            logger.info(
+                "price_change_update",
+                asset_id=asset_id[:20],
+                best_bid=best_bid,
+                best_ask=best_ask,
+            )
             if best_bid is not None and best_ask is not None:
                 self.tracker.update_best_bid_ask(
                     asset_id, float(best_bid), float(best_ask)
                 )
+                logger.info("price_updated", asset_id=asset_id[:20])
 
     def _handle_best_bid_ask(self, event: dict):
         asset_id = event.get("asset_id", "")
