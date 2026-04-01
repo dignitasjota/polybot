@@ -126,8 +126,8 @@
             </div>
             <div class="form-group">
                 <label>Min Buffer Pct</label>
-                <input type="number" name="min_buffer_pct" value="{{ params.min_buffer_pct }}" step="0.01" min="0" max="1">
-                <span class="desc">Cambio minimo en Binance (%) para confirmar direccion antes de apostar</span>
+                <input type="number" name="min_buffer_pct" value="{{ params.min_buffer_pct }}" step="0.00001" min="0" max="1">
+                <span class="desc">Cambio minimo en Binance (%) para confirmar direccion antes de apostar. Ej: 0.0008 = 0.08%</span>
             </div>
         </div>
         <div class="form-row" style="margin-top:12px;">
