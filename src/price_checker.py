@@ -254,6 +254,14 @@ class PriceChecker:
             if price is not None:
                 self._current_prices[symbol] = price
 
+        if self._current_prices:
+            logger.info(
+                "binance_prices_updated",
+                symbols_active=len(self._active_symbols),
+                prices_cached=len(self._current_prices),
+                sample=list(self._current_prices.items())[:3] if self._current_prices else [],
+            )
+
         self._last_update = time.time()
 
     def check_direction(self, question: str) -> dict | None:
@@ -282,6 +290,7 @@ class PriceChecker:
         # Get current price from cache first
         current_price = self._current_prices.get(symbol)
         if current_price is None:
+            logger.debug("price_not_in_cache", symbol=symbol, symbols_available=len(self._current_prices))
             return None
 
         # Get open price from cache
@@ -292,6 +301,7 @@ class PriceChecker:
             # This allows direction detection to start immediately without waiting for historical data
             open_price = current_price
             self._open_prices[cache_key] = open_price
+            logger.info("price_baseline_set", symbol=symbol, price=current_price)
 
         # Calculate direction (as decimal, e.g. 0.05 = 5%)
         change_pct = (current_price - open_price) / open_price
@@ -313,10 +323,28 @@ class PriceChecker:
 
         if abs(change_pct) < buffer:
             confirmed_side = None  # Too close to call
+            logger.debug(
+                "direction_uncertain",
+                symbol=symbol,
+                change_pct=f"{change_pct:.4f}",
+                buffer=f"{buffer:.4f}",
+            )
         elif change_pct > 0:
             confirmed_side = "YES"  # Up
+            logger.info(
+                "direction_confirmed_up",
+                symbol=symbol,
+                change_pct=f"{change_pct:.4f}%",
+                buffer=f"{buffer:.4f}%",
+            )
         else:
             confirmed_side = "NO"  # Down
+            logger.info(
+                "direction_confirmed_down",
+                symbol=symbol,
+                change_pct=f"{change_pct:.4f}%",
+                buffer=f"{buffer:.4f}%",
+            )
 
         return {
             "confirmed_side": confirmed_side,
