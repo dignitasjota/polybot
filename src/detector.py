@@ -486,6 +486,13 @@ class ClosingArbitrageDetector:
         # Don't buy at extreme prices: too low = no data, too high = no margin
         if price <= 0 or price >= self.config.max_price:
             self._stats["price_checks_rejected"] += 1
+            logger.info(
+                "price_out_of_range",
+                question=market.question[:60],
+                side=confirmed,
+                price=price,
+                max_price=self.config.max_price,
+            )
             return
 
         # Limit concurrent bets (directional + closing arb) to reduce correlated drawdowns
@@ -503,6 +510,14 @@ class ClosingArbitrageDetector:
                 return
 
         self._stats["price_checks_confirmed"] += 1
+
+        logger.info(
+            "updown_direction_confirmed",
+            question=market.question[:60],
+            side=confirmed,
+            price=price,
+            change_pct=f"{change_pct:.4f}%",
+        )
 
         margin_gross = 1.0 - price
         fee = self._calculate_fee(price, 1.0)

@@ -37,20 +37,20 @@ CRYPTO_SYMBOLS = {
 # Less volatile cryptos need higher buffer to avoid noise.
 # More volatile cryptos can use lower buffer to capture more trades.
 CRYPTO_BUFFER_PCT = {
-    "bitcoin": 0.001,      # 0.1% — baja volatilidad en 5min
-    "ethereum": 0.0015,    # 0.15%
-    "bnb": 0.0015,         # 0.15%
-    "litecoin": 0.002,     # 0.2%
-    "cardano": 0.002,      # 0.2%
-    "polkadot": 0.002,     # 0.2%
-    "chainlink": 0.002,    # 0.2%
-    "polygon": 0.002,      # 0.2%
-    "avalanche": 0.002,    # 0.2%
-    "xrp": 0.002,          # 0.2%
-    "solana": 0.002,       # 0.2%
-    "sui": 0.0025,         # 0.25% — alta volatilidad
-    "dogecoin": 0.003,     # 0.3% — meme coin
-    "pepe": 0.003,         # 0.3% — meme coin
+    "bitcoin": 0.0005,     # 0.05% — baja volatilidad en 5min
+    "ethereum": 0.0008,    # 0.08%
+    "bnb": 0.0008,         # 0.08%
+    "litecoin": 0.001,     # 0.1%
+    "cardano": 0.001,      # 0.1%
+    "polkadot": 0.001,     # 0.1%
+    "chainlink": 0.001,    # 0.1%
+    "polygon": 0.001,      # 0.1%
+    "avalanche": 0.001,    # 0.1%
+    "xrp": 0.001,          # 0.1%
+    "solana": 0.001,       # 0.1%
+    "sui": 0.0012,         # 0.12% — alta volatilidad
+    "dogecoin": 0.0015,    # 0.15% — meme coin
+    "pepe": 0.0015,        # 0.15% — meme coin
 }
 
 # Regex to parse "Crypto Up or Down - March 21, 6:05AM-6:10AM ET"
