@@ -37,20 +37,20 @@ CRYPTO_SYMBOLS = {
 # Less volatile cryptos need higher buffer to avoid noise.
 # More volatile cryptos can use lower buffer to capture more trades.
 CRYPTO_BUFFER_PCT = {
-    "bitcoin": 0.0005,     # 0.05% — baja volatilidad
-    "ethereum": 0.0008,    # 0.08%
-    "bnb": 0.0007,         # 0.07%
-    "litecoin": 0.001,     # 0.1%
-    "cardano": 0.001,      # 0.1%
-    "polkadot": 0.001,     # 0.1%
-    "chainlink": 0.001,    # 0.1%
-    "polygon": 0.001,      # 0.1%
-    "avalanche": 0.001,    # 0.1%
-    "xrp": 0.001,          # 0.1%
-    "solana": 0.001,       # 0.1%
-    "sui": 0.0012,         # 0.12% — alta volatilidad
-    "dogecoin": 0.0015,    # 0.15% — meme coin
-    "pepe": 0.0015,        # 0.15% — meme coin
+    "bitcoin": 0.001,      # 0.1% — baja volatilidad en 5min
+    "ethereum": 0.0015,    # 0.15%
+    "bnb": 0.0015,         # 0.15%
+    "litecoin": 0.002,     # 0.2%
+    "cardano": 0.002,      # 0.2%
+    "polkadot": 0.002,     # 0.2%
+    "chainlink": 0.002,    # 0.2%
+    "polygon": 0.002,      # 0.2%
+    "avalanche": 0.002,    # 0.2%
+    "xrp": 0.002,          # 0.2%
+    "solana": 0.002,       # 0.2%
+    "sui": 0.0025,         # 0.25% — alta volatilidad
+    "dogecoin": 0.003,     # 0.3% — meme coin
+    "pepe": 0.003,         # 0.3% — meme coin
 }
 
 # Regex to parse "Crypto Up or Down - March 21, 6:05AM-6:10AM ET"
@@ -254,11 +254,11 @@ class PriceChecker:
             if price is not None:
                 self._current_prices[symbol] = price
 
-        # Fetch open prices for markets whose start time has already occurred
+        # Fetch open prices for markets whose start time has passed + 5s buffer
         now_utc = datetime.now(timezone.utc)
         for cache_key, start_utc in list(self._pending_open_requests.items()):
-            # Only fetch if the start time has passed (don't try to fetch future data)
-            if start_utc <= now_utc:
+            # Wait 5s after window start for Binance to finalize the kline
+            if start_utc + timedelta(seconds=5) <= now_utc:
                 symbol = cache_key.split(":")[0]
                 open_price = await _fetch_binance_open_price(symbol, start_utc, self._session)
                 if open_price is not None:
@@ -267,16 +267,21 @@ class PriceChecker:
                         "binance_open_price_fetched",
                         symbol=symbol,
                         open_price=open_price,
+                        cache_key=cache_key,
                     )
                     del self._pending_open_requests[cache_key]
-
-        if self._current_prices:
-            logger.info(
-                "binance_prices_updated",
-                symbols_active=len(self._active_symbols),
-                prices_cached=len(self._current_prices),
-                sample=list(self._current_prices.items())[:3] if self._current_prices else [],
-            )
+                else:
+                    # Fallback: if 2+ minutes passed and kline still unavailable, use current price
+                    if start_utc + timedelta(minutes=2) <= now_utc:
+                        fallback_price = self._current_prices.get(symbol)
+                        if fallback_price is not None:
+                            self._open_prices[cache_key] = fallback_price
+                            logger.warning(
+                                "binance_open_price_fallback",
+                                symbol=symbol,
+                                fallback_price=fallback_price,
+                            )
+                            del self._pending_open_requests[cache_key]
 
         self._last_update = time.time()
 
@@ -309,22 +314,15 @@ class PriceChecker:
             logger.debug("price_not_in_cache", symbol=symbol, symbols_available=len(self._current_prices))
             return None
 
-        # Get open price from cache
+        # Get open price from cache (real Binance kline at window start)
         cache_key = f"{symbol}:{int(start_utc.timestamp())}"
         open_price = self._open_prices.get(cache_key)
         if open_price is None:
-            # Request historical open price from Binance (if start time has passed)
-            if start_utc not in self._pending_open_requests:
+            # Register for background fetching (will fetch once start_utc + 5s has passed)
+            if cache_key not in self._pending_open_requests:
                 self._pending_open_requests[cache_key] = start_utc
-            # Use current price as fallback baseline while waiting for historical data
-            open_price = current_price
-            self._open_prices[cache_key] = open_price
-            logger.info(
-                "price_baseline_provisional",
-                symbol=symbol,
-                price=current_price,
-                will_fetch_historical=start_utc <= datetime.now(timezone.utc),
-            )
+            # Don't confirm anything yet — wait for real open price
+            return None
 
         # Calculate direction (as decimal, e.g. 0.05 = 5%)
         change_pct = (current_price - open_price) / open_price
@@ -346,28 +344,10 @@ class PriceChecker:
 
         if abs(change_pct) < buffer:
             confirmed_side = None  # Too close to call
-            logger.debug(
-                "direction_uncertain",
-                symbol=symbol,
-                change_pct=f"{change_pct:.4f}",
-                buffer=f"{buffer:.4f}",
-            )
         elif change_pct > 0:
             confirmed_side = "YES"  # Up
-            logger.info(
-                "direction_confirmed_up",
-                symbol=symbol,
-                change_pct=f"{change_pct:.4f}%",
-                buffer=f"{buffer:.4f}%",
-            )
         else:
             confirmed_side = "NO"  # Down
-            logger.info(
-                "direction_confirmed_down",
-                symbol=symbol,
-                change_pct=f"{change_pct:.4f}%",
-                buffer=f"{buffer:.4f}%",
-            )
 
         return {
             "confirmed_side": confirmed_side,
