@@ -191,7 +191,7 @@ class PriceChecker:
     check_direction() reads from cache only — zero I/O, zero latency.
     """
 
-    def __init__(self, min_buffer_pct: float = 0.10, poll_interval: float = 1.0,
+    def __init__(self, min_buffer_pct: float = 0.10, poll_interval: float = 2.0,
                  crypto_configs: dict | None = None):
         self.min_buffer_pct = min_buffer_pct
         self._poll_interval = poll_interval
