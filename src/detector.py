@@ -135,7 +135,7 @@ class ClosingArbitrageDetector:
         self._bet_placed.clear()
         self._settled_conditions.clear()
         self._last_logged.clear()
-        self._last_log_time.clear()
+        # Don't clear _last_log_time - keep throttle state to avoid spam on mode switch
         if new_balance is not None:
             self._balance = new_balance
             self._starting_balance = new_balance
