@@ -254,6 +254,22 @@ class PriceChecker:
             if price is not None:
                 self._current_prices[symbol] = price
 
+        # Fetch open prices for markets whose start time has already occurred
+        now_utc = datetime.now(timezone.utc)
+        for cache_key, start_utc in list(self._pending_open_requests.items()):
+            # Only fetch if the start time has passed (don't try to fetch future data)
+            if start_utc <= now_utc:
+                symbol = cache_key.split(":")[0]
+                open_price = await _fetch_binance_open_price(symbol, start_utc, self._session)
+                if open_price is not None:
+                    self._open_prices[cache_key] = open_price
+                    logger.info(
+                        "binance_open_price_fetched",
+                        symbol=symbol,
+                        open_price=open_price,
+                    )
+                    del self._pending_open_requests[cache_key]
+
         if self._current_prices:
             logger.info(
                 "binance_prices_updated",
@@ -297,11 +313,18 @@ class PriceChecker:
         cache_key = f"{symbol}:{int(start_utc.timestamp())}"
         open_price = self._open_prices.get(cache_key)
         if open_price is None:
-            # First time seeing this market: use current price as open price baseline
-            # This allows direction detection to start immediately without waiting for historical data
+            # Request historical open price from Binance (if start time has passed)
+            if start_utc not in self._pending_open_requests:
+                self._pending_open_requests[cache_key] = start_utc
+            # Use current price as fallback baseline while waiting for historical data
             open_price = current_price
             self._open_prices[cache_key] = open_price
-            logger.info("price_baseline_set", symbol=symbol, price=current_price)
+            logger.info(
+                "price_baseline_provisional",
+                symbol=symbol,
+                price=current_price,
+                will_fetch_historical=start_utc <= datetime.now(timezone.utc),
+            )
 
         # Calculate direction (as decimal, e.g. 0.05 = 5%)
         change_pct = (current_price - open_price) / open_price
