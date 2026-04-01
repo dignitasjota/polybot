@@ -236,7 +236,13 @@ class WebSocketClient:
         for change in changes:
             asset_id = change.get("asset_id", "")
             state = self.tracker.get_by_token(asset_id)
+
             if not state:
+                logger.info(
+                    "price_change_asset_not_found",
+                    asset_id=asset_id[:20],
+                    tracked_tokens=len(self.tracker.all_token_ids),
+                )
                 continue
 
             best_bid = change.get("best_bid")
