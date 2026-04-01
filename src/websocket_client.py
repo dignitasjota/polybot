@@ -189,9 +189,12 @@ class WebSocketClient:
 
             # price_change has asset_id inside nested array, skip global throttle
             if event_type == "price_change":
-                self._handle_price_change(event)
+                updated_tokens = self._handle_price_change(event)
+                # Call callback for each token that was updated, not with empty token_id
+                # This allows the detector to throttle per-token instead of doing a full scan
                 if self._on_opportunity_callback:
-                    await self._on_opportunity_callback("", event_type)
+                    for token_id in updated_tokens:
+                        await self._on_opportunity_callback(token_id, event_type)
                 continue
 
             # Throttle: skip processing entirely if same token updated < 1s ago
@@ -221,11 +224,13 @@ class WebSocketClient:
         asks = event.get("asks", [])
         self.tracker.update_book(asset_id, bids, asks)
 
-    def _handle_price_change(self, event: dict):
+    def _handle_price_change(self, event: dict) -> list[str]:
+        """Handle price_change event and return list of updated token_ids."""
         changes = event.get("price_changes", event.get("changes", []))
         if not changes and "asset_id" in event:
             changes = [event]
 
+        updated_tokens = []
         for change in changes:
             asset_id = change.get("asset_id", "")
             state = self.tracker.get_by_token(asset_id)
@@ -238,6 +243,9 @@ class WebSocketClient:
                 self.tracker.update_best_bid_ask(
                     asset_id, float(best_bid), float(best_ask)
                 )
+                updated_tokens.append(asset_id)
+
+        return updated_tokens
 
     def _handle_best_bid_ask(self, event: dict):
         asset_id = event.get("asset_id", "")

@@ -87,6 +87,9 @@ class ClosingArbitrageDetector:
         )
         self._on_opportunity_cb = None  # async callback(Opportunity) for executor
         self._on_redeem_cb = None      # async callback(condition_id: str) for auto-redeem
+        # Throttle repeated check() calls for the same token_id (prevents thousands of calls/sec)
+        self._last_check_time: dict[str, float] = {}  # token_id -> timestamp
+        self._check_throttle_ms = 100  # Skip re-check for same token within 100ms
         self._stats = {
             "total_scans": 0,
             "opportunities_found": 0,
@@ -136,6 +139,7 @@ class ClosingArbitrageDetector:
         self._settled_conditions.clear()
         self._last_logged.clear()
         # Don't clear _last_log_time - keep throttle state to avoid spam on mode switch
+        self._last_check_time.clear()  # Clear check throttle for fresh checks in new mode
         if new_balance is not None:
             self._balance = new_balance
             self._starting_balance = new_balance
@@ -165,6 +169,14 @@ class ClosingArbitrageDetector:
         updated — O(1) instead of O(N). Full scans run periodically or
         on resolution events.
         """
+        # Throttle: skip if we checked this token_id very recently
+        if token_id and event_type != "resolution_check":
+            now = time.time()
+            last_check = self._last_check_time.get(token_id, 0)
+            if now - last_check < self._check_throttle_ms / 1000.0:
+                return  # Skip this check, was called too recently
+            self._last_check_time[token_id] = now
+
         self._stats["total_scans"] += 1
 
         if token_id and event_type != "resolution_check":
