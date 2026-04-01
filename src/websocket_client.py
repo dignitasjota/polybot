@@ -227,6 +227,14 @@ class WebSocketClient:
         if not changes and "asset_id" in event:
             changes = [event]
 
+        # Log first change to understand structure
+        if changes and not changes[0].get("asset_id"):
+            logger.info(
+                "price_change_structure",
+                first_change_keys=list(changes[0].keys()) if changes else [],
+                first_change=changes[0] if changes else None,
+            )
+
         for change in changes:
             asset_id = change.get("asset_id", "")
             state = self.tracker.get_by_token(asset_id)
