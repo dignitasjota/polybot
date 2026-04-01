@@ -76,6 +76,8 @@ class ClosingArbitrageDetector:
         self._opportunities_log: list[Opportunity] = []
         # Track last logged price per market+side to avoid spam
         self._last_logged: dict[str, float] = {}  # "condition_id:side" -> price
+        # Track last log timestamp to throttle frequent events
+        self._last_log_time: dict[str, float] = {}  # "condition_id:side:event" -> timestamp
         self._active_opportunities: dict[str, Opportunity] = {}  # "condition_id:side" -> latest opp
         self._bet_placed: dict[str, Opportunity] = {}  # "condition_id:side" -> first bet (for paper trading)
         self._settled_conditions: set[str] = set()  # Already settled condition_ids
@@ -133,6 +135,7 @@ class ClosingArbitrageDetector:
         self._bet_placed.clear()
         self._settled_conditions.clear()
         self._last_logged.clear()
+        self._last_log_time.clear()
         if new_balance is not None:
             self._balance = new_balance
             self._starting_balance = new_balance
@@ -486,13 +489,19 @@ class ClosingArbitrageDetector:
         # Don't buy at extreme prices: too low = no data, too high = no margin
         if price <= 0 or price >= self.config.max_price:
             self._stats["price_checks_rejected"] += 1
-            logger.info(
-                "price_out_of_range",
-                question=market.question[:60],
-                side=confirmed,
-                price=price,
-                max_price=self.config.max_price,
-            )
+            # Throttle log: only log once per market+side per 5 seconds
+            key = f"{market.condition_id}:{confirmed}:price_out_of_range"
+            now = time.time()
+            last_log = self._last_log_time.get(key, 0)
+            if now - last_log >= 5.0:
+                logger.info(
+                    "price_out_of_range",
+                    question=market.question[:60],
+                    side=confirmed,
+                    price=price,
+                    max_price=self.config.max_price,
+                )
+                self._last_log_time[key] = now
             return
 
         # Limit concurrent bets (directional + closing arb) to reduce correlated drawdowns
@@ -501,12 +510,18 @@ class ClosingArbitrageDetector:
             concurrent = self._count_recent_bets(window_seconds=300)
             if concurrent >= self.config.max_concurrent_bets:
                 self._stats["price_checks_rejected"] += 1
-                logger.info(
-                    "concurrent_limit",
-                    question=market.question[:60],
-                    concurrent_bets=concurrent,
-                    max_allowed=self.config.max_concurrent_bets,
-                )
+                # Throttle log: only log once per market per 10 seconds
+                log_key = f"{market.condition_id}:concurrent_limit"
+                now = time.time()
+                last_log = self._last_log_time.get(log_key, 0)
+                if now - last_log >= 10.0:
+                    logger.info(
+                        "concurrent_limit",
+                        question=market.question[:60],
+                        concurrent_bets=concurrent,
+                        max_allowed=self.config.max_concurrent_bets,
+                    )
+                    self._last_log_time[log_key] = now
                 return
 
         self._stats["price_checks_confirmed"] += 1
