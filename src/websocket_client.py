@@ -170,13 +170,6 @@ class WebSocketClient:
             event_type = event.get("event_type", "")
             asset_id = event.get("asset_id", "")
 
-            # Log all event types received
-            logger.info(
-                "ws_event_received",
-                event_type=event_type,
-                asset_id=asset_id[:20] if asset_id else "",
-                keys=list(event.keys())[:5],
-            )
 
             # Resolution events are always processed immediately
             if event_type == "market_resolved":
@@ -194,7 +187,15 @@ class WebSocketClient:
                 )
                 continue
 
+            # price_change has asset_id inside nested array, skip global throttle
+            if event_type == "price_change":
+                self._handle_price_change(event)
+                if self._on_opportunity_callback:
+                    await self._on_opportunity_callback("", event_type)
+                continue
+
             # Throttle: skip processing entirely if same token updated < 1s ago
+            # (doesn't apply to price_change which is handled above)
             now = time.time()
             last = self._last_check_time.get(asset_id, 0)
             if now - last < 1.0:
@@ -203,8 +204,6 @@ class WebSocketClient:
 
             if event_type == "book":
                 self._handle_book(event)
-            elif event_type == "price_change":
-                self._handle_price_change(event)
             elif event_type == "best_bid_ask":
                 self._handle_best_bid_ask(event)
             elif event_type == "last_trade_price":
@@ -227,40 +226,18 @@ class WebSocketClient:
         if not changes and "asset_id" in event:
             changes = [event]
 
-        logger.info(
-            "price_change_handler",
-            num_changes=len(changes),
-            first_change_keys=list(changes[0].keys()) if changes else [],
-        )
-
-        for i, change in enumerate(changes):
+        for change in changes:
             asset_id = change.get("asset_id", "")
-            best_bid = change.get("best_bid")
-            best_ask = change.get("best_ask")
-
-            logger.info(
-                "price_change_processing",
-                index=i,
-                asset_id=asset_id[:20],
-                best_bid=best_bid,
-                best_ask=best_ask,
-            )
-
             state = self.tracker.get_by_token(asset_id)
-
             if not state:
-                logger.info(
-                    "price_change_asset_not_found",
-                    asset_id=asset_id[:20],
-                    tracked_tokens=len(self.tracker.all_token_ids),
-                )
                 continue
 
+            best_bid = change.get("best_bid")
+            best_ask = change.get("best_ask")
             if best_bid is not None and best_ask is not None:
                 self.tracker.update_best_bid_ask(
                     asset_id, float(best_bid), float(best_ask)
                 )
-                logger.info("price_updated", asset_id=asset_id[:20], bid=best_bid, ask=best_ask)
 
     def _handle_best_bid_ask(self, event: dict):
         asset_id = event.get("asset_id", "")
