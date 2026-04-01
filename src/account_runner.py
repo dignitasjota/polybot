@@ -177,6 +177,8 @@ class AccountRunner:
             self.executor.reset_trades()
             if self.detector:
                 self.detector.reset_stats(new_balance=live_balance)
+                # Reiniciar price_checker después del reset para que vuelva a hacer requests
+                await self.detector._price_checker.start()
             if self.copy_trader:
                 self.copy_trader.reset_stats(new_balance=live_balance)
             # Sync live balance to strategy components
@@ -192,6 +194,8 @@ class AccountRunner:
             self.executor.reset_trades()
             if self.detector:
                 self.detector.reset_stats(new_balance=sim_balance)
+                # Reiniciar price_checker después del reset para que vuelva a hacer requests
+                await self.detector._price_checker.start()
             if self.copy_trader:
                 self.copy_trader.reset_stats(new_balance=sim_balance)
 
