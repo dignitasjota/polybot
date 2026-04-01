@@ -197,11 +197,11 @@ class WebSocketClient:
                         await self._on_opportunity_callback(token_id, event_type)
                 continue
 
-            # Throttle: skip processing entirely if same token updated < 1s ago
+            # Throttle: skip processing entirely if same token updated < 2s ago
             # (doesn't apply to price_change which is handled above)
             now = time.time()
             last = self._last_check_time.get(asset_id, 0)
-            if now - last < 1.0:
+            if now - last < 2.0:
                 continue
             self._last_check_time[asset_id] = now
 

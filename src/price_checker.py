@@ -187,11 +187,11 @@ async def _fetch_binance_open_price(
 class PriceChecker:
     """Verifies Up/Down market direction using Binance prices as proxy for Chainlink.
 
-    Prices are fetched in a background loop every 1 second and cached.
+    Prices are fetched in a background loop every 3 seconds and cached.
     check_direction() reads from cache only — zero I/O, zero latency.
     """
 
-    def __init__(self, min_buffer_pct: float = 0.10, poll_interval: float = 2.0,
+    def __init__(self, min_buffer_pct: float = 0.10, poll_interval: float = 3.0,
                  crypto_configs: dict | None = None):
         self.min_buffer_pct = min_buffer_pct
         self._poll_interval = poll_interval
