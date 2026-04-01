@@ -232,55 +232,37 @@ class PriceChecker:
 
     async def _poll_loop(self):
         """Background loop: fetch current prices for all active symbols."""
-        iteration = 0
         while self._running:
-            iteration += 1
             try:
-                if iteration % 10 == 0:  # Log every 10 iterations to avoid spam
-                    logger.debug("price_poll_iteration", iter=iteration, active_symbols=len(self._active_symbols))
                 await self._update_prices()
             except Exception as e:
-                logger.warning("price_poll_error", error=str(e), iter=iteration)
+                logger.warning("price_poll_error", error=str(e))
             await asyncio.sleep(self._poll_interval)
 
     async def _update_prices(self):
         """Fetch current prices for all active symbols in parallel."""
-        if not self._session:
-            logger.debug("update_prices_skipped_no_session")
+        if not self._session or not self._active_symbols:
             return
-        if not self._active_symbols:
-            logger.debug("update_prices_skipped_no_active_symbols")
-            return
-
-        logger.debug("update_prices_starting", active_symbols=len(self._active_symbols), pending_opens=len(self._pending_open_requests))
 
         # Fetch all current prices in parallel
         tasks = {
             symbol: asyncio.create_task(_fetch_binance_price(symbol, self._session))
             for symbol in self._active_symbols
         }
-        prices_fetched = 0
         for symbol, task in tasks.items():
             price = await task
             if price is not None:
                 self._current_prices[symbol] = price
-                prices_fetched += 1
-                logger.debug("current_price_fetched", symbol=symbol, price=price)
-
-        logger.debug("update_prices_fetch_complete", prices_fetched=prices_fetched, total_cached=len(self._current_prices))
 
         # Fetch open prices for markets whose start time has passed + 5s buffer
         now_utc = datetime.now(timezone.utc)
-        opens_processed = 0
         for cache_key, start_utc in list(self._pending_open_requests.items()):
             # Wait 5s after window start for Binance to finalize the kline
             if start_utc + timedelta(seconds=5) <= now_utc:
                 symbol = cache_key.split(":")[0]
-                logger.debug("fetching_open_price", symbol=symbol, cache_key=cache_key)
                 open_price = await _fetch_binance_open_price(symbol, start_utc, self._session)
                 if open_price is not None:
                     self._open_prices[cache_key] = open_price
-                    opens_processed += 1
                     logger.info(
                         "binance_open_price_fetched",
                         symbol=symbol,
@@ -294,18 +276,12 @@ class PriceChecker:
                         fallback_price = self._current_prices.get(symbol)
                         if fallback_price is not None:
                             self._open_prices[cache_key] = fallback_price
-                            opens_processed += 1
                             logger.warning(
                                 "binance_open_price_fallback",
                                 symbol=symbol,
                                 fallback_price=fallback_price,
                             )
                             del self._pending_open_requests[cache_key]
-                    else:
-                        logger.debug("open_price_fetch_deferred", symbol=symbol, cache_key=cache_key, seconds_until_5s=int((start_utc + timedelta(seconds=5) - now_utc).total_seconds()))
-
-        if opens_processed > 0:
-            logger.debug("open_prices_processed", count=opens_processed, total_cached=len(self._open_prices))
 
         self._last_update = time.time()
 
@@ -331,15 +307,11 @@ class PriceChecker:
 
         # Register symbol for background polling
         self._active_symbols.add(symbol)
-        logger.debug("symbol_registered_for_polling", symbol=symbol, active_symbols=len(self._active_symbols))
 
         # Get current price from cache first
         current_price = self._current_prices.get(symbol)
         if current_price is None:
-            logger.debug("price_not_in_cache", symbol=symbol, symbols_available=len(self._current_prices))
             return None
-
-        logger.debug("current_price_available", symbol=symbol, price=current_price)
 
         # Get open price from cache (real Binance kline at window start)
         cache_key = f"{symbol}:{int(start_utc.timestamp())}"
@@ -348,23 +320,8 @@ class PriceChecker:
             # Register for background fetching (will fetch once start_utc + 5s has passed)
             if cache_key not in self._pending_open_requests:
                 self._pending_open_requests[cache_key] = start_utc
-                logger.info(
-                    "open_price_requested",
-                    symbol=symbol,
-                    cache_key=cache_key,
-                    pending_count=len(self._pending_open_requests),
-                )
-            else:
-                logger.debug("open_price_already_pending", cache_key=cache_key)
             # Don't confirm anything yet — wait for real open price
             return None
-
-        logger.info(
-            "open_price_available_in_cache",
-            symbol=symbol,
-            open_price=open_price,
-            cache_key=cache_key,
-        )
 
         # Calculate direction (as decimal, e.g. 0.05 = 5%)
         change_pct = (current_price - open_price) / open_price
