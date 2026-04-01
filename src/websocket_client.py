@@ -170,13 +170,12 @@ class WebSocketClient:
             event_type = event.get("event_type", "")
             asset_id = event.get("asset_id", "")
 
-            # DEBUG: Log all event types received
-            logger.debug(
+            # Log all event types received
+            logger.info(
                 "ws_event_received",
                 event_type=event_type,
                 asset_id=asset_id[:20] if asset_id else "",
-                has_best_bid=bool(event.get("best_bid")),
-                has_best_ask=bool(event.get("best_ask")),
+                keys=list(event.keys())[:5],
             )
 
             # Resolution events are always processed immediately
