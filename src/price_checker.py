@@ -254,14 +254,6 @@ class PriceChecker:
             if price is not None:
                 self._current_prices[symbol] = price
 
-        # Fetch any pending open prices
-        for cache_key, start_utc in list(self._pending_open_requests.items()):
-            symbol = cache_key.split(":")[0]
-            open_price = await _fetch_binance_open_price(symbol, start_utc, self._session)
-            if open_price is not None:
-                self._open_prices[cache_key] = open_price
-                del self._pending_open_requests[cache_key]
-
         self._last_update = time.time()
 
     def check_direction(self, question: str) -> dict | None:
@@ -287,18 +279,19 @@ class PriceChecker:
         # Register symbol for background polling
         self._active_symbols.add(symbol)
 
+        # Get current price from cache first
+        current_price = self._current_prices.get(symbol)
+        if current_price is None:
+            return None
+
         # Get open price from cache
         cache_key = f"{symbol}:{int(start_utc.timestamp())}"
         open_price = self._open_prices.get(cache_key)
         if open_price is None:
-            # Request it for next poll cycle
-            self._pending_open_requests[cache_key] = start_utc
-            return None
-
-        # Get current price from cache
-        current_price = self._current_prices.get(symbol)
-        if current_price is None:
-            return None
+            # First time seeing this market: use current price as open price baseline
+            # This allows direction detection to start immediately without waiting for historical data
+            open_price = current_price
+            self._open_prices[cache_key] = open_price
 
         # Calculate direction (as decimal, e.g. 0.05 = 5%)
         change_pct = (current_price - open_price) / open_price
