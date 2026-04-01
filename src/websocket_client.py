@@ -233,8 +233,19 @@ class WebSocketClient:
             first_change_keys=list(changes[0].keys()) if changes else [],
         )
 
-        for change in changes:
+        for i, change in enumerate(changes):
             asset_id = change.get("asset_id", "")
+            best_bid = change.get("best_bid")
+            best_ask = change.get("best_ask")
+
+            logger.info(
+                "price_change_processing",
+                index=i,
+                asset_id=asset_id[:20],
+                best_bid=best_bid,
+                best_ask=best_ask,
+            )
+
             state = self.tracker.get_by_token(asset_id)
 
             if not state:
@@ -245,19 +256,11 @@ class WebSocketClient:
                 )
                 continue
 
-            best_bid = change.get("best_bid")
-            best_ask = change.get("best_ask")
-            logger.info(
-                "price_change_update",
-                asset_id=asset_id[:20],
-                best_bid=best_bid,
-                best_ask=best_ask,
-            )
             if best_bid is not None and best_ask is not None:
                 self.tracker.update_best_bid_ask(
                     asset_id, float(best_bid), float(best_ask)
                 )
-                logger.info("price_updated", asset_id=asset_id[:20])
+                logger.info("price_updated", asset_id=asset_id[:20], bid=best_bid, ask=best_ask)
 
     def _handle_best_bid_ask(self, event: dict):
         asset_id = event.get("asset_id", "")
