@@ -89,7 +89,7 @@ class ClosingArbitrageDetector:
         self._on_redeem_cb = None      # async callback(condition_id: str) for auto-redeem
         # Throttle repeated check() calls for the same token_id (prevents thousands of calls/sec)
         self._last_check_time: dict[str, float] = {}  # token_id -> timestamp
-        self._check_throttle_ms = 300  # Skip re-check for same token within 300ms
+        self._check_throttle_ms = 50  # Skip re-check for same token within 50ms (catch price movements)
         self._stats = {
             "total_scans": 0,
             "opportunities_found": 0,
