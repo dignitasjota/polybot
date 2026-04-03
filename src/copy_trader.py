@@ -759,7 +759,7 @@ class CopyTrader:
         ]
 
     def export_full_report(self) -> dict:
-        """Export complete report for JSON analysis."""
+        """Export compact report for JSON analysis."""
         bets = self._all_bets
         settled = [b for b in bets if b.outcome != "pending"]
         wins = [b for b in settled if b.outcome == "win"]
@@ -772,10 +772,9 @@ class CopyTrader:
         for b in sorted(settled, key=lambda x: x.resolved_at):
             running = round(running + b.actual_pnl, 2)
             balance_history.append({
-                "timestamp": b.resolved_at,
-                "question": b.question[:60],
+                "question": b.question[:70],
                 "outcome": b.outcome,
-                "pnl": b.actual_pnl,
+                "pnl": round(b.actual_pnl, 2),
                 "balance": running,
             })
 
@@ -820,19 +819,15 @@ class CopyTrader:
             },
             "bets": [
                 {
-                    "condition_id": b.condition_id,
-                    "question": b.question,
-                    "token_side": b.token_side,
-                    "price": b.price,
-                    "bet_size": b.bet_size,
-                    "potential_profit": b.potential_profit,
-                    "wallet_source": b.wallet_source,
-                    "timestamp": b.timestamp,
+                    "question": b.question[:70],
+                    "side": b.token_side,
+                    "price": round(b.price, 4),
+                    "bet": round(b.bet_size, 2),
+                    "wallet": b.wallet_source[:10],  # Truncate wallet address
                     "outcome": b.outcome,
-                    "actual_pnl": b.actual_pnl,
-                    "resolved_at": b.resolved_at,
-                    "duration_seconds": b.duration_seconds,
-                    "is_arb_boost": b.is_arb_boost,
+                    "pnl": round(b.actual_pnl, 2),
+                    "duration_s": round(b.duration_seconds, 1),
+                    "arb_boost": b.is_arb_boost,
                 }
                 for b in bets
             ],

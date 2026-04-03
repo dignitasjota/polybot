@@ -545,6 +545,11 @@ class Executor:
             logger.error("executor_not_initialized")
             return None
 
+        # In live mode, refresh balance before every trade so risk checks
+        # use the real Polymarket balance (catches manual bets, deposits, withdrawals).
+        if self.mode == ExecutionMode.LIVE:
+            await self._refresh_balance()
+
         # Risk checks
         if not self._check_risk(opp):
             return None
@@ -693,7 +698,7 @@ class Executor:
                 trade.status = OrderStatus.LIVE
                 # Track for monitoring
                 self._pending_orders[trade.order_id] = trade
-                # Deduct from live balance optimistically
+                # Deduct optimistically now, real refresh follows async
                 if self._live_balance is not None:
                     self._live_balance -= opp.suggested_bet
                 logger.info(
@@ -705,6 +710,8 @@ class Executor:
                     cost=f"${opp.suggested_bet:.2f}",
                     balance=f"${self._live_balance:.2f}" if self._live_balance is not None else "?",
                 )
+                # Refresh real balance async after order settles on-chain
+                asyncio.create_task(self._refresh_balance_delayed(delay_seconds=5))
             else:
                 trade.status = OrderStatus.FAILED
                 trade.error = str(response)
@@ -762,6 +769,8 @@ class Executor:
                     # Recalculate actual cost based on fill
                     trade.cost_usd = round(size_matched * trade.price, 2)
                     to_remove.append(order_id)
+                    # Refresh real balance after fill
+                    await self._refresh_balance()
                     logger.info(
                         "order_matched",
                         order_id=order_id,
@@ -774,9 +783,8 @@ class Executor:
                     trade.status = OrderStatus.CANCELLED
                     trade.error = f"Order {status.lower()} by exchange"
                     to_remove.append(order_id)
-                    # Refund balance
-                    if self._live_balance is not None:
-                        self._live_balance += trade.cost_usd
+                    # Refresh real balance instead of optimistic refund
+                    await self._refresh_balance()
                     logger.info(
                         "order_cancelled_external",
                         order_id=order_id,
@@ -804,9 +812,8 @@ class Executor:
             self._client.cancel(order_id)
             trade.status = OrderStatus.CANCELLED
             trade.error = f"Timed out after {ORDER_TIMEOUT}s"
-            # Refund balance
-            if self._live_balance is not None:
-                self._live_balance += trade.cost_usd
+            # Refresh real balance instead of optimistic refund
+            await self._refresh_balance()
             logger.info(
                 "order_cancelled_timeout",
                 order_id=order_id,

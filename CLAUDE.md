@@ -85,12 +85,120 @@ Se cambia desde el panel web (Settings). Al cambiar de modo:
 
 ## Credenciales y tipos de wallet
 
-Polymarket soporta dos tipos de wallet, y el bot debe configurarse acorde:
+Polymarket soporta tres tipos de wallet. El bot debe configurarse con el tipo correcto según cómo accedes a Polymarket:
 
-| Tipo | `WALLET_TYPE` | `signature_type` | Cómo obtener private key |
-|------|---------------|-------------------|--------------------------|
-| **Magic Link** (email login) | `magic_link` (default) | 1 (POLY_PROXY) | Polymarket → Settings → Advanced → Export Private Key |
-| **MetaMask** (wallet externa) | `metamask` | 0 (EOA) | Exportar desde MetaMask |
+| Tipo | `WALLET_TYPE` | `signature_type` | Descripción |
+|------|---------------|-------------------|-------------|
+| **Magic Link** | `magic_link` (default) | 1 (POLY_PROXY) | Login con email. Polymarket crea un proxy wallet. |
+| **MetaMask EOA** | `metamask` | 0 (EOA) | Wallet externa SIN proxy. El propio wallet firma y tiene los fondos. |
+| **MetaMask + Gnosis Safe** | `2` o `gnosis_safe` | 2 (GNOSIS_SAFE) | MetaMask conectado a Polymarket. Polymarket crea un proxy Gnosis Safe. **Recomendado para MetaMask.** |
+
+### Cómo saber qué tipo tengo
+
+- **Magic Link**: Te logueaste en Polymarket con email (Google, etc.)
+- **MetaMask + Gnosis Safe (tipo 2)**: Te logueaste con MetaMask y depositaste fondos a través de la UI de Polymarket. En Polymarket → Settings → Account ves una dirección proxy diferente a la de MetaMask. **Este es el caso más común con MetaMask.**
+- **MetaMask EOA (tipo 0)**: Usas MetaMask directamente sin proxy. Los fondos están en tu wallet de MetaMask, no en un proxy. Raro en la práctica.
+
+> **Regla simple**: Si en Polymarket Settings ves una dirección diferente a la de tu wallet de MetaMask, usa tipo `2` (GNOSIS_SAFE). Si es la misma, usa tipo `0` (EOA).
+
+### Configuración por tipo de cuenta
+
+#### Tipo 1: Magic Link (email login)
+
+**Dónde obtener los datos en Polymarket:**
+- **Private Key**: Settings → Advanced → Export Private Key
+- **Proxy Address**: Settings → Account (la dirección que ves ahí)
+- **API Key**: Settings → Claves API del relayer → `relayer_api_key`
+- **Secret/Passphrase**: Se auto-derivan de la private key (no hace falta configurarlos)
+
+**Variables de entorno:**
+```yaml
+- WALLET_TYPE=magic_link              # o "1"
+- PRIVATE_KEY=0x...                   # Exportada desde Polymarket Settings
+- POLYMARKET_PROXY_ADDRESS=0x...      # Dirección de Settings → Account
+- POLYMARKET_API_KEY=...              # Opcional: relayer_api_key (se auto-deriva si vacío)
+```
+
+**config.toml:**
+```toml
+[accounts.credentials]
+private_key_env = "PRIVATE_KEY"
+signature_type_env = "WALLET_TYPE"
+proxy_address_env = "POLYMARKET_PROXY_ADDRESS"
+api_key_env = "POLYMARKET_API_KEY"
+```
+
+---
+
+#### Tipo 2: MetaMask + Gnosis Safe (recomendado para MetaMask)
+
+**Dónde obtener los datos en Polymarket:**
+- **Private Key**: Exportar desde MetaMask → Account Details → Export Private Key (debe tener 64 caracteres hex después de `0x`)
+- **Proxy Address**: Polymarket → Settings → Perfil → la dirección que aparece (puede decir "solo para uso de API")
+- **API Key**: Settings → Claves API del relayer → `relayer_api_key`
+- **Builder keys**: Settings → Códigos del constructor → `builder_api_key`, `builder_secret`, `builder_passphrase`
+- **Secret/Passphrase**: Se auto-derivan de la private key (no hace falta configurarlos)
+
+**Variables de entorno:**
+```yaml
+- WALLET_TYPE=2                       # GNOSIS_SAFE
+- PRIVATE_KEY=0x...                   # Exportada desde MetaMask (64 chars hex)
+- POLYMARKET_PROXY_ADDRESS=0x...      # Dirección del Perfil en Polymarket
+- POLYMARKET_API_KEY=...              # relayer_api_key de Polymarket Settings
+- BUILDER_API_KEY=...                 # Del "Códigos del constructor"
+- BUILDER_SECRET=...                  # Del "Códigos del constructor"
+- BUILDER_PASSPHRASE=...              # Del "Códigos del constructor"
+```
+
+**config.toml:**
+```toml
+[accounts.credentials]
+private_key_env = "PRIVATE_KEY"
+signature_type_env = "WALLET_TYPE"
+proxy_address_env = "POLYMARKET_PROXY_ADDRESS"
+api_key_env = "POLYMARKET_API_KEY"
+builder_key_env = "BUILDER_API_KEY"
+builder_secret_env = "BUILDER_SECRET"
+builder_passphrase_env = "BUILDER_PASSPHRASE"
+```
+
+> **IMPORTANTE**: Con MetaMask, los fondos están en el proxy de Polymarket, NO en tu wallet de MetaMask. Si en MetaMask ves $0 USDC pero en Polymarket ves saldo, es correcto — el USDC está en el proxy.
+
+---
+
+#### Tipo 0: MetaMask EOA (sin proxy)
+
+**Solo usar si NO tienes proxy en Polymarket** (la dirección en Polymarket Settings es la misma que en MetaMask).
+
+**Variables de entorno:**
+```yaml
+- WALLET_TYPE=0                       # o "metamask"
+- PRIVATE_KEY=0x...                   # Exportada desde MetaMask
+- POLYMARKET_API_KEY=...              # relayer_api_key
+- BUILDER_API_KEY=...                 # Del "Códigos del constructor"
+- BUILDER_SECRET=...                  # Del "Códigos del constructor"
+- BUILDER_PASSPHRASE=...              # Del "Códigos del constructor"
+```
+
+> **Nota**: Con EOA, el funder es tu propia dirección MetaMask. No se necesita `POLYMARKET_PROXY_ADDRESS`. Necesitas POL (MATIC) en tu wallet para pagar gas.
+
+---
+
+### Resumen rápido de variables por tipo
+
+| Variable | Magic Link (1) | MetaMask+Safe (2) | MetaMask EOA (0) |
+|----------|:-:|:-:|:-:|
+| `WALLET_TYPE` | `magic_link` | `2` | `metamask` |
+| `PRIVATE_KEY` | ✅ (de Polymarket) | ✅ (de MetaMask) | ✅ (de MetaMask) |
+| `POLYMARKET_PROXY_ADDRESS` | ✅ (Settings) | ✅ (Perfil) | ❌ |
+| `POLYMARKET_API_KEY` | Opcional* | Opcional* | Opcional* |
+| `POLYMARKET_SECRET` | Auto-deriva* | Auto-deriva* | Auto-deriva* |
+| `POLYMARKET_PASSPHRASE` | Auto-deriva* | Auto-deriva* | Auto-deriva* |
+| `BUILDER_API_KEY` | ❌ | ✅ | ✅ |
+| `BUILDER_SECRET` | ❌ | ✅ | ✅ |
+| `BUILDER_PASSPHRASE` | ❌ | ✅ | ✅ |
+
+\* Se auto-derivan de la private key si no se configuran manualmente.
 
 ### Flujo de credenciales
 
@@ -109,6 +217,7 @@ class CredentialsConfig:
     api_secret_env: str = "POLYMARKET_SECRET"
     passphrase_env: str = "POLYMARKET_PASSPHRASE"
     signature_type_env: str = "WALLET_TYPE"     # env var para tipo de wallet
+    proxy_address_env: str = "POLYMARKET_PROXY_ADDRESS"
     signature_type: int = -1                     # -1=auto-detect desde env var
 ```
 
@@ -116,7 +225,7 @@ Auto-detección en `__post_init__`:
 - Lee `signature_type_env` (e.g. `COPY_WALLET_TYPE`)
 - Si vacío, fallback a `WALLET_TYPE`
 - Si vacío, default `magic_link` → `signature_type=1`
-- Valores aceptados: `magic_link`/`poly_proxy`/`1` → 1, `metamask`/`eoa`/`0` → 0
+- Valores aceptados: `magic_link`/`poly_proxy`/`1` → 1, `gnosis`/`gnosis_safe`/`safe`/`2` → 2, `metamask`/`eoa`/`0` → 0
 
 ---
 
@@ -316,41 +425,65 @@ environment:
   - SESSION_SECRET=                   # Secreto para cookies (generado si vacío)
 
   # Tipo de wallet — afecta cómo se firma contra la API CLOB
-  - WALLET_TYPE=magic_link            # "magic_link" (default) o "metamask"
+  # Valores: "magic_link" (default), "metamask", "2" (gnosis_safe)
+  - WALLET_TYPE=2
 
   # Credenciales cuenta directional
-  - PRIVATE_KEY=0xabc123...           # Private key del wallet
-  - POLYMARKET_API_KEY=               # Opcional: se auto-deriva de la private key
+  - PRIVATE_KEY=0x...                 # Private key (MetaMask o Magic Link)
+  - POLYMARKET_PROXY_ADDRESS=0x...    # Proxy address (de Polymarket Settings/Perfil)
+  - POLYMARKET_API_KEY=               # Opcional: relayer_api_key (se auto-deriva)
   - POLYMARKET_SECRET=                # Opcional: se auto-deriva de la private key
   - POLYMARKET_PASSPHRASE=            # Opcional: se auto-deriva de la private key
 
+  # Builder credentials (requerido para MetaMask, de "Códigos del constructor")
+  - BUILDER_API_KEY=
+  - BUILDER_SECRET=
+  - BUILDER_PASSPHRASE=
+
   # Credenciales cuenta copy-trade (puede ser el mismo wallet u otro)
-  - COPY_PRIVATE_KEY=0xabc123...      # Private key del wallet copy
+  - COPY_PRIVATE_KEY=0x...            # Private key del wallet copy
   - COPY_API_KEY=                     # Opcional: se auto-deriva
   - COPY_SECRET=                      # Opcional: se auto-deriva
   - COPY_PASSPHRASE=                  # Opcional: se auto-deriva
   - COPY_WALLET_TYPE=                 # Opcional: hereda de WALLET_TYPE si vacío
+  - COPY_PROXY_ADDRESS=               # Proxy address de la cuenta copy (si aplica)
 ```
 
 **Mínimo requerido para operar en live:**
 - `PRIVATE_KEY` y/o `COPY_PRIVATE_KEY` (según qué cuentas usen live)
-- `WALLET_TYPE` configurado correctamente según cómo te logueas en Polymarket
+- `WALLET_TYPE` configurado correctamente (ver tabla de tipos arriba)
+- `POLYMARKET_PROXY_ADDRESS` si usas tipo 1 (Magic Link) o tipo 2 (Gnosis Safe)
+- `BUILDER_API_KEY/SECRET/PASSPHRASE` si usas tipo 0 o 2 (MetaMask)
 
 **Ejemplos:**
 
 ```yaml
-# Ejemplo 1: Misma cuenta Magic Link para ambas estrategias
+# Ejemplo 1: MetaMask + Gnosis Safe (caso más común con MetaMask)
+- WALLET_TYPE=2
+- PRIVATE_KEY=0xaaaa...              # Exportada desde MetaMask
+- POLYMARKET_PROXY_ADDRESS=0xbbbb... # Dirección del Perfil en Polymarket
+- POLYMARKET_API_KEY=019d52b5-...    # relayer_api_key de Polymarket Settings
+- BUILDER_API_KEY=...                # De "Códigos del constructor"
+- BUILDER_SECRET=...                 # De "Códigos del constructor"
+- BUILDER_PASSPHRASE=...             # De "Códigos del constructor"
+
+# Ejemplo 2: Magic Link (email login)
 - WALLET_TYPE=magic_link
-- PRIVATE_KEY=0x1234abcd...    # Exportada desde Polymarket → Settings → Export Private Key
-- COPY_PRIVATE_KEY=0x1234abcd... # Misma key
+- PRIVATE_KEY=0x1234abcd...          # Exportada desde Polymarket → Settings → Export Private Key
+- POLYMARKET_PROXY_ADDRESS=0xcccc... # Dirección de Settings → Account
 
-# Ejemplo 2: Directional con MetaMask, Copy con Magic Link
-- WALLET_TYPE=metamask
-- PRIVATE_KEY=0xaaaa...        # Exportada desde MetaMask
-- COPY_PRIVATE_KEY=0xbbbb...   # Exportada desde Polymarket Settings
-- COPY_WALLET_TYPE=magic_link  # Override solo para la cuenta copy
+# Ejemplo 3: Directional con MetaMask (Gnosis Safe), Copy con Magic Link
+- WALLET_TYPE=2
+- PRIVATE_KEY=0xaaaa...              # MetaMask
+- POLYMARKET_PROXY_ADDRESS=0xbbbb... # Proxy de Polymarket
+- BUILDER_API_KEY=...
+- BUILDER_SECRET=...
+- BUILDER_PASSPHRASE=...
+- COPY_PRIVATE_KEY=0xcccc...         # Magic Link (otra cuenta)
+- COPY_WALLET_TYPE=magic_link
+- COPY_PROXY_ADDRESS=0xdddd...       # Proxy de la cuenta copy
 
-# Ejemplo 3: Solo paper trading (no requiere credenciales)
+# Ejemplo 4: Solo paper trading (no requiere credenciales)
 - WALLET_TYPE=magic_link
 # No se necesitan PRIVATE_KEY ni COPY_PRIVATE_KEY en paper mode
 ```

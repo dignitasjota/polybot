@@ -909,25 +909,22 @@ class ClosingArbitrageDetector:
         return stats_by_type
 
     def export_full_report(self) -> dict:
-        """Export complete report with summary analytics for strategy evaluation."""
-        opportunities = self.export_opportunities()
+        """Export compact report with summary analytics for strategy evaluation."""
         stats = self.get_stats()
 
         # Use _bet_placed for P&L calculations (one bet per market+side)
         bets = [
             {
-                "condition_id": o.condition_id,
-                "question": o.question,
-                "token_side": o.token_side,
-                "token_id": o.token_id,
-                "token_price": o.token_price,
-                "margin_net": o.margin_net,
-                "suggested_bet": o.suggested_bet,
+                "question": o.question[:70],
+                "side": o.token_side,
+                "price": round(o.token_price, 4),
+                "margin": round(o.margin_net, 4),
+                "bet": round(o.suggested_bet, 2),
                 "outcome": o.outcome,
-                "actual_pnl": o.actual_pnl,
-                "resolved_at": o.resolved_at,
-                "duration_seconds": o.duration_seconds,
-                "hours_remaining": o.hours_remaining,
+                "pnl": round(o.actual_pnl, 2),
+                "duration_s": round(o.duration_seconds, 1),
+                "hours_left": round(o.hours_remaining, 3),
+                "strategy": o.strategy_type,
             }
             for o in self._bet_placed.values()
         ]
@@ -937,41 +934,19 @@ class ClosingArbitrageDetector:
         losses = [b for b in settled_bets if b["outcome"] == "loss"]
         pending_bets = [b for b in bets if b["outcome"] == "pending"]
 
-        # Per-market breakdown (from bets only)
-        markets: dict[str, dict] = {}
-        for b in bets:
-            key = b["condition_id"]
-            if key not in markets:
-                markets[key] = {
-                    "question": b["question"],
-                    "bets": 0,
-                    "wins": 0,
-                    "losses": 0,
-                    "pending": 0,
-                    "total_pnl": 0.0,
-                    "total_bet": 0.0,
-                }
-            m = markets[key]
-            m["bets"] += 1
-            if b["outcome"] == "win":
-                m["wins"] += 1
-            elif b["outcome"] == "loss":
-                m["losses"] += 1
-            else:
-                m["pending"] += 1
-            m["total_pnl"] = round(m["total_pnl"] + b["actual_pnl"], 2)
-            m["total_bet"] = round(m["total_bet"] + b["suggested_bet"], 2)
-
         # Balance history (chronological P&L curve from settled bets)
         balance_history = []
         running_balance = self._starting_balance
-        for b in sorted(settled_bets, key=lambda x: x["resolved_at"]):
-            running_balance = round(running_balance + b["actual_pnl"], 2)
+        settled_opps = sorted(
+            [o for o in self._bet_placed.values() if o.outcome != "pending"],
+            key=lambda o: o.resolved_at,
+        )
+        for o in settled_opps:
+            running_balance = round(running_balance + o.actual_pnl, 2)
             balance_history.append({
-                "timestamp": b["resolved_at"],
-                "question": b["question"][:60],
-                "outcome": b["outcome"],
-                "pnl": b["actual_pnl"],
+                "question": o.question[:70],
+                "outcome": o.outcome,
+                "pnl": round(o.actual_pnl, 2),
                 "balance": running_balance,
             })
 
@@ -986,16 +961,16 @@ class ClosingArbitrageDetector:
                 max_drawdown = dd
 
         # Duration stats (from bets)
-        durations = [b["duration_seconds"] for b in bets if b["duration_seconds"] > 0]
+        durations = [b["duration_s"] for b in bets if b["duration_s"] > 0]
         avg_duration = sum(durations) / len(durations) if durations else 0
         min_duration = min(durations) if durations else 0
         max_duration = max(durations) if durations else 0
 
         # Average margins (from bets)
-        avg_margin_net = sum(b["margin_net"] for b in bets) / len(bets) if bets else 0
-        avg_margin_wins = sum(b["margin_net"] for b in wins) / len(wins) if wins else 0
-        avg_margin_losses = sum(b["margin_net"] for b in losses) / len(losses) if losses else 0
-        avg_price = sum(b["token_price"] for b in bets) / len(bets) if bets else 0
+        avg_margin_net = sum(b["margin"] for b in bets) / len(bets) if bets else 0
+        avg_margin_wins = sum(b["margin"] for b in wins) / len(wins) if wins else 0
+        avg_margin_losses = sum(b["margin"] for b in losses) / len(losses) if losses else 0
+        avg_price = sum(b["price"] for b in bets) / len(bets) if bets else 0
 
         return {
             "exported_at": time.time(),
@@ -1014,30 +989,26 @@ class ClosingArbitrageDetector:
                 "total_pnl": stats["simulated_pnl"],
                 "roi_pct": stats["roi_pct"],
                 "total_bets": len(bets),
-                "total_price_updates": len(opportunities),
                 "settled": len(settled_bets),
                 "wins": len(wins),
                 "losses": len(losses),
                 "pending": len(pending_bets),
                 "win_rate_pct": round(len(wins) / len(settled_bets) * 100, 1) if settled_bets else 0,
-                "avg_win_pnl": round(sum(b["actual_pnl"] for b in wins) / len(wins), 2) if wins else 0,
-                "avg_loss_pnl": round(sum(b["actual_pnl"] for b in losses) / len(losses), 2) if losses else 0,
-                "best_trade": round(max((b["actual_pnl"] for b in settled_bets), default=0), 2),
-                "worst_trade": round(min((b["actual_pnl"] for b in settled_bets), default=0), 2),
+                "avg_win_pnl": round(sum(b["pnl"] for b in wins) / len(wins), 2) if wins else 0,
+                "avg_loss_pnl": round(sum(b["pnl"] for b in losses) / len(losses), 2) if losses else 0,
+                "best_trade": round(max((b["pnl"] for b in settled_bets), default=0), 2),
+                "worst_trade": round(min((b["pnl"] for b in settled_bets), default=0), 2),
                 "max_drawdown_pct": round(max_drawdown, 2),
                 "avg_token_price": round(avg_price, 4),
                 "avg_margin_net": round(avg_margin_net, 4),
                 "avg_margin_wins": round(avg_margin_wins, 4),
                 "avg_margin_losses": round(avg_margin_losses, 4),
-                "total_wagered": round(sum(b["suggested_bet"] for b in settled_bets), 2),
-                "unique_markets": len(markets),
+                "total_wagered": round(sum(b["bet"] for b in settled_bets), 2),
                 "avg_duration_seconds": round(avg_duration, 1),
                 "min_duration_seconds": round(min_duration, 1),
                 "max_duration_seconds": round(max_duration, 1),
             },
-            "by_strategy": self.get_stats_by_strategy(),  # Separate stats for Up/Down vs Closing Arb
+            "by_strategy": self.get_stats_by_strategy(),
             "balance_history": balance_history,
-            "by_market": list(markets.values()),
             "bets": bets,
-            "opportunities": opportunities,
         }
