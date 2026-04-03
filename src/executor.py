@@ -206,22 +206,23 @@ class Executor:
     def _init_relayer(self):
         """Initialize Builder Relayer for gasless auto-redeem of winning positions.
 
-        For Magic Link (POLY_PROXY): uses POLYMARKET_PROXY_ADDRESS
+        For Magic Link/Gnosis Safe (POLY_PROXY/GNOSIS_SAFE): uses POLYMARKET_PROXY_ADDRESS
         For MetaMask (EOA): uses BUILDER_API_KEY/SECRET/PASSPHRASE credentials
         """
         sig_type = self._credentials.signature_type
         private_key = self._credentials.get_private_key()
 
-        # For Magic Link: use proxy address
-        if sig_type == 1:
+        # For proxy-based wallets (Magic Link or Gnosis Safe): use proxy address
+        if sig_type in (1, 2):
             proxy_address = self._credentials.get_proxy_address()
+            wallet_label = "gnosis_safe" if sig_type == 2 else "magic_link"
             if not proxy_address:
                 logger.info("relayer_not_configured",
-                           wallet_type="magic_link",
+                           wallet_type=wallet_label,
                            msg="POLYMARKET_PROXY_ADDRESS not set, auto-redeem disabled")
                 return
-            logger.info("relayer_initializing", wallet_type="magic_link", proxy=proxy_address[:10] + "...")
-        # For MetaMask: use builder credentials
+            logger.info("relayer_initializing", wallet_type=wallet_label, proxy=proxy_address[:10] + "...")
+        # For MetaMask EOA: use builder credentials
         else:
             builder_creds = self._credentials.get_builder_creds()
             if not builder_creds:
@@ -235,11 +236,11 @@ class Executor:
             from py_builder_relayer_client.client import RelayClient
             from py_builder_signing_sdk.config import BuilderConfig, BuilderApiKeyCreds
 
-            if sig_type == 1:
-                # Magic Link: proxy address is built-in
+            if sig_type in (1, 2):
+                # Proxy-based (Magic Link or Gnosis Safe): proxy address is built-in
                 builder_config = BuilderConfig()
             else:
-                # MetaMask: use builder credentials
+                # MetaMask EOA: use builder credentials
                 api_key, api_secret, api_passphrase = builder_creds
                 builder_config = BuilderConfig(
                     local_builder_creds=BuilderApiKeyCreds(
@@ -256,14 +257,16 @@ class Executor:
                 builder_config=builder_config,
             )
             self._redeem_available = True
-            wallet_label = "Magic Link (via proxy)" if sig_type == 1 else "MetaMask (via Builder)"
+            wallet_labels = {0: "MetaMask (via Builder)", 1: "Magic Link (via proxy)", 2: "Gnosis Safe (via proxy)"}
+            wallet_label = wallet_labels.get(sig_type, f"unknown ({sig_type})")
             logger.info("relayer_initialized",
                        wallet_type=wallet_label,
                        msg="Builder Relayer ready for auto-redeem")
         except ImportError:
             logger.warning("relayer_import_error", msg="py-builder-relayer-client not installed")
         except Exception as e:
-            logger.warning("relayer_init_error", wallet_type="magic_link" if sig_type == 1 else "metamask", error=str(e))
+            wt = {0: "metamask", 1: "magic_link", 2: "gnosis_safe"}.get(sig_type, "unknown")
+            logger.warning("relayer_init_error", wallet_type=wt, error=str(e))
 
     async def redeem_position(self, condition_id: str) -> bool:
         """Redeem a winning position.
@@ -276,11 +279,12 @@ class Executor:
         """
         sig_type = self._credentials.signature_type
 
+        wallet_labels = {0: "metamask", 1: "magic_link", 2: "gnosis_safe"}
         logger.info(
             "redeem_callback_invoked",
             condition_id=condition_id[:20] + "...",
             mode=self.mode.value,
-            wallet_type="magic_link" if sig_type == 1 else "metamask",
+            wallet_type=wallet_labels.get(sig_type, f"unknown({sig_type})"),
             relayer_available=self._redeem_available,
         )
 
@@ -292,19 +296,19 @@ class Executor:
             )
             return False
 
-        # Magic Link: MUST use Builder Relayer (positions are under proxy)
-        if sig_type == 1:
+        # Proxy-based (Magic Link / Gnosis Safe): MUST use Builder Relayer (positions are under proxy)
+        if sig_type in (1, 2):
             if self._redeem_available and self._relayer:
                 return await self._redeem_via_builder(condition_id)
             else:
                 logger.error(
                     "redeem_impossible",
                     condition_id=condition_id[:20] + "...",
-                    reason="Magic Link requires Builder Relayer, but it's not configured",
+                    reason="Proxy wallet requires Builder Relayer, but it's not configured",
                 )
                 return False
 
-        # MetaMask: try Builder Relayer first, fallback to direct CLOB
+        # MetaMask EOA: try Builder Relayer first, fallback to direct CLOB
         elif sig_type == 0:
             if self._redeem_available and self._relayer:
                 if await self._redeem_via_builder(condition_id):

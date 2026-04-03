@@ -100,8 +100,8 @@ class CredentialsConfig:
     api_secret_env: str = "POLYMARKET_SECRET"
     passphrase_env: str = "POLYMARKET_PASSPHRASE"
     signature_type_env: str = "WALLET_TYPE"  # env var name for wallet type
-    proxy_address_env: str = "POLYMARKET_PROXY_ADDRESS"  # env var for proxy address (Magic Link)
-    signature_type: int = -1  # -1=auto-detect from env var, 0=EOA (MetaMask), 1=POLY_PROXY (Magic Link)
+    proxy_address_env: str = "POLYMARKET_PROXY_ADDRESS"  # env var for proxy/funder address
+    signature_type: int = -1  # -1=auto-detect from env var, 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE
 
     def __post_init__(self):
         if self.signature_type == -1:
@@ -112,6 +112,8 @@ class CredentialsConfig:
             wallet_type = wallet_type.lower().strip()
             if wallet_type in ("metamask", "eoa", "0"):
                 self.signature_type = 0
+            elif wallet_type in ("gnosis", "gnosis_safe", "safe", "2"):
+                self.signature_type = 2
             else:
                 self.signature_type = 1  # magic_link / poly_proxy / default
 
