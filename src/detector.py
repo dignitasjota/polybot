@@ -87,9 +87,9 @@ class ClosingArbitrageDetector:
         )
         self._on_opportunity_cb = None  # async callback(Opportunity) for executor
         self._on_redeem_cb = None      # async callback(condition_id: str) for auto-redeem
-        # Throttle repeated check() calls for the same token_id (prevents thousands of calls/sec)
-        self._last_check_time: dict[str, float] = {}  # token_id -> timestamp
-        self._check_throttle_ms = 50  # Skip re-check for same token within 50ms (catch price movements)
+        # Dirty flag: only re-check a token if its price moved significantly
+        self._last_check_price: dict[str, float] = {}  # token_id -> last checked price
+        self._dirty_threshold_pct = 0.5  # Min price change (%) to trigger re-check
         self._stats = {
             "total_scans": 0,
             "opportunities_found": 0,
@@ -139,7 +139,7 @@ class ClosingArbitrageDetector:
         self._settled_conditions.clear()
         self._last_logged.clear()
         # Don't clear _last_log_time - keep throttle state to avoid spam on mode switch
-        self._last_check_time.clear()  # Clear check throttle for fresh checks in new mode
+        self._last_check_price.clear()  # Clear dirty flags for fresh checks in new mode
         if new_balance is not None:
             self._balance = new_balance
             self._starting_balance = new_balance
@@ -169,28 +169,32 @@ class ClosingArbitrageDetector:
         updated — O(1) instead of O(N). Full scans run periodically or
         on resolution events.
         """
-        # Throttle: skip if we checked this token_id very recently
-        if token_id and event_type != "resolution_check":
-            now = time.time()
-            last_check = self._last_check_time.get(token_id, 0)
-            if now - last_check < self._check_throttle_ms / 1000.0:
-                return  # Skip this check, was called too recently
-            self._last_check_time[token_id] = now
-
-        self._stats["total_scans"] += 1
-
         if token_id and event_type != "resolution_check":
             # Fast path: only check the market that received the update
             market = self.tracker.get_by_token(token_id)
-            if market and not market.is_stale:
-                if market.resolved and market.winning_token_id:
-                    self._settle_pending(market)
-                    self._check_resolved_market(market)
-                else:
-                    still_active: set[str] = set()
-                    self._check_pre_resolution(market, still_active)
-                    # Check if any opportunities for this market disappeared
-                    self._cleanup_disappeared_for_market(market, still_active)
+            if not market or market.is_stale:
+                return
+
+            # Dirty flag: skip if the price hasn't moved enough since last check
+            # Always allow resolved markets through (need to settle bets)
+            if not market.resolved:
+                current_price = market.best_token_price
+                last_price = self._last_check_price.get(token_id, 0)
+                if last_price > 0:
+                    change_pct = abs(current_price - last_price) / last_price * 100
+                    if change_pct < self._dirty_threshold_pct:
+                        return  # Price didn't move enough, skip
+                self._last_check_price[token_id] = current_price
+
+            self._stats["total_scans"] += 1
+
+            if market.resolved and market.winning_token_id:
+                self._settle_pending(market)
+                self._check_resolved_market(market)
+            else:
+                still_active: set[str] = set()
+                self._check_pre_resolution(market, still_active)
+                self._cleanup_disappeared_for_market(market, still_active)
             return
 
         # Full scan: resolution checks, rest fallback, or periodic
