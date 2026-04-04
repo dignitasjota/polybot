@@ -120,6 +120,10 @@ class Executor:
         self._relayer = None
         self._redeem_available = False
 
+        # Redeem retry: track failed redeems for periodic retry
+        self._pending_redeems: set[str] = set()  # condition_ids awaiting redeem
+        self._redeem_retry_task: asyncio.Task | None = None
+
     async def initialize(self):
         """Initialize the CLOB client with API credentials."""
         if self.mode == ExecutionMode.PAPER:
@@ -187,6 +191,10 @@ class Executor:
 
             # Initialize Builder Relayer for auto-redeem
             self._init_relayer()
+
+            # Start redeem retry loop
+            if self._redeem_retry_task is None or self._redeem_retry_task.done():
+                self._redeem_retry_task = asyncio.create_task(self._redeem_retry_loop())
 
             redeem_status = "gasless (Builder Relayer)" if self._redeem_available else "fallback (direct web3, pays gas)"
             logger.info(
@@ -275,7 +283,7 @@ class Executor:
         - Magic Link (POLY_PROXY): MUST use Builder Relayer (positions are under proxy)
         - MetaMask (EOA): Can use Builder Relayer or fallback to direct CLOB redeem
 
-        Returns True if redeem was submitted.
+        Returns True if redeem was submitted. Failed redeems are queued for retry.
         """
         sig_type = self._credentials.signature_type
 
@@ -296,29 +304,40 @@ class Executor:
             )
             return False
 
+        success = False
+
         # Proxy-based (Magic Link / Gnosis Safe): MUST use Builder Relayer (positions are under proxy)
         if sig_type in (1, 2):
             if self._redeem_available and self._relayer:
-                return await self._redeem_via_builder(condition_id)
+                success = await self._redeem_via_builder(condition_id)
             else:
                 logger.error(
                     "redeem_impossible",
                     condition_id=condition_id[:20] + "...",
                     reason="Proxy wallet requires Builder Relayer, but it's not configured",
                 )
-                return False
 
         # MetaMask EOA: try Builder Relayer first, fallback to direct CLOB
         elif sig_type == 0:
             if self._redeem_available and self._relayer:
-                if await self._redeem_via_builder(condition_id):
-                    return True
+                success = await self._redeem_via_builder(condition_id)
 
             # Fallback: direct redeem via CLOB (pays gas)
-            if self._client:
-                return await self._redeem_via_clob(condition_id)
+            if not success and self._client:
+                success = await self._redeem_via_clob(condition_id)
 
-        return False
+        # Track for retry if failed
+        if success:
+            self._pending_redeems.discard(condition_id)
+        else:
+            self._pending_redeems.add(condition_id)
+            logger.warning(
+                "redeem_queued_for_retry",
+                condition_id=condition_id[:20] + "...",
+                pending_count=len(self._pending_redeems),
+            )
+
+        return success
 
     async def _redeem_via_builder(self, condition_id: str) -> bool:
         """Try gasless redeem via Builder Relayer."""
@@ -457,14 +476,39 @@ class Executor:
         except Exception as e:
             logger.warning("redeem_wait_error", condition_id=condition_id[:20] + "...", error=str(e))
 
-    async def close(self):
-        """Stop order monitor."""
-        if self._monitor_task and not self._monitor_task.done():
-            self._monitor_task.cancel()
+    async def _redeem_retry_loop(self):
+        """Periodically retry failed redeems every 60s."""
+        REDEEM_RETRY_INTERVAL = 60
+        logger.info("redeem_retry_loop_started")
+        while True:
             try:
-                await self._monitor_task
+                await asyncio.sleep(REDEEM_RETRY_INTERVAL)
+                if not self._pending_redeems:
+                    continue
+
+                to_retry = list(self._pending_redeems)
+                logger.info("redeem_retry_batch", count=len(to_retry))
+                for cid in to_retry:
+                    success = await self.redeem_position(cid)
+                    if success:
+                        logger.info("redeem_retry_success", condition_id=cid[:20] + "...")
+                    # Small delay between retries to avoid hammering the API
+                    await asyncio.sleep(2)
+
             except asyncio.CancelledError:
-                pass
+                break
+            except Exception as e:
+                logger.warning("redeem_retry_error", error=str(e))
+
+    async def close(self):
+        """Stop order monitor and redeem retry loop."""
+        for task in (self._monitor_task, self._redeem_retry_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     # ── Allowance ──────────────────────────────────────────────────
 
