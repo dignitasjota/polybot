@@ -96,6 +96,7 @@ class WebSocketClient:
             self._ws = ws
             self._connected = True
             self._reconnect_attempt = 0
+            self._last_pong = time.time()  # Initialize so pong timeout doesn't trigger before first PONG
 
             # Subscribe
             subscribe_msg = {
@@ -126,11 +127,25 @@ class WebSocketClient:
                 raise
 
     async def _ping_loop(self, ws):
-        """Send PING every N seconds."""
+        """Send PING every N seconds. Close connection if no PONG received."""
+        PONG_TIMEOUT = 3  # max pong intervals without response before reconnect
         while self._running:
             try:
                 await ws.send("PING")
                 await asyncio.sleep(self.config.ping_interval_seconds)
+
+                # Check if server is still alive
+                if self._last_pong > 0:
+                    silence = time.time() - self._last_pong
+                    max_silence = self.config.ping_interval_seconds * PONG_TIMEOUT
+                    if silence > max_silence:
+                        logger.warning(
+                            "ws_pong_timeout",
+                            silence_seconds=round(silence, 1),
+                            max_allowed=max_silence,
+                        )
+                        await ws.close()
+                        break
             except ConnectionClosed:
                 break
 

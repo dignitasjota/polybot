@@ -227,8 +227,8 @@ class Bot:
                     )
                     try:
                         await self.ws_client.resubscribe()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.log.warning("ws_resubscribe_failed_cleanup", error=str(e))
 
             except Exception as e:
                 self.log.error("market_cleanup_error", error=str(e))
@@ -321,8 +321,9 @@ class Bot:
             )
             try:
                 await self.ws_client.resubscribe()
-            except Exception:
-                pass
+            except Exception as e:
+                self.log.warning("ws_resubscribe_failed", error=str(e),
+                                msg="New markets won't receive WS prices until reconnect")
 
     def _export_data(self):
         """Export full report per account to separate JSON files."""
