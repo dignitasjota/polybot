@@ -175,12 +175,13 @@ class ClosingArbitrageDetector:
             if not market or market.is_stale:
                 return
 
-            # Dirty flag: skip if the price hasn't moved enough since last check
+            # Dirty flag: skip if THIS token's price hasn't moved since last check
             # Always allow resolved markets through (need to settle bets)
             if not market.resolved:
-                current_price = market.best_token_price
+                is_yes = token_id == market.yes_token_id
+                current_price = market.best_ask_yes if is_yes else market.best_ask_no
                 last_price = self._last_check_price.get(token_id, 0)
-                if last_price > 0:
+                if last_price > 0 and current_price > 0:
                     change_pct = abs(current_price - last_price) / last_price * 100
                     if change_pct < self._dirty_threshold_pct:
                         return  # Price didn't move enough, skip
