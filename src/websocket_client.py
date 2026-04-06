@@ -212,40 +212,20 @@ class WebSocketClient:
                         await self._on_opportunity_callback(token_id, event_type)
                 continue
 
-            # Throttle: skip PROCESSING if same token was handled < 2s ago
+            # Throttle: skip processing entirely if same token was handled < 2s ago
             # (doesn't apply to price_change which is handled above)
-            # BUT always update tracker to keep market alive
             now = time.time()
             last = self._last_check_time.get(asset_id, 0)
-            should_process = now - last >= 2.0
+            if now - last < 2.0:
+                continue
+            self._last_check_time[asset_id] = now
 
-            if should_process:
-                self._last_check_time[asset_id] = now
-                if event_type == "book":
-                    self._handle_book(event)
-                elif event_type == "best_bid_ask":
-                    self._handle_best_bid_ask(event)
-                elif event_type == "last_trade_price":
-                    self._handle_last_trade(event)
-
-                # Notify detector only when processing (not when throttled)
-                if self._on_opportunity_callback and event_type in (
-                    "book", "best_bid_ask", "last_trade_price",
-                ):
-                    await self._on_opportunity_callback(asset_id, event_type)
-            else:
-                # Throttled: still update tracker to keep market alive
-                # This prevents stale detection (5s timeout) when events arrive frequently
-                # But don't notify detector (that's the whole point of throttling)
-                if event_type == "best_bid_ask":
-                    best_bid = event.get("best_bid")
-                    best_ask = event.get("best_ask")
-                    if best_bid is not None and best_ask is not None:
-                        self.tracker.update_best_bid_ask(asset_id, float(best_bid), float(best_ask))
-                elif event_type == "last_trade_price":
-                    price = event.get("price")
-                    if price is not None:
-                        self.tracker.update_last_trade(asset_id, float(price))
+            if event_type == "book":
+                self._handle_book(event)
+            elif event_type == "best_bid_ask":
+                self._handle_best_bid_ask(event)
+            elif event_type == "last_trade_price":
+                self._handle_last_trade(event)
 
     def _handle_book(self, event: dict):
         asset_id = event.get("asset_id", "")

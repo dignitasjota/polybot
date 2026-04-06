@@ -119,6 +119,8 @@ class Executor:
         # Builder Relayer (auto-redeem)
         self._relayer = None
         self._redeem_available = False
+        self._proxy_address: str | None = None  # Proxy address for wallet (Magic Link or Gnosis Safe)
+        self._funder: str | None = None  # Funder address (EOA or proxy)
 
         # Redeem retry: track failed redeems for periodic retry
         self._pending_redeems: set[str] = set()  # condition_ids awaiting redeem
@@ -138,6 +140,15 @@ class Executor:
             private_key = self._credentials.get_private_key()
             sig_type = self._credentials.signature_type  # 0=EOA, 1=POLY_PROXY
             proxy_address = self._credentials.get_proxy_address()
+            self._proxy_address = proxy_address  # Store for later use in redeem
+
+            # Derive EOA address from private key (for fallback if no proxy)
+            if not proxy_address:
+                from eth_account import Account
+                account = Account.from_key(private_key)
+                self._funder = account.address
+            else:
+                self._funder = proxy_address
 
             # Try to get API credentials from env vars; if missing, derive from private key
             try:
@@ -344,7 +355,6 @@ class Executor:
         try:
             from web3 import Web3
             from py_builder_relayer_client.models import SafeTransaction
-            from eth_utils import encode_hex
 
             w3 = Web3()
             ctf = w3.eth.contract(
@@ -356,13 +366,20 @@ class Executor:
             cid_hex = condition_id if condition_id.startswith("0x") else f"0x{condition_id}"
 
             # Encode the function call to get calldata
-            encoded = ctf.functions.redeemPositions(
+            func = ctf.functions.redeemPositions(
                 Web3.to_checksum_address(USDC_ADDRESS),
                 bytes.fromhex(ZERO_BYTES32[2:]),
                 bytes.fromhex(cid_hex[2:]),
                 [1, 2],
-            ).encode()
-            calldata = encode_hex(encoded)
+            )
+            # Build transaction to get encoded calldata (web3.py 5.x+ compatible)
+            tx_dict = func.build_transaction({
+                'from': Web3.to_checksum_address(self._proxy_address or self._funder),
+                'nonce': 0,
+                'gasPrice': 0,
+                'gas': 0,
+            })
+            calldata = tx_dict['data']
 
             tx = SafeTransaction(
                 to=Web3.to_checksum_address(CONDITIONAL_TOKENS),
