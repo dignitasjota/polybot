@@ -121,6 +121,7 @@ class Executor:
         self._redeem_available = False
         self._proxy_address: str | None = None  # Proxy address for wallet (Magic Link or Gnosis Safe)
         self._funder: str | None = None  # Funder address (EOA or proxy)
+        self._on_balance_update = None  # callback(balance: float) for balance updates
 
         # Redeem retry: track failed redeems for periodic retry
         self._pending_redeems: set[str] = set()  # condition_ids awaiting redeem
@@ -401,6 +402,9 @@ class Executor:
 
             # Poll for confirmation in background
             asyncio.create_task(self._wait_redeem(response, condition_id))
+
+            # Fallback: also refresh balance after 30 seconds in case response.wait() hangs
+            asyncio.create_task(self._refresh_balance_delayed(delay_seconds=30))
             return True
 
         except Exception as e:
@@ -478,20 +482,31 @@ class Executor:
         """Background: poll relayer until redeem tx is mined, then refresh balance."""
         try:
             # response.wait() polls until STATE_MINED/CONFIRMED (blocking)
+            logger.info("redeem_waiting_for_confirmation", condition_id=condition_id[:20] + "...")
             result = await asyncio.to_thread(response.wait)
             if result:
                 logger.info(
                     "redeem_confirmed",
                     condition_id=condition_id[:20] + "...",
+                    msg="Position redeemed successfully, refreshing balance",
                 )
                 await self._refresh_balance()
+                # Notify detector callback if registered
+                if self._on_balance_update and self._live_balance is not None:
+                    self._on_balance_update(self._live_balance)
             else:
                 logger.warning(
                     "redeem_wait_failed",
                     condition_id=condition_id[:20] + "...",
+                    msg="Redeem tx did not reach confirmed state",
                 )
         except Exception as e:
-            logger.warning("redeem_wait_error", condition_id=condition_id[:20] + "...", error=str(e))
+            logger.warning(
+                "redeem_wait_error",
+                condition_id=condition_id[:20] + "...",
+                error=str(e),
+                msg="Failed to wait for redeem confirmation",
+            )
 
     async def _redeem_retry_loop(self):
         """Periodically retry failed redeems every 60s."""
