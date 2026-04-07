@@ -247,16 +247,52 @@ class Bot:
 
             # Shared market stats (if directional accounts exist)
             if self.tracker:
-                active_markets = len(self.tracker.all_markets)
-                stale = sum(1 for m in self.tracker.all_markets if m.is_stale)
-                resolved = sum(1 for m in self.tracker.all_markets if m.resolved)
+                all_markets = self.tracker.all_markets
+                active_markets = len(all_markets)
+                stale = sum(1 for m in all_markets if m.is_stale)
+                resolved = sum(1 for m in all_markets if m.resolved)
+                fresh = active_markets - stale - resolved
+                with_prices = sum(
+                    1 for m in all_markets
+                    if (m.best_ask_yes or 0) > 0 or (m.best_ask_no or 0) > 0
+                )
                 self.log.info(
                     "market_stats",
                     markets_active=active_markets,
+                    markets_fresh=fresh,
                     markets_stale=stale,
                     markets_resolved=resolved,
+                    markets_with_prices=with_prices,
                     ws_connected=self.ws_client.is_connected,
                 )
+
+                # Diagnostic heartbeat: detector/price_checker state per directional account
+                now_ts = time.time()
+                for acc in self.accounts:
+                    if not acc.detector:
+                        continue
+                    det = acc.detector
+                    pc = det._price_checker
+                    pc_stale = (now_ts - pc._last_update) if pc._last_update > 0 else -1
+                    self.log.info(
+                        "heartbeat_diagnostic",
+                        account=acc.name,
+                        mode=acc.execution_mode if hasattr(acc, "execution_mode") else "?",
+                        bets_pending=sum(1 for o in det._bet_placed.values() if o.outcome == "pending"),
+                        bets_total=len(det._bet_placed),
+                        opportunities_logged=len(det._opportunities_log),
+                        last_check_price_entries=len(det._last_check_price),
+                        last_log_time_entries=len(det._last_log_time),
+                        settled_conditions=len(det._settled_conditions),
+                        active_opportunities=len(det._active_opportunities),
+                        pc_active_symbols=len(pc._active_symbols),
+                        pc_current_prices=len(pc._current_prices),
+                        pc_pending_opens=len(pc._pending_open_requests),
+                        pc_open_prices=len(pc._open_prices),
+                        pc_parse_cache=len(pc._parse_cache),
+                        pc_seconds_since_update=round(pc_stale, 1),
+                        total_scans=det._stats.get("total_scans", 0),
+                    )
 
     async def _run_web_server(self):
         """Run the web dashboard."""

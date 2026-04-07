@@ -362,13 +362,29 @@ class WebSocketClient:
         return max(0, int(base_delay * (1 + jitter)))
 
     async def resubscribe(self):
-        """Resubscribe with updated token list."""
-        if self._ws:
-            new_tokens = self.tracker.all_token_ids
-            subscribe_msg = {
-                "assets_ids": new_tokens,
-                "type": "market",
-                "custom_feature_enabled": True,
-            }
-            await self._ws.send(json.dumps(subscribe_msg))
-            logger.info("ws_resubscribed", tokens=len(new_tokens))
+        """Resubscribe with updated token list.
+
+        If the WS is currently disconnected (reconnecting or in fallback),
+        this is a no-op — the next successful connect will pick up the
+        latest token list automatically from ``tracker.all_token_ids``.
+
+        If the WS is connected, force a reconnect by closing the socket.
+        The Polymarket CLOB server does NOT support delta subscriptions
+        on the same connection, so a clean reconnect is the only reliable
+        way to update the subscription set.
+        """
+        if not self._ws or not self._connected:
+            logger.info(
+                "ws_resubscribe_deferred",
+                msg="WS not connected, next reconnect will pick up new tokens",
+                tokens=len(self.tracker.all_token_ids),
+            )
+            return
+        try:
+            logger.info(
+                "ws_resubscribe_forcing_reconnect",
+                tokens=len(self.tracker.all_token_ids),
+            )
+            await self._ws.close()
+        except Exception as e:
+            logger.warning("ws_resubscribe_close_failed", error=str(e))

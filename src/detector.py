@@ -798,11 +798,29 @@ class ClosingArbitrageDetector:
 
     def cleanup_market(self, condition_id: str):
         """Remove all tracking data for a market that's been cleaned up."""
-        # Clean _last_logged, _active_opportunities for this condition
+        # Clean _last_logged, _active_opportunities, _last_log_time, _bet_placed
+        # for this condition
         keys_to_remove = [k for k in self._last_logged if k.startswith(condition_id)]
         for k in keys_to_remove:
             self._last_logged.pop(k, None)
             self._active_opportunities.pop(k, None)
+
+        log_time_keys = [k for k in self._last_log_time if k.startswith(condition_id)]
+        for k in log_time_keys:
+            self._last_log_time.pop(k, None)
+
+        bet_keys = [k for k in self._bet_placed if k.startswith(condition_id)]
+        for k in bet_keys:
+            self._bet_placed.pop(k, None)
+
+        # Drop dirty-flag entries for tokens that no longer exist in the tracker
+        active_tokens = set(self.tracker.all_token_ids)
+        stale_check_keys = [t for t in self._last_check_price if t not in active_tokens]
+        for t in stale_check_keys:
+            self._last_check_price.pop(t, None)
+
+        # Drop settled condition entries for markets we've cleaned up
+        self._settled_conditions.discard(condition_id)
 
         # Trim opportunities log — keep last 500 entries max
         if len(self._opportunities_log) > 500:

@@ -254,8 +254,34 @@ class PriceChecker:
             if price is not None:
                 self._current_prices[symbol] = price
 
-        # Fetch open prices for markets whose start time has passed + 5s buffer
+        # Cleanup stale state: drop pending open requests, open prices and
+        # cache keys for markets whose window ended > 1h ago (otherwise these
+        # dicts grow unbounded and eventually slow down the poll loop).
         now_utc = datetime.now(timezone.utc)
+        stale_cutoff = now_utc - timedelta(hours=1)
+        stale_pending = [
+            k for k, start in self._pending_open_requests.items()
+            if start < stale_cutoff
+        ]
+        for k in stale_pending:
+            del self._pending_open_requests[k]
+        if stale_pending:
+            logger.debug("price_checker_cleanup_pending", dropped=len(stale_pending))
+
+        stale_opens = []
+        for k in list(self._open_prices.keys()):
+            try:
+                ts = int(k.split(":")[1])
+                if ts < stale_cutoff.timestamp():
+                    stale_opens.append(k)
+            except (IndexError, ValueError):
+                continue
+        for k in stale_opens:
+            del self._open_prices[k]
+        if stale_opens:
+            logger.debug("price_checker_cleanup_open_prices", dropped=len(stale_opens))
+
+        # Fetch open prices for markets whose start time has passed + 5s buffer
         for cache_key, start_utc in list(self._pending_open_requests.items()):
             # Wait 5s after window start for Binance to finalize the kline
             if start_utc + timedelta(seconds=5) <= now_utc:
@@ -295,10 +321,15 @@ class PriceChecker:
             parsed = self._parse_cache[question]
         else:
             parsed = parse_up_down_question(question)
+            # LRU-ish: drop oldest entry instead of clearing the whole cache
+            # (clearing forced re-parse of every active market simultaneously)
+            if len(self._parse_cache) >= 500:
+                try:
+                    oldest = next(iter(self._parse_cache))
+                    del self._parse_cache[oldest]
+                except StopIteration:
+                    pass
             self._parse_cache[question] = parsed
-            # Prevent unbounded growth
-            if len(self._parse_cache) > 500:
-                self._parse_cache.clear()
         if not parsed:
             return None
 
