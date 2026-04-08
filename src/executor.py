@@ -358,7 +358,10 @@ class Executor:
             from web3 import Web3
             from py_builder_relayer_client.models import SafeTransaction
 
-            w3 = Web3()
+            # Need a real HTTP provider so build_transaction() can call
+            # eth_chainId. Without it, web3.py raises
+            # "Could not discover provider while making request: method:eth_chainId"
+            w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com/"))
             ctf = w3.eth.contract(
                 address=Web3.to_checksum_address(CONDITIONAL_TOKENS),
                 abi=REDEEM_ABI,
@@ -367,19 +370,22 @@ class Executor:
             # Ensure condition_id is proper bytes32 hex
             cid_hex = condition_id if condition_id.startswith("0x") else f"0x{condition_id}"
 
-            # Encode the function call to get calldata
+            # Encode the function call to get calldata. We only need the
+            # calldata bytes — we don't actually broadcast this tx ourselves;
+            # the Builder Relayer wraps and submits it from the proxy.
+            # Pass chainId explicitly to avoid an extra RPC roundtrip.
             func = ctf.functions.redeemPositions(
                 Web3.to_checksum_address(USDC_ADDRESS),
                 bytes.fromhex(ZERO_BYTES32[2:]),
                 bytes.fromhex(cid_hex[2:]),
                 [1, 2],
             )
-            # Build transaction to get encoded calldata (web3.py 5.x+ compatible)
             tx_dict = func.build_transaction({
                 'from': Web3.to_checksum_address(self._proxy_address or self._funder),
                 'nonce': 0,
                 'gasPrice': 0,
                 'gas': 0,
+                'chainId': 137,
             })
             calldata = tx_dict['data']
 
