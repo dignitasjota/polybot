@@ -767,6 +767,24 @@ class ClosingArbitrageDetector:
 
         return round(bet, 2), round(profit, 2)
 
+    def _calculate_expected_value(self, bet: float, win_profit: float, loss: float) -> float:
+        """Calculate expected value based on historical win rate.
+
+        EV = (win_rate * profit) - ((1 - win_rate) * loss)
+
+        Returns EV amount in USD. Negative EV means reject the bet.
+        """
+        if bet <= 0:
+            return 0.0
+
+        total_settled = self._stats["settled_wins"] + self._stats["settled_losses"]
+        if total_settled < 10:  # Need minimum sample size
+            return 0.01  # Optimistic default for early stage
+
+        win_rate = self._stats["settled_wins"] / total_settled
+        ev = (win_rate * win_profit) - ((1 - win_rate) * loss)
+        return round(ev, 4)
+
     def _calculate_fee(self, price: float, size: float) -> float:
         """Calculate taker fee: 0.003 * min(price, 1-price) * size."""
         return TAKER_FEE_RATE * min(price, 1.0 - price) * size
@@ -805,6 +823,26 @@ class ClosingArbitrageDetector:
             )
         else:
             is_new_bet = key not in self._bet_placed
+
+        # EV check: reject bets with negative expected value
+        if is_new_bet and opp.suggested_bet > 0:
+            win_profit = opp.potential_profit
+            loss = opp.suggested_bet
+            ev = self._calculate_expected_value(opp.suggested_bet, win_profit, loss)
+            if ev < 0.001:  # Reject if EV is negligible or negative
+                logger.warning(
+                    "bet_rejected_negative_ev",
+                    condition_id=opp.condition_id[:20],
+                    side=opp.token_side,
+                    price=f"${opp.token_price:.4f}",
+                    bet=f"${opp.suggested_bet:.2f}",
+                    ev=f"${ev:.4f}",
+                    win_rate=f"{self._stats['settled_wins']}/{self._stats['settled_wins']+self._stats['settled_losses']}",
+                )
+                opp.suggested_bet = 0.0
+                opp.potential_profit = 0.0
+                is_new_bet = False
+
         if is_new_bet and opp.suggested_bet > 0:
             self._bet_placed[key] = opp
             # Fire executor callback (non-blocking)

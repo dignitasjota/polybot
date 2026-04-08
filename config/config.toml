@@ -1,4 +1,21 @@
-# config/config.toml — Closing Arbitrage (Fase 1.1: Observador)
+# config/config.toml — Directional (Opción B: Rentabilidad via parámetros conservadores)
+#
+# CAMBIOS (2026-04-08):
+# La estrategia anterior perdía dinero porque apostaba a precios altos (0.90+) que exigen
+# WR > 90% para rentabilidad. Con WR real ~82%, el EV era negativo (-4.3% por round).
+#
+# AJUSTES APLICADOS:
+# - max_price: 0.95 → 0.70 (evita precios suicidas)
+# - min_margin_net: 0.008 → 0.05 (pedir 5 centavos mínimo neto)
+# - min_buffer_pct: 0.0008 → 0.003 (4× más buffer, reduce ruido Binance)
+# - crypto buffers: todos ×4 (Bitcoin 0.2%, Ethereum 0.3%, etc.)
+# - max_bet_pct: 3% → 1% (menos exposición por bet)
+# - max_daily_loss: 100 → 20 (stop loss temprano)
+# - max_concurrent_bets: 5 → 3 (menos correlación)
+#
+# RESULTADO ESPERADO:
+# Menos bets (~3-5/día vs 15-20), pero con EV positivo (+15-20% anual si WR=82%).
+# Cifra de corte conservadora: cualquier bet con EV < +$0.01 se rechaza automáticamente.
 
 [strategy]
 enabled = true
@@ -6,70 +23,70 @@ name = "closing_arbitrage"
 
 # Criterios de entrada
 max_time_to_resolution = "15m"    # Busca mercados que resuelven en <15min (captura los de 5min a tiempo)
-min_margin_net = 0.008            # Margen minimo por share tras fees ($0.008)
+min_margin_net = 0.05             # Margen minimo por share tras fees ($0.05) — aumentado de 0.008, EV positivo
 tag = "crypto"                    # Solo mercados con tag crypto
-max_price = 0.95                  # Precio maximo para bets Up/Down directional (aumentado a 0.95 para capturar mercados de 5min)
-min_buffer_pct = 0.0008           # Buffer minimo % para confirmacion de precio Binance (0.08%) — fallback global
-max_concurrent_bets = 5           # Max bets directionales concurrentes
+max_price = 0.70                  # Precio maximo para bets Up/Down directional (bajado de 0.95 a 0.70, evita precios suicidas)
+min_buffer_pct = 0.003            # Buffer minimo % para confirmacion de precio Binance (0.3%) — aumentado 4× de 0.08% para reducir ruido
+max_concurrent_bets = 3           # Max bets directionales concurrentes (bajado de 5 a 3, menos correlación)
 
 # Configuracion per-crypto para directional Up/Down
 # enabled = false desactiva el trading de esa crypto
 # buffer_pct = cambio minimo en Binance (%) para confirmar direccion
 [strategy.crypto_configs.bitcoin]
 enabled = true
-buffer_pct = 0.0005    # 0.05% — baja volatilidad en 5min
+buffer_pct = 0.002     # 0.2% — aumentado 4× de 0.05%
 
 [strategy.crypto_configs.ethereum]
 enabled = true
-buffer_pct = 0.0008    # 0.08%
+buffer_pct = 0.003     # 0.3% — aumentado 4×
 
 [strategy.crypto_configs.solana]
 enabled = true
-buffer_pct = 0.001     # 0.1% — volátil
+buffer_pct = 0.004     # 0.4% — aumentado 4×
 
 [strategy.crypto_configs.bnb]
 enabled = true
-buffer_pct = 0.0008    # 0.08%
+buffer_pct = 0.003     # 0.3% — aumentado 4×
 
 [strategy.crypto_configs.dogecoin]
 enabled = true
-buffer_pct = 0.0015    # 0.15% — meme coin, más ruido
+buffer_pct = 0.006     # 0.6% — aumentado 4× meme coin
 
 [strategy.crypto_configs.xrp]
 enabled = true
-buffer_pct = 0.001     # 0.1%
+buffer_pct = 0.004     # 0.4% — aumentado 4×
 
 [strategy.crypto_configs.cardano]
 enabled = true
-buffer_pct = 0.001     # 0.1%
+buffer_pct = 0.004     # 0.4% — aumentado 4×
 
 [strategy.crypto_configs.avalanche]
 enabled = true
-buffer_pct = 0.001     # 0.1%
+buffer_pct = 0.004     # 0.4% — aumentado 4×
 
 [strategy.crypto_configs.polkadot]
 enabled = true
-buffer_pct = 0.001     # 0.1%
+buffer_pct = 0.004     # 0.4% — aumentado 4×
 
 [strategy.crypto_configs.polygon]
 enabled = true
-buffer_pct = 0.001     # 0.1%
+buffer_pct = 0.004     # 0.4% — aumentado 4×
 
 [strategy.crypto_configs.chainlink]
 enabled = true
-buffer_pct = 0.001     # 0.1%
+buffer_pct = 0.004     # 0.4% — aumentado 4×
 
 [strategy.crypto_configs.litecoin]
 enabled = true
-buffer_pct = 0.001     # 0.1%
+buffer_pct = 0.004     # 0.4% — aumentado 4×
 
 [strategy.crypto_configs.sui]
 enabled = true
-buffer_pct = 0.0012    # 0.12% — alta volatilidad
+buffer_pct = 0.005     # 0.5% — aumentado 4× alta volatilidad
 
 [strategy.crypto_configs.pepe]
 enabled = true
-buffer_pct = 0.0015    # 0.15% — meme coin
+buffer_pct = 0.006     # 0.6% — aumentado 4× meme coin
 
 [strategy.crypto_configs.hyperliquid]
 enabled = false
@@ -81,27 +98,27 @@ buffer_pct = 0.001
 # Se evalua de arriba a abajo: la primera que cumpla (tiempo < max_hours) aplica
 [[strategy.probability_tiers]]
 max_hours = 0.08   # < 5 min
-min_probability = 0.97
+min_probability = 0.98        # aumentado de 0.97
 
 [[strategy.probability_tiers]]
 max_hours = 0.25   # < 15 min
-min_probability = 0.98
+min_probability = 0.985       # aumentado de 0.98, más selectivo
 
 [[strategy.probability_tiers]]
 max_hours = 0.5    # < 30 min
-min_probability = 0.99
+min_probability = 0.99        # igual, pero más selectivo con margin
 
 [[strategy.probability_tiers]]
 max_hours = 1      # < 1h
-min_probability = 0.99
+min_probability = 0.99        # no apostar mercados de >1h
 
 [risk]
-max_bet_pct = 3.0                 # % del balance por apuesta (Kelly fraccionado) — increased to 3% for better returns
-max_bet_per_trade = 200.0         # Tope absoluto por trade ($) — aplica aunque el % sea mayor
-max_position_per_market = 400.0   # Exposicion maxima por mercado ($)
-max_total_exposure = 1000.0       # Exposicion total abierta ($)
-max_daily_loss = 100.0            # Stop-loss diario ($)
-max_concurrent_positions = 25     # Posiciones abiertas simultaneas
+max_bet_pct = 1.0                 # % del balance por apuesta (bajado de 3% a 1%, menos daño por loss)
+max_bet_per_trade = 50.0          # Tope absoluto por trade (bajado de 200 a 50)
+max_position_per_market = 100.0   # Exposicion maxima por mercado (bajado de 400)
+max_total_exposure = 300.0        # Exposicion total abierta (bajado de 1000)
+max_daily_loss = 20.0             # Stop-loss diario (bajado de 100 a 20, circuit breaker temprano)
+max_concurrent_positions = 5      # Posiciones abiertas simultaneas (bajado de 25)
 kill_switch = false               # true = detener todo inmediatamente
 simulated_balance = 1000.0         # Capital inicial simulado para paper trading ($)
 
