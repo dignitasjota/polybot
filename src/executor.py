@@ -227,13 +227,19 @@ class Executor:
     def _init_relayer(self):
         """Initialize Builder Relayer for gasless auto-redeem of winning positions.
 
-        For Magic Link/Gnosis Safe (POLY_PROXY/GNOSIS_SAFE): uses POLYMARKET_PROXY_ADDRESS
-        For MetaMask (EOA): uses BUILDER_API_KEY/SECRET/PASSPHRASE credentials
+        Builder credentials (BUILDER_API_KEY/SECRET/PASSPHRASE) are required
+        for ALL signature types except Magic Link (sig_type=1). Without them,
+        the relayer rejects requests with "invalid builder creds configured!".
+
+        - Magic Link (sig_type=1): only needs proxy address; relayer trusts the
+          built-in Polymarket builder identity.
+        - Gnosis Safe (sig_type=2): needs proxy address AND builder creds.
+        - MetaMask EOA (sig_type=0): needs builder creds (no proxy).
         """
         sig_type = self._credentials.signature_type
         private_key = self._credentials.get_private_key()
 
-        # For proxy-based wallets (Magic Link or Gnosis Safe): use proxy address
+        # For proxy-based wallets (Magic Link or Gnosis Safe): proxy address required
         if sig_type in (1, 2):
             proxy_address = self._credentials.get_proxy_address()
             wallet_label = "gnosis_safe" if sig_type == 2 else "magic_link"
@@ -243,25 +249,28 @@ class Executor:
                            msg="POLYMARKET_PROXY_ADDRESS not set, auto-redeem disabled")
                 return
             logger.info("relayer_initializing", wallet_type=wallet_label, proxy=proxy_address[:10] + "...")
-        # For MetaMask EOA: use builder credentials
-        else:
+
+        # Builder creds: required for everything except Magic Link
+        builder_creds = None
+        if sig_type != 1:
             builder_creds = self._credentials.get_builder_creds()
             if not builder_creds:
+                wt = "gnosis_safe" if sig_type == 2 else "metamask"
                 logger.info("relayer_not_configured",
-                           wallet_type="metamask",
+                           wallet_type=wt,
                            msg="BUILDER_API_KEY/SECRET/PASSPHRASE not set, auto-redeem disabled")
                 return
-            logger.info("relayer_initializing", wallet_type="metamask", msg="Using Builder credentials")
+            logger.info("relayer_builder_creds_loaded", wallet_type=("gnosis_safe" if sig_type == 2 else "metamask"))
 
         try:
             from py_builder_relayer_client.client import RelayClient
             from py_builder_signing_sdk.config import BuilderConfig, BuilderApiKeyCreds
 
-            if sig_type in (1, 2):
-                # Proxy-based (Magic Link or Gnosis Safe): proxy address is built-in
+            if sig_type == 1:
+                # Magic Link: relayer trusts the built-in Polymarket builder identity
                 builder_config = BuilderConfig()
             else:
-                # MetaMask EOA: use builder credentials
+                # Gnosis Safe or MetaMask EOA: pass explicit builder credentials
                 api_key, api_secret, api_passphrase = builder_creds
                 builder_config = BuilderConfig(
                     local_builder_creds=BuilderApiKeyCreds(
