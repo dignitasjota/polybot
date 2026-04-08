@@ -34,59 +34,59 @@ max_concurrent_bets = 3           # Max bets directionales concurrentes (bajado 
 # buffer_pct = cambio minimo en Binance (%) para confirmar direccion
 [strategy.crypto_configs.bitcoin]
 enabled = true
-buffer_pct = 0.002     # 0.2% — aumentado 4× de 0.05%
+buffer_pct = 0.001     # 0.1% — aumentado 2× de 0.05% (×4 era demasiado restrictivo)
 
 [strategy.crypto_configs.ethereum]
 enabled = true
-buffer_pct = 0.003     # 0.3% — aumentado 4×
+buffer_pct = 0.0015    # 0.15% — aumentado 2×
 
 [strategy.crypto_configs.solana]
 enabled = true
-buffer_pct = 0.004     # 0.4% — aumentado 4×
+buffer_pct = 0.002     # 0.2% — aumentado 2×
 
 [strategy.crypto_configs.bnb]
 enabled = true
-buffer_pct = 0.003     # 0.3% — aumentado 4×
+buffer_pct = 0.0015    # 0.15% — aumentado 2×
 
 [strategy.crypto_configs.dogecoin]
 enabled = true
-buffer_pct = 0.006     # 0.6% — aumentado 4× meme coin
+buffer_pct = 0.003     # 0.3% — aumentado 2× meme coin
 
 [strategy.crypto_configs.xrp]
 enabled = true
-buffer_pct = 0.004     # 0.4% — aumentado 4×
+buffer_pct = 0.002     # 0.2% — aumentado 2×
 
 [strategy.crypto_configs.cardano]
 enabled = true
-buffer_pct = 0.004     # 0.4% — aumentado 4×
+buffer_pct = 0.002     # 0.2% — aumentado 2×
 
 [strategy.crypto_configs.avalanche]
 enabled = true
-buffer_pct = 0.004     # 0.4% — aumentado 4×
+buffer_pct = 0.002     # 0.2% — aumentado 2×
 
 [strategy.crypto_configs.polkadot]
 enabled = true
-buffer_pct = 0.004     # 0.4% — aumentado 4×
+buffer_pct = 0.002     # 0.2% — aumentado 2×
 
 [strategy.crypto_configs.polygon]
 enabled = true
-buffer_pct = 0.004     # 0.4% — aumentado 4×
+buffer_pct = 0.002     # 0.2% — aumentado 2×
 
 [strategy.crypto_configs.chainlink]
 enabled = true
-buffer_pct = 0.004     # 0.4% — aumentado 4×
+buffer_pct = 0.002     # 0.2% — aumentado 2×
 
 [strategy.crypto_configs.litecoin]
 enabled = true
-buffer_pct = 0.004     # 0.4% — aumentado 4×
+buffer_pct = 0.002     # 0.2% — aumentado 2×
 
 [strategy.crypto_configs.sui]
 enabled = true
-buffer_pct = 0.005     # 0.5% — aumentado 4× alta volatilidad
+buffer_pct = 0.0025    # 0.25% — aumentado 2× alta volatilidad
 
 [strategy.crypto_configs.pepe]
 enabled = true
-buffer_pct = 0.006     # 0.6% — aumentado 4× meme coin
+buffer_pct = 0.003     # 0.3% — aumentado 2× meme coin
 
 [strategy.crypto_configs.hyperliquid]
 enabled = false
