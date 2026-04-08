@@ -761,6 +761,16 @@ class ClosingArbitrageDetector:
         max_from_depth = depth * price  # depth is in shares, convert to USD
         bet = min(bet, max_from_depth)
 
+        # Polymarket minimum order size is $1. If kelly bet is below $1,
+        # bump up to $1 (when balance + depth allow) so the order isn't rejected.
+        # If we still can't reach $1, return 0 to skip the opportunity.
+        POLYMARKET_MIN_ORDER_USD = 1.0
+        if bet < POLYMARKET_MIN_ORDER_USD:
+            if self._balance >= POLYMARKET_MIN_ORDER_USD and max_from_depth >= POLYMARKET_MIN_ORDER_USD:
+                bet = POLYMARKET_MIN_ORDER_USD
+            else:
+                return 0.0, 0.0
+
         # Shares bought = bet / price, each share pays $1 if wins
         shares = bet / price if price > 0 else 0
         profit = shares * margin_net  # margin_net is per-share profit after fees

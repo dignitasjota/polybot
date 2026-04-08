@@ -86,6 +86,7 @@ class AccountRunner:
         self._running = False
         self._data_config = data
         self._strategy_config = strategy
+        self._orphan_scan_task: asyncio.Task | None = None
 
     async def start(self):
         """Start this account's trading loop."""
@@ -108,10 +109,50 @@ class AccountRunner:
         # Sync live balance to strategy components
         self._sync_live_balance()
 
+        # Live mode: scan for orphan winning positions left over from previous
+        # runs and redeem them. Done once on startup, then periodically.
+        if self.exec_mode == ExecutionMode.LIVE:
+            try:
+                triggered = await self.executor.scan_and_redeem_orphan_positions()
+                self.log.info(
+                    "orphan_scan_startup",
+                    account=self.name,
+                    triggered=triggered,
+                )
+            except Exception as e:
+                self.log.warning("orphan_scan_startup_error", account=self.name, error=str(e))
+            if self._orphan_scan_task is None or self._orphan_scan_task.done():
+                self._orphan_scan_task = asyncio.create_task(self._run_orphan_scan_loop())
+
         if self.strategy_type == "directional":
             await self._start_directional()
         elif self.strategy_type == "copy_trade":
             await self._start_copy_trade()
+
+    async def _run_orphan_scan_loop(self):
+        """Periodically scan for orphan redeemable positions on Polymarket.
+
+        This catches winning positions that resolved while the bot was down
+        or that were placed in a previous run (and so are not in the in-memory
+        _bet_placed dict). Without this, those positions stay locked forever.
+        """
+        ORPHAN_SCAN_INTERVAL = 300  # 5 minutes
+        while self._running:
+            try:
+                await asyncio.sleep(ORPHAN_SCAN_INTERVAL)
+                if not self._running or self.exec_mode != ExecutionMode.LIVE:
+                    continue
+                triggered = await self.executor.scan_and_redeem_orphan_positions()
+                if triggered > 0:
+                    self.log.info(
+                        "orphan_scan_periodic",
+                        account=self.name,
+                        triggered=triggered,
+                    )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.log.warning("orphan_scan_loop_error", account=self.name, error=str(e))
 
     async def _start_directional(self):
         """Start directional (Binance-based) strategy."""
@@ -189,6 +230,19 @@ class AccountRunner:
                 account=self.name,
                 live_balance=f"${live_balance:.2f}" if live_balance is not None else "unknown",
             )
+            # Trigger orphan scan + ensure background loop is running
+            if mode == ExecutionMode.LIVE:
+                try:
+                    triggered = await self.executor.scan_and_redeem_orphan_positions()
+                    self.log.info(
+                        "orphan_scan_mode_change",
+                        account=self.name,
+                        triggered=triggered,
+                    )
+                except Exception as e:
+                    self.log.warning("orphan_scan_mode_change_error", account=self.name, error=str(e))
+                if self._orphan_scan_task is None or self._orphan_scan_task.done():
+                    self._orphan_scan_task = asyncio.create_task(self._run_orphan_scan_loop())
         else:
             # Switching to paper: reset with simulated balance
             sim_balance = self.account.risk.simulated_balance
@@ -226,6 +280,13 @@ class AccountRunner:
         """Stop this account."""
         self.log.info("account_stopping", name=self.name)
         self._running = False
+
+        if self._orphan_scan_task and not self._orphan_scan_task.done():
+            self._orphan_scan_task.cancel()
+            try:
+                await self._orphan_scan_task
+            except asyncio.CancelledError:
+                pass
 
         await self.executor.close()
         if self.detector:

@@ -515,6 +515,111 @@ class Executor:
                 msg="Failed to wait for redeem confirmation",
             )
 
+    async def scan_and_redeem_orphan_positions(self) -> int:
+        """Query Polymarket Data API for the proxy's open positions and redeem
+        any that are settled (redeemable=True) but not yet claimed.
+
+        This handles "orphan" positions: bets that were placed in a previous
+        run of the bot (or are otherwise not tracked in memory) and have since
+        been resolved as winners. Without this scan, those positions would
+        stay locked on Polymarket forever because the in-memory _bet_placed
+        dict is empty after a restart.
+
+        Safe to call repeatedly: redeem_position handles duplicates via
+        _pending_redeems and the on-chain CTF will simply no-op if already
+        redeemed.
+
+        Returns the number of redemption attempts triggered.
+        """
+        if self.mode != ExecutionMode.LIVE:
+            return 0
+        if not self._funder:
+            logger.warning("orphan_scan_no_funder",
+                           msg="Cannot scan positions, funder address unknown")
+            return 0
+
+        try:
+            import aiohttp
+        except ImportError:
+            logger.error("orphan_scan_no_aiohttp")
+            return 0
+
+        url = f"https://data-api.polymarket.com/positions?user={self._funder}&sizeThreshold=0.01&limit=500"
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.get(url) as resp:
+                    if resp.status != 200:
+                        logger.warning(
+                            "orphan_scan_http_error",
+                            status=resp.status,
+                            funder=self._funder[:10] + "...",
+                        )
+                        return 0
+                    positions = await resp.json()
+        except Exception as e:
+            logger.warning("orphan_scan_fetch_error", error=str(e))
+            return 0
+
+        if not isinstance(positions, list):
+            logger.warning("orphan_scan_unexpected_payload", payload_type=type(positions).__name__)
+            return 0
+
+        redeemable = []
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            # Data API marks settled winning positions as redeemable=True
+            if not pos.get("redeemable"):
+                continue
+            cid = pos.get("conditionId") or pos.get("condition_id")
+            if not cid:
+                continue
+            # Skip already-pending redeems to avoid log spam
+            if cid in self._pending_redeems:
+                continue
+            redeemable.append((cid, pos))
+
+        logger.info(
+            "orphan_scan_complete",
+            funder=self._funder[:10] + "...",
+            total_positions=len(positions),
+            redeemable_found=len(redeemable),
+        )
+
+        triggered = 0
+        for cid, pos in redeemable:
+            size = pos.get("size", 0)
+            current_value = pos.get("currentValue", 0)
+            logger.info(
+                "orphan_redeem_triggering",
+                condition_id=cid[:20] + "...",
+                size=size,
+                current_value=current_value,
+                title=(pos.get("title") or "")[:60],
+            )
+            try:
+                await self.redeem_position(cid)
+                triggered += 1
+            except Exception as e:
+                logger.warning(
+                    "orphan_redeem_error",
+                    condition_id=cid[:20] + "...",
+                    error=str(e),
+                )
+            # Small spacing to avoid hammering the relayer
+            await asyncio.sleep(1)
+
+        if triggered > 0:
+            # Refresh balance after redeems so the new floor logic sees the
+            # recovered USDC immediately instead of waiting up to an hour.
+            try:
+                await self._refresh_balance()
+            except Exception as e:
+                logger.debug("orphan_scan_balance_refresh_failed", error=str(e))
+
+        return triggered
+
     async def _redeem_retry_loop(self):
         """Periodically retry failed redeems every 60s."""
         REDEEM_RETRY_INTERVAL = 60
