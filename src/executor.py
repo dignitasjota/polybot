@@ -389,10 +389,14 @@ class Executor:
             })
             calldata = tx_dict['data']
 
+            # operation=0 → CALL (regular contract call). DELEGATECALL (1)
+            # would execute the CTF code in the Safe's context, which is wrong
+            # for redeemPositions.
             tx = SafeTransaction(
                 to=Web3.to_checksum_address(CONDITIONAL_TOKENS),
                 data=calldata,
                 value="0",
+                operation=0,
             )
 
             response = await asyncio.to_thread(
