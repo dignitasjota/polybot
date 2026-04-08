@@ -115,13 +115,14 @@ class Executor:
         self._pending_orders: dict[str, TradeRecord] = {}  # order_id -> TradeRecord
         self._monitor_task: asyncio.Task | None = None
         self._on_balance_update = None  # callback(balance: float)
+        self._on_order_confirmed = None  # callback(order_id, condition_id, token_id, side, price, size, cost_usd)
+        self._on_position_redeemed = None  # callback(condition_id, amount_usd)
 
         # Builder Relayer (auto-redeem)
         self._relayer = None
         self._redeem_available = False
         self._proxy_address: str | None = None  # Proxy address for wallet (Magic Link or Gnosis Safe)
         self._funder: str | None = None  # Funder address (EOA or proxy)
-        self._on_balance_update = None  # callback(balance: float) for balance updates
 
         # Redeem retry: track failed redeems for periodic retry
         self._pending_redeems: set[str] = set()  # condition_ids awaiting redeem
@@ -494,6 +495,12 @@ class Executor:
                 # Notify detector callback if registered
                 if self._on_balance_update and self._live_balance is not None:
                     self._on_balance_update(self._live_balance)
+                # Notify detector that position was redeemed (for live balance sync)
+                if self._on_position_redeemed:
+                    try:
+                        await self._on_position_redeemed(condition_id, self._live_balance or 0)
+                    except Exception as e:
+                        logger.warning("position_redeemed_callback_error", error=str(e))
             else:
                 logger.warning(
                     "redeem_wait_failed",
@@ -612,6 +619,20 @@ class Executor:
     def on_balance_update(self, callback):
         """Register callback to be called when balance changes."""
         self._on_balance_update = callback
+
+    def on_order_confirmed(self, callback):
+        """Register callback when order is confirmed (LIVE).
+
+        Signature: callback(order_id, condition_id, token_id, side, price, size, cost_usd)
+        """
+        self._on_order_confirmed = callback
+
+    def on_position_redeemed(self, callback):
+        """Register callback when a position is redeemed (winning).
+
+        Signature: callback(condition_id, amount_usd)
+        """
+        self._on_position_redeemed = callback
 
     # ── Execution ─────────────────────────────────────────────────
 
@@ -786,6 +807,20 @@ class Executor:
                     cost=f"${opp.suggested_bet:.2f}",
                     balance=f"${self._live_balance:.2f}" if self._live_balance is not None else "?",
                 )
+                # Notify detector that order was confirmed (for balance sync in live mode)
+                if self._on_order_confirmed:
+                    try:
+                        await self._on_order_confirmed(
+                            trade.order_id,
+                            opp.condition_id,
+                            resolved_token_id,
+                            opp.token_side,
+                            opp.token_price,
+                            shares,
+                            opp.suggested_bet,
+                        )
+                    except Exception as e:
+                        logger.warning("order_confirmed_callback_error", error=str(e))
                 # Refresh real balance async after order settles on-chain
                 asyncio.create_task(self._refresh_balance_delayed(delay_seconds=5))
             else:

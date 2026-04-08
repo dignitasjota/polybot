@@ -81,12 +81,16 @@ class ClosingArbitrageDetector:
         self._active_opportunities: dict[str, Opportunity] = {}  # "condition_id:side" -> latest opp
         self._bet_placed: dict[str, Opportunity] = {}  # "condition_id:side" -> first bet (for paper trading)
         self._settled_conditions: set[str] = set()  # Already settled condition_ids
+        self._confirmed_orders: dict[str, dict] = {}  # "condition_id:side" -> {"order_id": ..., "cost": ...}
         self._price_checker = PriceChecker(
             min_buffer_pct=self.config.min_buffer_pct,
             crypto_configs=self.config.crypto_configs,
         )
+        self._is_live_mode = False  # Set to True when executor starts syncing balance
         self._on_opportunity_cb = None  # async callback(Opportunity) for executor
         self._on_redeem_cb = None      # async callback(condition_id: str) for auto-redeem
+        self._on_order_confirmed = None  # callback(order_id, condition_id, token_id, side, price, size, cost) from executor
+        self._on_position_redeemed = None  # callback(condition_id, live_balance) from executor
         # Dirty flag: only re-check a token if its price moved significantly
         self._last_check_price: dict[str, float] = {}  # token_id -> last checked price
         self._dirty_threshold_pct = 1.5  # Min price change (%) to trigger re-check
@@ -110,6 +114,18 @@ class ClosingArbitrageDetector:
         """Register async callback for redeeming winning positions."""
         self._on_redeem_cb = callback
 
+    def on_order_confirmed(self, callback):
+        """Register callback when executor confirms an order (live mode only).
+
+        In live mode, detector stops trusting its own _balance and only updates
+        via executor callbacks. This ensures detector stays synced with real balance.
+        """
+        self._on_order_confirmed = callback
+
+    def on_position_redeemed(self, callback):
+        """Register callback when executor redeems a position (live mode only)."""
+        self._on_position_redeemed = callback
+
     async def _safe_redeem(self, condition_id: str):
         """Fire redeem callback, swallowing errors."""
         if not self._on_redeem_cb:
@@ -127,9 +143,50 @@ class ClosingArbitrageDetector:
         except Exception as e:
             logger.warning("redeem_callback_error", error=str(e))
 
+    async def _on_executor_order_confirmed(self, order_id: str, condition_id: str, token_id: str,
+                                           side: str, price: float, size: float, cost_usd: float):
+        """Called by executor when an order is confirmed (LIVE mode).
+
+        In live mode, deduct cost immediately from _balance.
+        """
+        self._is_live_mode = True
+        key = f"{condition_id}:{side}"
+        self._confirmed_orders[key] = {
+            "order_id": order_id,
+            "condition_id": condition_id,
+            "token_id": token_id,
+            "side": side,
+            "price": price,
+            "size": size,
+            "cost_usd": cost_usd,
+        }
+        # Deduct cost from _balance now (executor already deducted from live_balance)
+        self._balance = round(self._balance - cost_usd, 2)
+        logger.debug(
+            "executor_order_confirmed_synced",
+            condition_id=condition_id[:20] + "...",
+            side=side,
+            cost=f"${cost_usd:.2f}",
+            balance=f"${self._balance:.2f}",
+        )
+
+    async def _on_executor_position_redeemed(self, condition_id: str, live_balance: float):
+        """Called by executor when a position is redeemed (LIVE mode).
+
+        Sync detector balance to executor's live balance after redeem.
+        """
+        self._is_live_mode = True
+        self._balance = live_balance
+        logger.info(
+            "executor_position_redeemed_synced",
+            condition_id=condition_id[:20] + "...",
+            balance=f"${self._balance:.2f}",
+        )
+
     def set_live_balance(self, balance: float):
         """Update balance from live executor (replaces simulated balance)."""
         self._balance = balance
+        self._is_live_mode = True  # Signal that we're syncing with executor
 
     def reset_stats(self, new_balance: float | None = None):
         """Reset all stats and bets (e.g. when switching from paper to live)."""
@@ -137,9 +194,11 @@ class ClosingArbitrageDetector:
         self._active_opportunities.clear()
         self._bet_placed.clear()
         self._settled_conditions.clear()
+        self._confirmed_orders.clear()  # Clear executor-confirmed orders on reset
         self._last_logged.clear()
         # Don't clear _last_log_time - keep throttle state to avoid spam on mode switch
         self._last_check_price.clear()  # Clear dirty flags for fresh checks in new mode
+        self._is_live_mode = False  # Reset live mode flag
         if new_balance is not None:
             self._balance = new_balance
             self._starting_balance = new_balance
@@ -264,6 +323,8 @@ class ClosingArbitrageDetector:
         }
 
         for key, bet_opp in bets_for_market.items():
+            was_confirmed_by_executor = key in self._confirmed_orders
+
             if bet_opp.token_side == winning_side:
                 shares = bet_opp.suggested_bet / bet_opp.token_price if bet_opp.token_price > 0 else 0
                 pnl = round(shares * bet_opp.margin_net, 2)
@@ -274,8 +335,12 @@ class ClosingArbitrageDetector:
                 outcome = "loss"
                 self._stats["settled_losses"] += 1
 
-            self._balance = round(self._balance + pnl, 2)
-            self._stats["simulated_pnl"] = round(self._stats["simulated_pnl"] + pnl, 2)
+            # In LIVE mode, only update _balance if executor confirmed the order.
+            # Otherwise, wait for executor to sync balance via _on_executor_position_redeemed.
+            # In PAPER mode, always update _balance (detector is fully responsible).
+            if not self._is_live_mode or was_confirmed_by_executor:
+                self._balance = round(self._balance + pnl, 2)
+                self._stats["simulated_pnl"] = round(self._stats["simulated_pnl"] + pnl, 2)
 
             logger.info(
                 "opportunity_settled",
@@ -287,6 +352,8 @@ class ClosingArbitrageDetector:
                 bet=f"${bet_opp.suggested_bet:.2f}",
                 pnl=f"${pnl:+.2f}",
                 balance=f"${self._balance:.2f}",
+                is_live_mode=self._is_live_mode,
+                confirmed_by_executor=was_confirmed_by_executor,
                 cumulative_pnl=f"${self._stats['simulated_pnl']:+.2f}",
             )
 
@@ -812,6 +879,10 @@ class ClosingArbitrageDetector:
         bet_keys = [k for k in self._bet_placed if k.startswith(condition_id)]
         for k in bet_keys:
             self._bet_placed.pop(k, None)
+
+        confirmed_keys = [k for k in self._confirmed_orders if k.startswith(condition_id)]
+        for k in confirmed_keys:
+            self._confirmed_orders.pop(k, None)
 
         # Drop dirty-flag entries for tokens that no longer exist in the tracker
         active_tokens = set(self.tracker.all_token_ids)
