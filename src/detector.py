@@ -425,7 +425,9 @@ class ClosingArbitrageDetector:
         side = "YES" if is_yes else "NO"
         depth = self._get_depth_at_best_ask(market, is_yes)
 
-        suggested_bet, potential_profit = self._calculate_bet(price, margin_net, depth)
+        suggested_bet, potential_profit = self._calculate_bet(
+            price, margin_net, depth, market=market, is_yes=is_yes,
+        )
 
         token_id = market.yes_token_id if is_yes else market.no_token_id
 
@@ -637,6 +639,7 @@ class ClosingArbitrageDetector:
 
         suggested_bet, potential_profit = self._calculate_bet(
             price, margin_net, depth, signal_multiplier=signal_multiplier,
+            market=market, is_yes=is_yes,
         )
         token_id = market.yes_token_id if is_yes else market.no_token_id
 
@@ -712,7 +715,9 @@ class ClosingArbitrageDetector:
 
         depth = self._get_depth_at_best_ask(market, is_yes)
 
-        suggested_bet, potential_profit = self._calculate_bet(price, margin_net, depth)
+        suggested_bet, potential_profit = self._calculate_bet(
+            price, margin_net, depth, market=market, is_yes=is_yes,
+        )
 
         token_id = market.yes_token_id if is_yes else market.no_token_id
 
@@ -740,40 +745,65 @@ class ClosingArbitrageDetector:
         self._log_opportunity(opp)
 
     def _calculate_bet(self, price: float, margin_net: float, depth: float,
-                       signal_multiplier: float = 1.0) -> tuple[float, float]:
+                       signal_multiplier: float = 1.0,
+                       market: "MarketState | None" = None,
+                       is_yes: bool = True) -> tuple[float, float]:
         """Calculate suggested bet size (Kelly fractional) and potential profit.
 
         Returns (suggested_bet_usd, potential_profit_usd).
-        Bet = min(balance * max_bet_pct% * signal_multiplier, max_bet_per_trade, available_depth)
 
         signal_multiplier scales the bet based on signal strength:
         - 1.0 = signal just barely confirmed (change_pct == buffer)
         - 2.0 = very strong signal (change_pct >= 2x buffer)
+
+        Polymarket requires min 5 shares per order. If best ask has fewer
+        shares, walks the order book to find enough liquidity.
         """
+        POLYMARKET_MIN_SHARES = 5
+
         kelly_bet = self._balance * self.risk.max_bet_pct / 100.0 * signal_multiplier
         bet = min(kelly_bet, self.risk.max_bet_per_trade)
-        # Never bet more than current balance
         bet = min(bet, self._balance)
 
-        # Don't suggest more than available depth; reject if no liquidity
         if depth <= 0:
+            self._stats.setdefault("calc_bet_no_depth", 0)
+            self._stats["calc_bet_no_depth"] += 1
             return 0.0, 0.0
-        max_from_depth = depth * price  # depth is in shares, convert to USD
+
+        # Walk the order book to get enough depth for min shares (if market available)
+        if market is not None:
+            avail_shares, avg_price = self._get_depth_for_min_shares(market, is_yes, POLYMARKET_MIN_SHARES)
+            if avail_shares < POLYMARKET_MIN_SHARES:
+                self._stats.setdefault("calc_bet_insufficient_book_depth", 0)
+                self._stats["calc_bet_insufficient_book_depth"] += 1
+                return 0.0, 0.0
+            # Use weighted avg price for the min-shares slice
+            effective_price = avg_price
+            min_bet = POLYMARKET_MIN_SHARES * effective_price
+        else:
+            # Fallback: use best ask only
+            effective_price = price
+            min_bet = POLYMARKET_MIN_SHARES * effective_price
+
+        max_from_depth = depth * effective_price
         bet = min(bet, max_from_depth)
 
-        # Polymarket minimum order size is 5 shares (not USD).
-        # Shares = bet / price. If shares < 5, bump up bet to 5 * price.
-        POLYMARKET_MIN_SHARES = 5
-        shares = bet / price if price > 0 else 0
+        # Enforce minimum 5 shares
+        shares = bet / effective_price if effective_price > 0 else 0
 
         if shares < POLYMARKET_MIN_SHARES:
-            min_bet = POLYMARKET_MIN_SHARES * price
-            # Only use min_bet if we have enough balance and depth
-            if min_bet <= self._balance and min_bet <= max_from_depth:
+            if min_bet <= self._balance:
                 bet = min_bet
                 shares = POLYMARKET_MIN_SHARES
             else:
-                # Can't meet minimum, skip this opportunity
+                self._stats.setdefault("calc_bet_insufficient_balance", 0)
+                self._stats["calc_bet_insufficient_balance"] += 1
+                logger.debug(
+                    "calc_bet_balance_too_low",
+                    balance=round(self._balance, 2),
+                    needed=round(min_bet, 2),
+                    price=round(effective_price, 4),
+                )
                 return 0.0, 0.0
 
         profit = shares * margin_net  # margin_net is per-share profit after fees
@@ -807,6 +837,33 @@ class ClosingArbitrageDetector:
         if asks:
             return asks[0].size
         return 0.0
+
+    def _get_depth_for_min_shares(self, market: MarketState, is_yes: bool, min_shares: float) -> tuple[float, float]:
+        """Sum order book levels until reaching min_shares.
+
+        Returns (total_shares_available, weighted_avg_price). If total < min_shares,
+        returns (total, avg) anyway so caller can decide. If no asks at all, (0, 0).
+
+        Walking the book is necessary because Up/Down 5min markets often have
+        tiny depth (1-2 shares) at the best ask but more at level 2-3.
+        """
+        asks = market.asks_yes if is_yes else market.asks_no
+        if not asks:
+            return 0.0, 0.0
+
+        total_shares = 0.0
+        total_cost = 0.0
+        for level in asks:
+            shares_to_take = min(level.size, min_shares - total_shares)
+            if shares_to_take <= 0:
+                break
+            total_shares += shares_to_take
+            total_cost += shares_to_take * level.price
+            if total_shares >= min_shares:
+                break
+
+        avg_price = total_cost / total_shares if total_shares > 0 else 0.0
+        return total_shares, avg_price
 
     def _log_opportunity(self, opp: Opportunity):
         # Deduplicate: only log if price changed for this market+side
