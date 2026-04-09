@@ -116,6 +116,7 @@ class Executor:
         self._monitor_task: asyncio.Task | None = None
         self._on_balance_update = None  # callback(balance: float)
         self._on_order_confirmed = None  # callback(order_id, condition_id, token_id, side, price, size, cost_usd)
+        self._on_order_cancelled = None  # callback(condition_id, token_side)
         self._on_position_redeemed = None  # callback(condition_id, amount_usd)
 
         # Builder Relayer (auto-redeem)
@@ -751,6 +752,13 @@ class Executor:
         """
         self._on_order_confirmed = callback
 
+    def on_order_cancelled(self, callback):
+        """Register callback when order is cancelled (timeout or user).
+
+        Signature: callback(condition_id, token_side)
+        """
+        self._on_order_cancelled = callback
+
     def on_position_redeemed(self, callback):
         """Register callback when a position is redeemed (winning).
 
@@ -1055,6 +1063,15 @@ class Executor:
                 question=trade.question[:60],
                 age=f"{time.time() - trade.created_at:.0f}s",
             )
+            # Notify detector to mark bet as cancelled
+            if self._on_order_cancelled:
+                try:
+                    await self._on_order_cancelled(trade.condition_id, trade.token_side)
+                except Exception as e:
+                    logger.warning(
+                        "order_cancelled_callback_error",
+                        error=str(e),
+                    )
         except Exception as e:
             logger.warning(
                 "order_cancel_failed",

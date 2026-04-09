@@ -26,7 +26,7 @@ max_time_to_resolution = "15m"    # Busca mercados que resuelven en <15min (capt
 min_margin_net = 0.05             # Margen minimo por share tras fees ($0.05) — aumentado de 0.008, EV positivo
 tag = "crypto"                    # Solo mercados con tag crypto
 max_price = 0.70                  # Precio maximo para bets Up/Down directional (bajado de 0.95 a 0.70, evita precios suicidas)
-min_buffer_pct = 0.003            # Buffer minimo % para confirmacion de precio Binance (0.3%) — aumentado 4× de 0.08% para reducir ruido
+min_buffer_pct = 0.0001           # Buffer minimo % para confirmacion de precio Binance (0.01%) — permisivo para capturar movimientos pequeños
 max_concurrent_bets = 3           # Max bets directionales concurrentes (bajado de 5 a 3, menos correlación)
 
 # Configuracion per-crypto para directional Up/Down
@@ -34,63 +34,63 @@ max_concurrent_bets = 3           # Max bets directionales concurrentes (bajado 
 # buffer_pct = cambio minimo en Binance (%) para confirmar direccion
 [strategy.crypto_configs.bitcoin]
 enabled = true
-buffer_pct = 0.001     # 0.1% — aumentado 2× de 0.05% (×4 era demasiado restrictivo)
+buffer_pct = 0.0001    # 0.01% — permisivo para capturar movimientos
 
 [strategy.crypto_configs.ethereum]
 enabled = true
-buffer_pct = 0.0015    # 0.15% — aumentado 2×
+buffer_pct = 0.0001    # 0.01% — permisivo
 
 [strategy.crypto_configs.solana]
 enabled = true
-buffer_pct = 0.002     # 0.2% — aumentado 2×
+buffer_pct = 0.0001    # 0.01% — permisivo
 
 [strategy.crypto_configs.bnb]
 enabled = true
-buffer_pct = 0.0015    # 0.15% — aumentado 2×
+buffer_pct = 0.0001    # 0.01% — permisivo
 
 [strategy.crypto_configs.dogecoin]
 enabled = true
-buffer_pct = 0.003     # 0.3% — aumentado 2× meme coin
+buffer_pct = 0.0001    # 0.01% — permisivo
 
 [strategy.crypto_configs.xrp]
 enabled = true
-buffer_pct = 0.002     # 0.2% — aumentado 2×
+buffer_pct = 0.0001    # 0.01% — permisivo
 
 [strategy.crypto_configs.cardano]
 enabled = true
-buffer_pct = 0.002     # 0.2% — aumentado 2×
+buffer_pct = 0.0001    # 0.01% — permisivo
 
 [strategy.crypto_configs.avalanche]
 enabled = true
-buffer_pct = 0.002     # 0.2% — aumentado 2×
+buffer_pct = 0.0001    # 0.01% — permisivo
 
 [strategy.crypto_configs.polkadot]
 enabled = true
-buffer_pct = 0.002     # 0.2% — aumentado 2×
+buffer_pct = 0.0001    # 0.01% — permisivo
 
 [strategy.crypto_configs.polygon]
 enabled = true
-buffer_pct = 0.002     # 0.2% — aumentado 2×
+buffer_pct = 0.0001    # 0.01% — permisivo
 
 [strategy.crypto_configs.chainlink]
 enabled = true
-buffer_pct = 0.002     # 0.2% — aumentado 2×
+buffer_pct = 0.0001    # 0.01% — permisivo
 
 [strategy.crypto_configs.litecoin]
 enabled = true
-buffer_pct = 0.002     # 0.2% — aumentado 2×
+buffer_pct = 0.0001    # 0.01% — permisivo
 
 [strategy.crypto_configs.sui]
 enabled = true
-buffer_pct = 0.0025    # 0.25% — aumentado 2× alta volatilidad
+buffer_pct = 0.0001    # 0.01% — permisivo
 
 [strategy.crypto_configs.pepe]
 enabled = true
-buffer_pct = 0.003     # 0.3% — aumentado 2× meme coin
+buffer_pct = 0.0001    # 0.01% — permisivo
 
 [strategy.crypto_configs.hyperliquid]
 enabled = false
-buffer_pct = 0.001
+buffer_pct = 0.0001    # 0.01%
 
 # Probabilidad minima escalada segun tiempo restante
 # Cuanto menos tiempo queda, mas agresivos somos (menos prob exigimos)

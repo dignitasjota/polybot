@@ -170,6 +170,23 @@ class ClosingArbitrageDetector:
             balance=f"${self._balance:.2f}",
         )
 
+    async def _on_executor_order_cancelled(self, condition_id: str, token_side: str):
+        """Called by executor when an order is cancelled (timeout or user).
+
+        Mark the bet as cancelled instead of pending, so it doesn't mislead
+        the user into thinking it was executed.
+        """
+        key = f"{condition_id}:{token_side}"
+        if key in self._bet_placed:
+            bet_opp = self._bet_placed[key]
+            bet_opp.outcome = "cancelled"
+            logger.info(
+                "bet_cancelled",
+                question=bet_opp.question[:60],
+                side=token_side,
+                reason="order_timeout",
+            )
+
     async def _on_executor_position_redeemed(self, condition_id: str, live_balance: float):
         """Called by executor when a position is redeemed (LIVE mode).
 

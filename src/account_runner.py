@@ -165,6 +165,7 @@ class AccountRunner:
         self.ws_client.on_opportunity(self.detector.check)
         # Live balance sync: executor -> detector (for live mode)
         self.executor.on_order_confirmed(self.detector._on_executor_order_confirmed)
+        self.executor.on_order_cancelled(self.detector._on_executor_order_cancelled)
         self.executor.on_position_redeemed(self.detector._on_executor_position_redeemed)
 
         self.log.info(
