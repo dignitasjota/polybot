@@ -93,7 +93,7 @@ class ClosingArbitrageDetector:
         self._on_position_redeemed = None  # callback(condition_id, live_balance) from executor
         # Dirty flag: only re-check a token if its price moved significantly
         self._last_check_price: dict[str, float] = {}  # token_id -> last checked price
-        self._dirty_threshold_pct = 1.5  # Min price change (%) to trigger re-check
+        self._dirty_threshold_pct = 0.0  # Min price change (%) to trigger re-check (disabled for Up/Down)
         self._stats = {
             "total_scans": 0,
             "opportunities_found": 0,
