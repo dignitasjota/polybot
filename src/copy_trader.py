@@ -177,6 +177,49 @@ class CopyTrader:
             balance=f"${self._balance:.2f}",
         )
 
+    def restore_open_positions(self, trades: list) -> int:
+        """Rehydrate `_bets` from trades persisted in a previous run.
+
+        Called by AccountRunner at startup (Fase 7) so that markets where
+        we already have open copy bets aren't re-bet after a redeploy.
+        Filters by source_strategy=='copy_trade' (or empty for legacy
+        trades pre-Fase 6) and skips already-resolved or failed trades.
+        Returns the number of positions restored.
+        """
+        restored = 0
+        for t in trades:
+            src = getattr(t, "source_strategy", "") or ""
+            if src and src != "copy_trade":
+                continue
+            condition_id = getattr(t, "condition_id", None)
+            token_side = getattr(t, "token_side", None)
+            if not condition_id or not token_side:
+                continue
+            status = getattr(t, "status", None)
+            status_str = getattr(status, "value", status)
+            if status_str in ("failed", "cancelled", "redeemed"):
+                continue
+            key = f"{condition_id}:{token_side}"
+            if key in self._bets:
+                continue
+            bet = CopyBet(
+                condition_id=condition_id,
+                question=getattr(t, "question", "") or "",
+                token_id=getattr(t, "token_id", "") or "",
+                token_side=token_side,
+                price=getattr(t, "price", 0.0) or 0.0,
+                bet_size=getattr(t, "cost_usd", 0.0) or 0.0,
+                potential_profit=0.0,
+                wallet_source="restored",
+                timestamp=getattr(t, "created_at", 0.0) or 0.0,
+            )
+            self._bets[key] = bet
+            self._all_bets.append(bet)
+            restored += 1
+        if restored:
+            logger.info("copy_trade_positions_restored", count=restored)
+        return restored
+
     async def close(self):
         self._running = False
         for task in (self._bg_task, self._settle_task):

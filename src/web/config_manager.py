@@ -194,7 +194,7 @@ class ConfigManager:
     # ── Execution Mode ─────────────────────────────────────────────
 
     def get_account_modes(self) -> list[dict]:
-        """Return execution mode per account."""
+        """Return execution mode per account (legacy)."""
         return [
             {
                 "name": runner.name,
@@ -204,8 +204,25 @@ class ConfigManager:
             for runner in self.bot.accounts
         ]
 
+    def get_strategy_modes(self) -> list[dict]:
+        """Return mode per strategy per account (Fase 11).
+
+        Returns a flat list of dicts, one per strategy:
+        [{"account": "main", "strategy": "directional", "mode": "paper"}, ...]
+        """
+        result = []
+        for runner in self.bot.accounts:
+            for strat_name, strat in runner.strategies.items():
+                mode = strat.config.mode if hasattr(strat, "config") else "paper"
+                result.append({
+                    "account": runner.name,
+                    "strategy": strat_name,
+                    "mode": mode,
+                })
+        return result
+
     async def set_account_mode(self, account_name: str, mode: str) -> bool:
-        """Change execution mode for a specific account. Returns True if changed."""
+        """Change execution mode for a specific account (legacy). Returns True if changed."""
         if mode not in ("paper", "live"):
             return False
 
@@ -216,6 +233,34 @@ class ConfigManager:
                 for acc_cfg in self.config.accounts:
                     if acc_cfg.name == account_name:
                         acc_cfg.execution_mode = mode
+                self._persist()
+                return True
+        return False
+
+    async def set_strategy_mode(self, account_name: str, strategy_name: str, mode: str) -> bool:
+        """Change mode for a specific strategy within an account (Fase 11).
+
+        Supports disabled/paper/live. Returns True if changed.
+        """
+        if mode not in ("disabled", "paper", "live"):
+            return False
+
+        for runner in self.bot.accounts:
+            if runner.name == account_name:
+                if strategy_name not in runner.strategies:
+                    return False
+                await runner.set_strategy_mode(strategy_name, mode)
+                # Update config and persist
+                for acc_cfg in self.config.accounts:
+                    if acc_cfg.name == account_name:
+                        if acc_cfg.strategies and strategy_name in acc_cfg.strategies:
+                            acc_cfg.strategies[strategy_name]["mode"] = mode
+                        # Update legacy execution_mode to reflect overall state
+                        any_live = any(
+                            s.config.mode == "live"
+                            for s in runner.strategies.values()
+                        )
+                        acc_cfg.execution_mode = "live" if any_live else "paper"
                 self._persist()
                 return True
         return False
@@ -306,6 +351,16 @@ class ConfigManager:
             acc_raw["risk"]["max_bet_per_trade"] = acc_cfg.risk.max_bet_per_trade
             acc_raw["risk"]["max_daily_loss"] = acc_cfg.risk.max_daily_loss
             acc_raw["risk"]["simulated_balance"] = acc_cfg.risk.simulated_balance
+
+            # Persist per-strategy modes (new format, Fase 11)
+            if acc_cfg.strategies:
+                acc_raw.setdefault("strategies", {})
+                for strat_name, strat_raw in acc_cfg.strategies.items():
+                    acc_raw["strategies"].setdefault(strat_name, {})
+                    if isinstance(strat_raw, dict):
+                        acc_raw["strategies"][strat_name]["mode"] = strat_raw.get("mode", "paper")
+                    else:
+                        acc_raw["strategies"][strat_name]["mode"] = "paper"
 
         with open(self._toml_path, "wb") as f:
             tomli_w.dump(raw, f)

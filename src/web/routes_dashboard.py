@@ -137,6 +137,22 @@ def _build_account_data(acc, tz_display, wallet_aliases: dict | None = None) -> 
     opps = acc.export_opportunities()
     opps_html = _render_copy_table(opps, tz_display, wallet_aliases or {}) if is_copy else _render_directional_table(opps, tz_display)
 
+    # Per-strategy info (Fase 11)
+    strategies_info = []
+    for strat_name, strat in acc.strategies.items():
+        strat_stats = stats.get("strategies", {}).get(strat_name, {})
+        mode = strat.config.mode if hasattr(strat, "config") else "paper"
+        strategies_info.append({
+            "name": strat_name,
+            "mode": mode,
+            "badge_class": "badge-copy" if strat_name == "copy_trade" else "badge-directional",
+            "badge_text": strat_name.upper().replace("_", "-"),
+            "wins": strat_stats.get("settled_wins", strat_stats.get("wins", 0)),
+            "losses": strat_stats.get("settled_losses", strat_stats.get("losses", 0)),
+            "pnl": strat_stats.get("simulated_pnl", strat_stats.get("total_pnl", 0)),
+            "trades": strat_stats.get("trades_copied", strat_stats.get("opportunities_found", 0)),
+        })
+
     return {
         "name": acc.name,
         "is_copy": is_copy,
@@ -154,6 +170,7 @@ def _build_account_data(acc, tz_display, wallet_aliases: dict | None = None) -> 
         "opportunities_found": s.get("opportunities_found", 0),
         "total_scans": s.get("total_scans", 0),
         "opps_html": opps_html,
+        "strategies": strategies_info,
     }
 
 

@@ -4,13 +4,78 @@
 {% block content %}
 <h2>SETTINGS</h2>
 
-{# Execution Mode #}
+{# Per-Strategy Execution Mode (Fase 11) #}
 <div class="section">
-    <h3>EXECUTION MODE</h3>
+    <h3>STRATEGY MODES</h3>
     <p class="desc" style="margin-bottom:10px;">
-        Cambia entre paper trading (simulado) y live (ordenes reales en Polymarket) para cada estrategia de forma independiente.
+        Configura el modo de cada estrategia independientemente: <strong>disabled</strong> (apagada),
+        <strong>paper</strong> (simulado) o <strong>live</strong> (ordenes reales).
     </p>
     <div id="mode-flash" style="margin:8px 0;"></div>
+    <table>
+        <thead>
+            <tr>
+                <th>Account</th>
+                <th>Strategy</th>
+                <th>Mode</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for sm in strategy_modes %}
+            <tr>
+                <td style="font-weight:bold;">{{ sm.account }}</td>
+                <td>
+                    {% if sm.strategy == 'copy_trade' %}
+                    <span style="color:#ff6ac1;">COPY-TRADE</span>
+                    {% elif sm.strategy == 'directional' %}
+                    <span style="color:#00d4ff;">DIRECTIONAL</span>
+                    {% else %}
+                    <span style="color:#ffaa00;">{{ sm.strategy|upper }}</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <form style="display:inline;">
+                        <input type="hidden" name="account" value="{{ sm.account }}">
+                        <input type="hidden" name="strategy" value="{{ sm.strategy }}">
+                        <select name="mode"
+                            style="background:#1a1a2e;border:1px solid #333;color:{{ '#ff4444' if sm.mode == 'live' else '#00ff88' if sm.mode == 'paper' else '#888' }};font-size:0.9em;padding:6px 10px;border-radius:4px;font-weight:bold;font-family:'Courier New',monospace;"
+                            hx-post="/panel/settings/strategy-mode"
+                            hx-include="closest form"
+                            hx-target="#mode-flash"
+                            hx-swap="innerHTML"
+                            hx-confirm="Cambiar {{ sm.account }}/{{ sm.strategy }} a {{ sm.mode|upper }}?">
+                            <option value="disabled" {{ 'selected' if sm.mode == 'disabled' else '' }} style="color:#888;">DISABLED</option>
+                            <option value="paper" {{ 'selected' if sm.mode == 'paper' else '' }} style="color:#00ff88;">PAPER</option>
+                            <option value="live" {{ 'selected' if sm.mode == 'live' else '' }} style="color:#ff4444;">LIVE</option>
+                        </select>
+                    </form>
+                </td>
+                <td>
+                    {% if sm.mode == 'live' %}
+                    <span style="color:#ff4444;font-size:0.75em;font-weight:bold;">REAL MONEY</span>
+                    {% elif sm.mode == 'paper' %}
+                    <span style="color:#00ff88;font-size:0.75em;">SIMULATED</span>
+                    {% else %}
+                    <span style="color:#888;font-size:0.75em;">OFF</span>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        {% if not strategy_modes %}
+            <tr><td colspan="4" style="color:#555;">No strategies configured</td></tr>
+        {% endif %}
+        </tbody>
+    </table>
+</div>
+
+{# Legacy: Account-level mode (backward compat) #}
+<div class="section" style="border-color:#222;">
+    <h3 style="color:#666;">ACCOUNT MODE (legacy)</h3>
+    <p class="desc" style="margin-bottom:10px;color:#444;">
+        Cambia el modo de TODAS las estrategias de una cuenta a la vez. Usa los controles de arriba para control granular.
+    </p>
+    <div id="legacy-mode-flash" style="margin:8px 0;"></div>
     <table>
         <thead>
             <tr>
@@ -33,23 +98,16 @@
                 <td>
                     <form style="display:inline;">
                         <input type="hidden" name="account" value="{{ acc.name }}">
-                        <div style="display:flex;align-items:center;gap:10px;">
-                            <select name="mode"
-                                style="background:#1a1a2e;border:1px solid #333;color:{{ '#ff4444' if acc.execution_mode == 'live' else '#00ff88' }};font-size:0.9em;padding:6px 10px;border-radius:4px;font-weight:bold;font-family:'Courier New',monospace;"
-                                hx-post="/panel/settings/execution-mode"
-                                hx-include="closest form"
-                                hx-target="#mode-flash"
-                                hx-swap="innerHTML"
-                                hx-confirm="Change {{ acc.name }} to {{ 'LIVE' if acc.execution_mode == 'paper' else 'PAPER' }}?">
-                                <option value="paper" {{ 'selected' if acc.execution_mode == 'paper' else '' }} style="color:#00ff88;">PAPER</option>
-                                <option value="live" {{ 'selected' if acc.execution_mode == 'live' else '' }} style="color:#ff4444;">LIVE</option>
-                            </select>
-                            {% if acc.execution_mode == 'live' %}
-                            <span style="color:#ff4444;font-size:0.75em;">REAL MONEY</span>
-                            {% else %}
-                            <span style="color:#00ff88;font-size:0.75em;">SIMULATED</span>
-                            {% endif %}
-                        </div>
+                        <select name="mode"
+                            style="background:#1a1a2e;border:1px solid #333;color:{{ '#ff4444' if acc.execution_mode == 'live' else '#00ff88' }};font-size:0.85em;padding:5px 8px;border-radius:4px;font-weight:bold;font-family:'Courier New',monospace;"
+                            hx-post="/panel/settings/execution-mode"
+                            hx-include="closest form"
+                            hx-target="#legacy-mode-flash"
+                            hx-swap="innerHTML"
+                            hx-confirm="Cambiar TODAS las estrategias de {{ acc.name }} a {{ 'LIVE' if acc.execution_mode == 'paper' else 'PAPER' }}?">
+                            <option value="paper" {{ 'selected' if acc.execution_mode == 'paper' else '' }} style="color:#00ff88;">PAPER</option>
+                            <option value="live" {{ 'selected' if acc.execution_mode == 'live' else '' }} style="color:#ff4444;">LIVE</option>
+                        </select>
                     </form>
                 </td>
             </tr>

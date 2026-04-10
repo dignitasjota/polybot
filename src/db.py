@@ -80,6 +80,12 @@ async def get_db() -> aiosqlite.Connection:
 async def init_db():
     """Create tables and default admin user if needed."""
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+
+    # Initialize the new persistence layer (opportunities/trades/stats_snapshots)
+    # in the same SQLite file. Idempotent — safe to call repeatedly.
+    from src.persistence import init_persistence
+    await init_persistence(DB_PATH)
+
     db = await get_db()
     try:
         await db.executescript(SCHEMA)
@@ -92,6 +98,13 @@ async def init_db():
         if "confirms_wallet" not in cols:
             await db.execute("ALTER TABLE wallet_overrides ADD COLUMN confirms_wallet TEXT DEFAULT ''")
         if "role" not in cols or "confirms_wallet" not in cols:
+            await db.commit()
+
+        # Migrate: add account_name to users (multi-tenant prep)
+        cursor = await db.execute("PRAGMA table_info(users)")
+        user_cols = {row[1] for row in await cursor.fetchall()}
+        if "account_name" not in user_cols:
+            await db.execute("ALTER TABLE users ADD COLUMN account_name TEXT DEFAULT 'admin'")
             await db.commit()
 
         # Create default admin if no users exist

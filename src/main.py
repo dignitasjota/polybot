@@ -102,6 +102,9 @@ class Bot:
         tasks = [
             self._run_stats_reporter(),
             self._run_web_server(),
+            self._run_snapshot_loop(),   # Fase 10: periodic stats snapshots
+            self._run_cleanup_loop(),    # Fase 10: monthly data cleanup
+            self._run_backup_loop(),     # Fase 13: DB backups every 6h
         ]
         if has_directional:
             tasks.extend([
@@ -360,6 +363,134 @@ class Bot:
             except Exception as e:
                 self.log.warning("ws_resubscribe_failed", error=str(e),
                                 msg="New markets won't receive WS prices until reconnect")
+
+    async def _run_snapshot_loop(self):
+        """Record stats snapshots every 5 minutes per account per strategy."""
+        from src.persistence import get_persistence
+
+        while self._running:
+            await asyncio.sleep(300)  # 5 min
+            if not self._running:
+                break
+            try:
+                persistence = get_persistence()
+                if persistence is None:
+                    continue
+
+                for acc in self.accounts:
+                    stats = acc.get_stats()
+                    strategies = stats.get("strategies", {})
+                    executor_stats = stats.get("executor", {})
+
+                    for strat_name, strat_stats in strategies.items():
+                        # Determine mode from strategy config
+                        strat_obj = acc.strategies.get(strat_name)
+                        if not strat_obj:
+                            continue
+                        mode = strat_obj.config.mode if hasattr(strat_obj, "config") else "paper"
+                        if mode == "disabled":
+                            continue
+
+                        # Get balance from the appropriate ledger
+                        if mode == "live":
+                            balance = executor_stats.get("live", {}).get("balance", 0.0)
+                        else:
+                            balance = executor_stats.get("paper", {}).get("balance", 0.0)
+
+                        trades_count = strat_stats.get("total_bets", strat_stats.get("total_scans", 0))
+
+                        await persistence.snapshot_stats(
+                            account_name=acc.name,
+                            source_strategy=strat_name,
+                            mode=mode,
+                            balance=balance,
+                            daily_pnl=0.0,
+                            total_pnl=strat_stats.get("total_pnl", 0.0),
+                            trades_count=trades_count,
+                            wins=strat_stats.get("wins", 0),
+                            losses=strat_stats.get("losses", 0),
+                            pending=strat_stats.get("pending", 0),
+                            open_positions=strat_stats.get("open_positions", 0),
+                            opportunities_detected=strat_stats.get("opportunities_detected", strat_stats.get("total_scans", 0)),
+                            opportunities_placed=strat_stats.get("opportunities_placed", strat_stats.get("total_bets", 0)),
+                        )
+
+                self.log.debug("snapshots_recorded", accounts=len(self.accounts))
+
+            except Exception as e:
+                self.log.error("snapshot_error", error=str(e))
+
+    async def _run_cleanup_loop(self):
+        """Cleanup old data: live >1 year, paper >90 days. Runs monthly."""
+        from src.persistence import get_persistence
+
+        # Wait 1 hour before first run
+        await asyncio.sleep(3600)
+
+        while self._running:
+            try:
+                persistence = get_persistence()
+                if persistence:
+                    deleted = await persistence.cleanup_old_data()
+                    await persistence.vacuum()
+                    self.log.info(
+                        "maintenance_completed",
+                        deleted_records=deleted if isinstance(deleted, int) else 0,
+                    )
+            except Exception as e:
+                self.log.error("maintenance_error", error=str(e))
+
+            # Sleep ~30 days before next run
+            for _ in range(30 * 24):
+                if not self._running:
+                    return
+                await asyncio.sleep(3600)
+
+    async def _run_backup_loop(self):
+        """Backup SQLite DB every 6 hours, retain 14 days."""
+        import sqlite3
+        import shutil
+        from datetime import datetime, timedelta
+
+        backup_dir = Path("data/backups")
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        while self._running:
+            # Sleep first (6 hours)
+            for _ in range(6 * 60):
+                if not self._running:
+                    return
+                await asyncio.sleep(60)
+
+            if not self._running:
+                break
+
+            try:
+                now = datetime.now()
+                backup_path = backup_dir / f"panel_{now.strftime('%Y%m%d_%H%M%S')}.db"
+
+                # Safe copy using sqlite3.backup()
+                src_conn = sqlite3.connect("data/panel.db")
+                dst_conn = sqlite3.connect(str(backup_path))
+                with dst_conn:
+                    src_conn.backup(dst_conn)
+                src_conn.close()
+                dst_conn.close()
+
+                self.log.info("backup_completed", path=str(backup_path))
+
+                # Cleanup old backups (>14 days)
+                cutoff = now - timedelta(days=14)
+                for old_backup in backup_dir.glob("panel_*.db"):
+                    try:
+                        if datetime.fromtimestamp(old_backup.stat().st_mtime) < cutoff:
+                            old_backup.unlink()
+                            self.log.info("backup_deleted", path=str(old_backup))
+                    except Exception:
+                        pass
+
+            except Exception as e:
+                self.log.error("backup_error", error=str(e))
 
     def _export_data(self):
         """Export full report per account to separate JSON files."""

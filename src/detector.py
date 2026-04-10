@@ -56,6 +56,10 @@ class Opportunity:
     # Strategy type for analytics
     strategy_type: str = "updown_directional"  # "updown_directional", "closing_arb_pre", "closing_arb_post"
 
+    # Multi-strategy tagging (Fase 3)
+    source_strategy: str = ""   # "directional", "copy_trade", etc — set by AccountRunner
+    mode: str = "paper"         # "paper" or "live" — set by AccountRunner from strategy config
+
 
 class ClosingArbitrageDetector:
     """Detects closing arbitrage opportunities.
@@ -237,6 +241,58 @@ class ClosingArbitrageDetector:
     async def close(self):
         """Close resources (Binance session)."""
         await self._price_checker.close()
+
+    def restore_open_positions(self, trades: list) -> int:
+        """Rehydrate `_bet_placed` from trades persisted in a previous run.
+
+        Called by AccountRunner at startup (Fase 7) so that markets where
+        we already have open positions don't get re-bet after a redeploy.
+        Accepts a list of `TradeRecord`-like objects with attributes
+        ``source_strategy``, ``condition_id``, ``token_side``, ``status``.
+
+        Filters by source_strategy=='directional' (or empty for legacy
+        trades pre-Fase 6) and skips already-resolved or failed trades.
+        Returns the number of positions restored.
+        """
+        restored = 0
+        for t in trades:
+            src = getattr(t, "source_strategy", "") or ""
+            if src and src != "directional":
+                continue
+            condition_id = getattr(t, "condition_id", None)
+            token_side = getattr(t, "token_side", None)
+            if not condition_id or not token_side:
+                continue
+            # Skip non-open statuses
+            status = getattr(t, "status", None)
+            status_str = getattr(status, "value", status)
+            if status_str in ("failed", "cancelled", "redeemed"):
+                continue
+            key = f"{condition_id}:{token_side}"
+            if key in self._bet_placed:
+                continue
+            opp = Opportunity(
+                timestamp=getattr(t, "created_at", 0.0) or 0.0,
+                condition_id=condition_id,
+                question=getattr(t, "question", "") or "",
+                token_side=token_side,
+                token_id=getattr(t, "token_id", "") or "",
+                token_price=getattr(t, "price", 0.0) or 0.0,
+                implied_probability=0.0,
+                margin_gross=0.0,
+                fee_estimated=0.0,
+                margin_net=0.0,
+                depth_at_price=0.0,
+                resolved=False,
+                winning_token_id="",
+                source_strategy="directional",
+                mode=getattr(t, "mode", "paper") or "paper",
+            )
+            self._bet_placed[key] = opp
+            restored += 1
+        if restored:
+            logger.info("directional_positions_restored", count=restored)
+        return restored
 
     async def check(self, token_id: str = "", event_type: str = ""):
         """Check market(s) for closing arbitrage opportunities.

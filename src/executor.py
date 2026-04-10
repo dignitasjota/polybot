@@ -71,11 +71,82 @@ class TradeRecord:
     size_matched: float = 0.0  # shares actually filled
     error: str = ""
 
+    # Multi-strategy tagging (Fase 3)
+    source_strategy: str = ""   # "directional", "copy_trade", etc — set on execute()
+    mode: str = "paper"         # "paper" or "live" — set on execute() from strategy mode
+
 
 class ExecutionMode(Enum):
     PAPER = "paper"      # Current mode — no real orders
     DRY_RUN = "dry_run"  # Validates everything but doesn't submit
     LIVE = "live"        # Real execution
+
+
+class LedgerView:
+    """Per-mode read/write view over the Executor's underlying state.
+
+    Introduced in Fase 5 of the multi-strategy refactor. Filters
+    `executor._trades` and `executor._pending_orders` by `trade.mode`
+    so each mode (paper/live) has an isolated view, and exposes its own
+    `balance` and `daily_pnl`.
+
+    The underlying storage stays in the Executor (single source of truth),
+    so this class is non-breaking — existing code that touches
+    `executor._trades` directly keeps working.
+    """
+
+    __slots__ = ("_executor", "_mode")
+
+    def __init__(self, executor: "Executor", mode: str):
+        if mode not in ("paper", "live"):
+            raise ValueError(f"invalid ledger mode: {mode}")
+        self._executor = executor
+        self._mode = mode
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
+    def balance(self) -> float | None:
+        if self._mode == "live":
+            return self._executor._live_balance
+        return self._executor._paper_balance
+
+    @balance.setter
+    def balance(self, value: float | None) -> None:
+        if self._mode == "live":
+            self._executor._live_balance = value
+        else:
+            self._executor._paper_balance = value
+
+    @property
+    def trades(self) -> list["TradeRecord"]:
+        """Filtered view: only trades tagged with this ledger's mode.
+
+        Trades created before Fase 3 default to ``mode='paper'``, so during
+        the migration window the paper ledger sees them and the live ledger
+        is empty until new live trades are created with ``mode='live'``.
+        """
+        return [
+            t for t in self._executor._trades
+            if getattr(t, "mode", "paper") == self._mode
+        ]
+
+    @property
+    def pending_orders(self) -> dict[str, "TradeRecord"]:
+        return {
+            oid: t for oid, t in self._executor._pending_orders.items()
+            if getattr(t, "mode", "paper") == self._mode
+        }
+
+    @property
+    def daily_pnl(self) -> float:
+        return self._executor._daily_pnl_by_mode.get(self._mode, 0.0)
+
+    @daily_pnl.setter
+    def daily_pnl(self, value: float) -> None:
+        self._executor._daily_pnl_by_mode[self._mode] = value
 
 
 class Executor:
@@ -97,9 +168,11 @@ class Executor:
         risk: RiskConfig,
         mode: ExecutionMode = ExecutionMode.PAPER,
         credentials: CredentialsConfig | None = None,
+        account_name: str = "default",
     ):
         self.risk = risk
         self.mode = mode
+        self._account_name = account_name  # Fase 6: tag persisted rows
         self._credentials = credentials or CredentialsConfig()
         self._client = None  # py_clob_client.ClobClient
         self._trades: list[TradeRecord] = []
@@ -111,8 +184,27 @@ class Executor:
         self._live_balance: float | None = None  # USDC balance from Polymarket
         self._last_balance_fetch: float = 0.0
 
+        # Paper balance tracking (Fase 5: dual-ledger). Default to the
+        # configured simulated balance. Detector/copy_trader keep their own
+        # balance for now; Fase 6+ will route updates here too.
+        self._paper_balance: float | None = risk.simulated_balance
+
+        # Per-mode daily P&L (Fase 5). Legacy `_daily_pnl` above stays as
+        # the active-mode counter for backward compat with the existing
+        # risk checks until Fase 8 fully splits routing.
+        self._daily_pnl_by_mode: dict[str, float] = {"paper": 0.0, "live": 0.0}
+
+        # Dual ledger views (Fase 5). Read/write proxies that filter
+        # _trades/_pending_orders by trade.mode. Used by AccountContext
+        # (Fase 2) and by the multi-strategy AccountRunner (Fase 8).
+        self._ledger_live = LedgerView(self, "live")
+        self._ledger_paper = LedgerView(self, "paper")
+
         # Order monitoring
         self._pending_orders: dict[str, TradeRecord] = {}  # order_id -> TradeRecord
+        # Fase 6: track which trades have already been persisted (idempotency
+        # guard for restored trades and rapid status updates).
+        self._persisted_orders: set[str] = set()
         self._monitor_task: asyncio.Task | None = None
         self._on_balance_update = None  # callback(balance: float)
         self._on_order_confirmed = None  # callback(order_id, condition_id, token_id, side, price, size, cost_usd)
@@ -512,6 +604,17 @@ class Executor:
                     msg="Position redeemed successfully, refreshing balance",
                 )
                 await self._refresh_balance()
+                # Fase 6: persist redeem on all matching trades for this market
+                now = time.time()
+                for trade in self._trades:
+                    if (
+                        trade.condition_id == condition_id
+                        and trade.mode == "live"
+                        and trade.status in (OrderStatus.MATCHED, OrderStatus.CONFIRMED)
+                    ):
+                        await self._persist_status_update(
+                            trade, "redeemed", settled_at=now,
+                        )
                 # Notify detector callback if registered
                 if self._on_balance_update and self._live_balance is not None:
                     self._on_balance_update(self._live_balance)
@@ -769,24 +872,43 @@ class Executor:
     # ── Execution ─────────────────────────────────────────────────
 
     async def execute(self, opp: Opportunity) -> TradeRecord | None:
-        """Execute a trade for the given opportunity."""
+        """Execute a trade for the given opportunity.
+
+        Routing priority:
+        1. ``opp.mode`` (set by AccountRunner in Fase 8 multi-strategy)
+        2. ``self.mode`` (legacy single-mode executor)
+
+        In multi-strategy mode an account can have one strategy in paper and
+        another in live — each opportunity carries its own mode tag.
+        """
         if not self._initialized:
             logger.error("executor_not_initialized")
             return None
 
-        # In live mode, refresh balance before every trade so risk checks
-        # use the real Polymarket balance (catches manual bets, deposits, withdrawals).
-        if self.mode == ExecutionMode.LIVE:
+        # Determine effective mode per-opportunity (Fase 8) or fallback
+        opp_mode = getattr(opp, "mode", "") or ""
+        if opp_mode == "live":
+            effective = ExecutionMode.LIVE
+        elif opp_mode == "dry_run":
+            effective = ExecutionMode.DRY_RUN
+        elif opp_mode == "paper":
+            effective = ExecutionMode.PAPER
+        else:
+            effective = self.mode  # Legacy fallback
+
+        # In live mode, refresh balance before every trade
+        if effective == ExecutionMode.LIVE:
             await self._refresh_balance()
 
-        # Risk checks
-        if not self._check_risk(opp):
-            return None
+        # Risk checks (live only — paper is unconstrained except daily cap)
+        if effective in (ExecutionMode.LIVE, ExecutionMode.DRY_RUN):
+            if not self._check_risk(opp):
+                return None
 
-        if self.mode == ExecutionMode.PAPER:
+        if effective == ExecutionMode.PAPER:
             return self._paper_trade(opp)
 
-        if self.mode == ExecutionMode.DRY_RUN:
+        if effective == ExecutionMode.DRY_RUN:
             return await self._dry_run(opp)
 
         return await self._live_trade(opp)
@@ -841,6 +963,153 @@ class Executor:
 
         return True
 
+    # ── Fase 6: persistence helpers ─────────────────────────────────
+
+    def _current_mode_str(self) -> str:
+        """String form of the current execution mode for persistence."""
+        return "live" if self.mode == ExecutionMode.LIVE else "paper"
+
+    def _opp_strategy(self, opp: Opportunity) -> str:
+        """Best-effort source_strategy tag for an opportunity.
+
+        Until Fase 8 wires `opp.source_strategy` from the AccountRunner,
+        fall back to the legacy `strategy_type` or to the executor's
+        single-strategy default.
+        """
+        s = getattr(opp, "source_strategy", "") or ""
+        if s:
+            return s
+        legacy = getattr(opp, "strategy_type", "") or ""
+        if "copy" in legacy:
+            return "copy_trade"
+        return "directional"
+
+    async def _persist_new_trade(self, trade: TradeRecord, opp: Opportunity, status_str: str) -> None:
+        """Queue a record_trade call. Swallows errors and de-dupes by order_id."""
+        if not trade.order_id or trade.order_id in self._persisted_orders:
+            return
+        try:
+            from src.persistence import get_persistence
+            persistence = get_persistence()
+        except (ImportError, RuntimeError):
+            return  # Persistence not initialized (tests, paper-only sandbox)
+        try:
+            mode_str = trade.mode or self._current_mode_str()
+            await persistence.record_trade(
+                account_name=self._account_name,
+                source_strategy=self._opp_strategy(opp),
+                mode=mode_str,
+                order_id=trade.order_id,
+                condition_id=opp.condition_id,
+                question=getattr(opp, "question", "") or "",
+                token_side=opp.token_side,
+                token_id=trade.token_id,
+                price=trade.price,
+                size=trade.size,
+                cost_usd=trade.cost_usd,
+                status=status_str,
+            )
+            self._persisted_orders.add(trade.order_id)
+        except Exception as e:
+            logger.warning("persist_trade_failed", error=str(e), order_id=trade.order_id)
+
+    async def _persist_status_update(
+        self,
+        trade: TradeRecord,
+        status_str: str,
+        settled_pnl: float | None = None,
+        matched_at: float | None = None,
+        settled_at: float | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Queue a status update for a persisted trade."""
+        if not trade.order_id:
+            return
+        try:
+            from src.persistence import get_persistence
+            persistence = get_persistence()
+        except (ImportError, RuntimeError):
+            return
+        try:
+            await persistence.update_trade_status(
+                account_name=self._account_name,
+                order_id=trade.order_id,
+                status=status_str,
+                matched_at=matched_at,
+                settled_at=settled_at,
+                settled_pnl=settled_pnl,
+                error=error,
+            )
+        except Exception as e:
+            logger.warning("persist_status_failed", error=str(e), order_id=trade.order_id)
+
+    async def load_persisted_state(self) -> int:
+        """Reload open trades from SQLite into the in-memory ledgers.
+
+        Called by AccountRunner after `initialize()` so that trades placed
+        in a previous bot run keep being tracked. Returns the number of
+        trades restored.
+        """
+        try:
+            from src.persistence import get_persistence
+            persistence = get_persistence()
+        except (ImportError, RuntimeError):
+            return 0
+
+        restored = 0
+        for mode_str in ("live", "paper"):
+            try:
+                rows = await persistence.query_open_trades(
+                    self._account_name, mode=mode_str
+                )
+            except Exception as e:
+                logger.warning("persist_query_failed", mode=mode_str, error=str(e))
+                continue
+            for row in rows:
+                # Skip already-tracked orders (e.g. re-entry after redeploy)
+                if any(t.order_id == row.get("order_id") for t in self._trades):
+                    continue
+                try:
+                    status_raw = (row.get("status") or "pending").lower()
+                    try:
+                        status_enum = OrderStatus(status_raw)
+                    except ValueError:
+                        status_enum = OrderStatus.PENDING
+                    trade = TradeRecord(
+                        order_id=row.get("order_id") or "",
+                        condition_id=row.get("condition_id") or "",
+                        question=row.get("question") or "",
+                        token_id=row.get("token_id") or "",
+                        token_side=row.get("token_side") or "",
+                        price=row.get("price") or 0.0,
+                        size=row.get("size") or 0.0,
+                        cost_usd=row.get("cost_usd") or 0.0,
+                        status=status_enum,
+                        created_at=row.get("created_at") or 0.0,
+                        matched_at=row.get("matched_at") or 0.0,
+                        size_matched=row.get("size") or 0.0,
+                        error=row.get("error") or "",
+                        source_strategy=row.get("source_strategy") or "",
+                        mode=mode_str,
+                    )
+                    self._trades.append(trade)
+                    if trade.order_id:
+                        self._persisted_orders.add(trade.order_id)
+                    if mode_str == "live" and status_enum in (
+                        OrderStatus.PENDING, OrderStatus.LIVE,
+                    ):
+                        self._pending_orders[trade.order_id] = trade
+                    restored += 1
+                except Exception as e:
+                    logger.warning("persist_restore_row_failed", error=str(e))
+        if restored:
+            logger.info(
+                "persisted_state_restored",
+                account=self._account_name,
+                restored=restored,
+            )
+        return restored
+
     def _paper_trade(self, opp: Opportunity) -> TradeRecord:
         """Record a paper trade (no real execution)."""
         shares = opp.suggested_bet / opp.token_price if opp.token_price > 0 else 0
@@ -857,8 +1126,17 @@ class Executor:
             created_at=time.time(),
             matched_at=time.time(),
             size_matched=shares,
+            source_strategy=self._opp_strategy(opp),
+            mode="paper",
         )
         self._trades.append(trade)
+        # Fase 6: persist (fire-and-forget via asyncio.create_task because
+        # _paper_trade is sync). The persistence layer queues internally,
+        # so this just kicks off a coroutine that returns immediately.
+        try:
+            asyncio.create_task(self._persist_new_trade(trade, opp, "confirmed"))
+        except RuntimeError:
+            pass  # No running loop (tests)
         return trade
 
     async def _dry_run(self, opp: Opportunity) -> TradeRecord:
@@ -903,6 +1181,8 @@ class Executor:
             size=round(shares, 2),
             cost_usd=opp.suggested_bet,
             created_at=time.time(),
+            source_strategy=self._opp_strategy(opp),
+            mode="live",
         )
 
         try:
@@ -955,6 +1235,8 @@ class Executor:
                         logger.warning("order_confirmed_callback_error", error=str(e))
                 # Refresh real balance async after order settles on-chain
                 asyncio.create_task(self._refresh_balance_delayed(delay_seconds=5))
+                # Fase 6: persist with status='pending' (live not yet matched)
+                await self._persist_new_trade(trade, opp, "pending")
             else:
                 trade.status = OrderStatus.FAILED
                 trade.error = str(response)
@@ -1014,6 +1296,10 @@ class Executor:
                     to_remove.append(order_id)
                     # Refresh real balance after fill
                     await self._refresh_balance()
+                    # Fase 6: persist transition
+                    await self._persist_status_update(
+                        trade, "confirmed", matched_at=now,
+                    )
                     logger.info(
                         "order_matched",
                         order_id=order_id,
@@ -1028,6 +1314,10 @@ class Executor:
                     to_remove.append(order_id)
                     # Refresh real balance instead of optimistic refund
                     await self._refresh_balance()
+                    # Fase 6: persist transition
+                    await self._persist_status_update(
+                        trade, "cancelled", error=trade.error,
+                    )
                     logger.info(
                         "order_cancelled_external",
                         order_id=order_id,
@@ -1057,6 +1347,8 @@ class Executor:
             trade.error = f"Timed out after {ORDER_TIMEOUT}s"
             # Refresh real balance instead of optimistic refund
             await self._refresh_balance()
+            # Fase 6: persist transition
+            await self._persist_status_update(trade, "cancelled", error=trade.error)
             logger.info(
                 "order_cancelled_timeout",
                 order_id=order_id,

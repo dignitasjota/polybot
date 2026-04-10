@@ -186,14 +186,22 @@ class CopyTradeConfig:
 
 @dataclass
 class AccountConfig:
-    """Configuration for a single trading account."""
+    """Configuration for a single trading account.
+
+    Supports both old format (strategy_type + copy_trade) and new multi-
+    strategy format (strategies dict). Auto-detected at load time.
+    """
     name: str = "default"
     enabled: bool = True
-    strategy_type: str = "directional"  # "directional" or "copy_trade"
-    execution_mode: str = "paper"  # "paper", "dry_run", "live"
+    strategy_type: str = "directional"  # Legacy: "directional" or "copy_trade"
+    execution_mode: str = "paper"  # Legacy: "paper", "dry_run", "live" (all strategies)
     credentials: CredentialsConfig = field(default_factory=CredentialsConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
-    copy_trade: CopyTradeConfig = field(default_factory=CopyTradeConfig)
+    copy_trade: CopyTradeConfig = field(default_factory=CopyTradeConfig)  # Legacy
+    # Fase 9: per-strategy raw config dicts (new multi-strategy format).
+    # Keys are strategy names ("directional", "copy_trade"), values are raw
+    # config dicts with a "mode" field (disabled/paper/live).
+    strategies: dict = field(default_factory=dict)
 
 
 def _parse_duration(value: str) -> timedelta:
@@ -254,30 +262,57 @@ class Config:
 
         risk_raw = raw.get("risk", {})
 
-        # Parse accounts
+        # Parse accounts (auto-detect old vs new format)
         accounts = []
         for acc_raw in raw.get("accounts", []):
             creds_raw = acc_raw.pop("credentials", {})
             creds = CredentialsConfig(**creds_raw) if creds_raw else CredentialsConfig()
 
-            copy_raw = acc_raw.pop("copy_trade", {})
-            copy_cfg = CopyTradeConfig(**copy_raw) if copy_raw else CopyTradeConfig()
-
             # Account-level risk overrides (falls back to global risk)
             acc_risk_raw = acc_raw.pop("risk", None)
             if acc_risk_raw:
-                # Merge: global risk as base, account overrides on top
                 merged_risk = {**risk_raw, **acc_risk_raw}
                 acc_risk = RiskConfig(**merged_risk)
             else:
                 acc_risk = RiskConfig(**risk_raw)
 
-            accounts.append(AccountConfig(
-                credentials=creds,
-                copy_trade=copy_cfg,
-                risk=acc_risk,
-                **acc_raw,
-            ))
+            # Auto-detect: new multi-strategy format has "strategies" key
+            strategies_raw = acc_raw.pop("strategies", None)
+
+            if strategies_raw:
+                # ── New format (Fase 9) ──
+                # Determine primary strategy_type and execution_mode from
+                # the strategies dict for backward compat.
+                first_strat = next(iter(strategies_raw), "directional")
+                first_mode = strategies_raw.get(first_strat, {}).get("mode", "paper")
+
+                # Extract copy_trade config if present (for legacy CopyTrader)
+                ct_raw = strategies_raw.get("copy_trade", {}).copy()
+                ct_raw.pop("mode", None)
+                ct_raw.pop("priority", None)
+                ct_raw.pop("enabled", None)
+                copy_cfg = CopyTradeConfig(**ct_raw) if ct_raw else CopyTradeConfig()
+
+                accounts.append(AccountConfig(
+                    credentials=creds,
+                    risk=acc_risk,
+                    copy_trade=copy_cfg,
+                    strategy_type=first_strat,
+                    execution_mode=first_mode,
+                    strategies=strategies_raw,
+                    **acc_raw,
+                ))
+            else:
+                # ── Old format (pre-Fase 9) ──
+                copy_raw = acc_raw.pop("copy_trade", {})
+                copy_cfg = CopyTradeConfig(**copy_raw) if copy_raw else CopyTradeConfig()
+
+                accounts.append(AccountConfig(
+                    credentials=creds,
+                    copy_trade=copy_cfg,
+                    risk=acc_risk,
+                    **acc_raw,
+                ))
 
         # Fallback: if no accounts defined, create one default account
         if not accounts:

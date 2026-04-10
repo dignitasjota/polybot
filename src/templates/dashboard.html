@@ -3,6 +3,22 @@
 
 {% block extra_head %}
 <meta http-equiv="refresh" content="10">
+<style>
+    .strategy-tabs { display: flex; gap: 0; margin-bottom: 10px; border-bottom: 1px solid #333; }
+    .strategy-tabs .stab {
+        padding: 5px 12px; font-size: 0.75em; font-weight: bold;
+        border: 1px solid transparent; border-bottom: none; border-radius: 3px 3px 0 0;
+        cursor: default; color: #888;
+    }
+    .stab-active { color: #00ff88 !important; background: #0d0d1a; border-color: #333 !important; }
+    .mode-badge {
+        display: inline-block; padding: 1px 6px; border-radius: 3px;
+        font-size: 0.65em; font-weight: bold; margin-left: 4px;
+    }
+    .mode-live { background: #ff4444; color: #fff; }
+    .mode-paper { background: #00ff88; color: #000; }
+    .mode-disabled { background: #333; color: #888; }
+</style>
 {% endblock %}
 
 {% block content %}
@@ -19,6 +35,19 @@
         <span class="{{ acc.badge_class }}">{{ acc.badge_text }}</span>
         <span style="color:#666;font-size:0.8em;">({{ acc.exec_mode }})</span>
     </div>
+
+    {# Per-strategy mode badges #}
+    {% if acc.strategies|length > 0 %}
+    <div class="strategy-tabs">
+        {% for strat in acc.strategies %}
+        <div class="stab stab-active">
+            <span class="{{ strat.badge_class }}" style="font-size:0.9em;">{{ strat.badge_text }}</span>
+            <span class="mode-badge mode-{{ strat.mode }}">{{ strat.mode|upper }}</span>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
     <div class="stats">
         <div class="stat">
             <div class="label">Balance</div>
@@ -56,6 +85,23 @@
         </div>
         {% endif %}
     </div>
+
+    {# Per-strategy stats breakdown (when multiple strategies) #}
+    {% if acc.strategies|length > 1 %}
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+        {% for strat in acc.strategies %}
+        {% if strat.mode != 'disabled' %}
+        <div style="background:#111;border:1px solid #222;border-radius:4px;padding:6px 10px;font-size:0.75em;">
+            <span style="color:#888;">{{ strat.badge_text }}:</span>
+            <span style="color:#00ff88;">{{ strat.wins }}W</span> /
+            <span style="color:#ff4444;">{{ strat.losses }}L</span>
+            <span style="color:#{{ '00ff88' if strat.pnl >= 0 else 'ff4444' }};">${{ "%+.2f"|format(strat.pnl) }}</span>
+            <span class="mode-badge mode-{{ strat.mode }}" style="font-size:0.85em;">{{ strat.mode|upper }}</span>
+        </div>
+        {% endif %}
+        {% endfor %}
+    </div>
+    {% endif %}
 
     <h3>Bets (last 30)</h3>
     {{ acc.opps_html|safe }}

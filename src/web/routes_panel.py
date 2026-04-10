@@ -268,6 +268,7 @@ async def panel_settings(request: web.Request) -> web.Response:
         "active_tab": "settings",
         "audit_log": log_entries,
         "account_modes": cm.get_account_modes(),
+        "strategy_modes": cm.get_strategy_modes(),
         "flash_msg": None,
         "flash_type": None,
     })
@@ -325,6 +326,35 @@ async def panel_execution_mode(request: web.Request) -> web.Response:
     raise web.HTTPFound("/panel/settings")
 
 
+@routes.post("/panel/settings/strategy-mode")
+async def panel_strategy_mode(request: web.Request) -> web.Response:
+    """Change mode for a specific strategy (disabled/paper/live)."""
+    cm = _get_cm(request)
+    session = request.get("session", {})
+    user = session.get("user", "unknown")
+    data = await request.post()
+
+    account_name = data.get("account", "")
+    strategy_name = data.get("strategy", "")
+    mode = data.get("mode", "")
+
+    if mode not in ("disabled", "paper", "live"):
+        msg = '<div class="flash flash-error">Modo invalido</div>'
+    else:
+        ok = await cm.set_strategy_mode(account_name, strategy_name, mode)
+        if ok:
+            await add_audit(user, "strategy_mode", f"{account_name}/{strategy_name} → {mode}")
+            colors = {"live": "#ff4444", "paper": "#00ff88", "disabled": "#888"}
+            color = colors.get(mode, "#888")
+            msg = f'<div class="flash flash-info">{account_name}/{strategy_name}: <span style="color:{color};font-weight:bold;">{mode.upper()}</span></div>'
+        else:
+            msg = f'<div class="flash flash-error">No encontrado: {account_name}/{strategy_name}</div>'
+
+    if request.headers.get("HX-Request"):
+        return web.Response(text=msg, content_type="text/html")
+    raise web.HTTPFound("/panel/settings")
+
+
 async def _settings_with_flash(request, msg, flash_type):
     cm = _get_cm(request)
     ctx = await _base_context(request)
@@ -338,6 +368,7 @@ async def _settings_with_flash(request, msg, flash_type):
         "active_tab": "settings",
         "audit_log": log_entries,
         "account_modes": cm.get_account_modes(),
+        "strategy_modes": cm.get_strategy_modes(),
         "flash_msg": msg,
         "flash_type": flash_type,
     })
