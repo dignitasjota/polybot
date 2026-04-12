@@ -235,6 +235,17 @@ class AccountRunner:
         self.executor.on_balance_update(self._on_balance_changed)
         self._sync_live_balance()
 
+        # In LIVE mode, set starting_balance to real balance for accurate ROI
+        if self.exec_mode == ExecutionMode.LIVE:
+            live_balance = self.executor.get_balance()
+            if live_balance is not None:
+                if self.detector:
+                    self.detector._starting_balance = live_balance
+                    self.detector._balance = live_balance
+                if self.copy_trader:
+                    self.copy_trader._starting_balance = live_balance
+                    self.copy_trader._balance = live_balance
+
         # Live mode: orphan scan
         if self.exec_mode == ExecutionMode.LIVE:
             await self._do_orphan_scan("startup")
@@ -417,13 +428,41 @@ class AccountRunner:
             return
 
         # If switching ANY strategy to live, ensure executor is initialized
-        if new_mode == "live" and self.exec_mode == ExecutionMode.PAPER:
+        switching_to_live = new_mode == "live" and self.exec_mode == ExecutionMode.PAPER
+        if switching_to_live:
             self.executor._credentials = self.account.credentials
             self.exec_mode = ExecutionMode.LIVE
             self.account.execution_mode = "live"
             await self.executor.set_mode(ExecutionMode.LIVE)
 
         await strat.set_mode(new_mode)
+
+        # Reset stats when switching modes (same as set_execution_mode)
+        if new_mode == "live" and old_mode != "live":
+            live_balance = self.executor.get_balance()
+            self.executor.reset_trades()
+            if self.detector:
+                self.detector.reset_stats(new_balance=live_balance)
+            if self.copy_trader:
+                self.copy_trader.reset_stats(new_balance=live_balance)
+            self._sync_live_balance()
+            self.log.info(
+                "stats_reset_for_live",
+                account=self.name,
+                strategy=strategy_name,
+                live_balance=f"${live_balance:.2f}" if live_balance is not None else "unknown",
+            )
+            # Start orphan scan if not already running
+            if self._orphan_scan_task is None or self._orphan_scan_task.done():
+                await self._do_orphan_scan("strategy_mode_change")
+                self._orphan_scan_task = asyncio.create_task(self._run_orphan_scan_loop())
+        elif new_mode in ("paper", "disabled") and old_mode == "live":
+            sim_balance = self.account.risk.simulated_balance
+            self.executor.reset_trades()
+            if self.detector:
+                self.detector.reset_stats(new_balance=sim_balance)
+            if self.copy_trader:
+                self.copy_trader.reset_stats(new_balance=sim_balance)
 
         # If all strategies are paper/disabled, downgrade executor to paper
         any_live = any(
