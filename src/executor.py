@@ -1472,4 +1472,7 @@ class Executor:
         }
         if self._live_balance is not None:
             stats["live_balance"] = round(self._live_balance, 2)
+        if self._pending_redeems:
+            stats["pending_redeems"] = len(self._pending_redeems)
+        stats["redeem_available"] = self._redeem_available
         return stats

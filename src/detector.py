@@ -84,6 +84,7 @@ class ClosingArbitrageDetector:
         self._last_log_time: dict[str, float] = {}  # "condition_id:side:event" -> timestamp
         self._active_opportunities: dict[str, Opportunity] = {}  # "condition_id:side" -> latest opp
         self._bet_placed: dict[str, Opportunity] = {}  # "condition_id:side" -> first bet (for paper trading)
+        self._no_depth_cooldown: dict[str, float] = {}  # "condition_id:side" -> timestamp (retry after 60s)
         self._settled_conditions: set[str] = set()  # Already settled condition_ids
         self._confirmed_orders: dict[str, dict] = {}  # "condition_id:side" -> {"order_id": ..., "cost": ...}
         self._price_checker = PriceChecker(
@@ -214,6 +215,7 @@ class ClosingArbitrageDetector:
         self._opportunities_log.clear()
         self._active_opportunities.clear()
         self._bet_placed.clear()
+        self._no_depth_cooldown.clear()
         self._settled_conditions.clear()
         self._confirmed_orders.clear()  # Clear executor-confirmed orders on reset
         self._last_logged.clear()
@@ -965,6 +967,12 @@ class ClosingArbitrageDetector:
             )
         else:
             is_new_bet = key not in self._bet_placed
+            # Cooldown: if we recently tried and couldn't bet (no depth), wait 60s
+            if is_new_bet and key in self._no_depth_cooldown:
+                if time.time() - self._no_depth_cooldown[key] < 60:
+                    is_new_bet = False  # Treat as existing, skip re-evaluation
+                else:
+                    del self._no_depth_cooldown[key]  # Cooldown expired, allow retry
 
         # EV check: reject bets with negative expected value
         if is_new_bet and opp.suggested_bet > 0:
@@ -987,11 +995,16 @@ class ClosingArbitrageDetector:
 
         if is_new_bet and opp.suggested_bet > 0:
             self._bet_placed[key] = opp
+            self._no_depth_cooldown.pop(key, None)  # Clear cooldown on successful bet
             # Fire executor callback (non-blocking)
             if self._on_opportunity_cb:
                 asyncio.create_task(self._on_opportunity_cb(opp))
         elif is_new_bet:
-            self._bet_placed[key] = opp
+            # New market but no bet possible (no depth/balance) — don't block permanently.
+            # Set cooldown so we retry in 60s instead of every tick.
+            self._no_depth_cooldown[key] = time.time()
+            opp.suggested_bet = 0.0
+            opp.potential_profit = 0.0
         else:
             # Not a new bet — log the price update but zero out the bet
             opp.suggested_bet = 0.0
@@ -1060,6 +1073,10 @@ class ClosingArbitrageDetector:
         for k in bet_keys:
             self._bet_placed.pop(k, None)
 
+        cooldown_keys = [k for k in self._no_depth_cooldown if k.startswith(condition_id)]
+        for k in cooldown_keys:
+            self._no_depth_cooldown.pop(k, None)
+
         confirmed_keys = [k for k in self._confirmed_orders if k.startswith(condition_id)]
         for k in confirmed_keys:
             self._confirmed_orders.pop(k, None)
@@ -1074,8 +1091,15 @@ class ClosingArbitrageDetector:
         self._settled_conditions.discard(condition_id)
 
         # Trim opportunities log — keep last 500 entries max
+        # Preserve bet entries (suggested_bet > 0) so dashboard can display them
         if len(self._opportunities_log) > 500:
-            self._opportunities_log = self._opportunities_log[-500:]
+            bets = [o for o in self._opportunities_log if o.suggested_bet > 0]
+            updates = [o for o in self._opportunities_log if o.suggested_bet <= 0]
+            kept_bets = bets[-30:]  # Last 30 bets (matches dashboard display)
+            kept_updates = updates[-(500 - len(kept_bets)):]
+            self._opportunities_log = sorted(
+                kept_bets + kept_updates, key=lambda o: o.timestamp
+            )
 
     def get_stats(self) -> dict:
         roi = ((self._balance - self._starting_balance) / self._starting_balance * 100) if self._starting_balance > 0 else 0

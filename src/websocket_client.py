@@ -190,7 +190,9 @@ class WebSocketClient:
             if event_type == "market_resolved":
                 self._handle_market_resolved(event)
                 if self._on_opportunity_callback:
-                    await self._on_opportunity_callback(asset_id, event_type)
+                    result = self._on_opportunity_callback(asset_id, event_type)
+                    if result is not None and asyncio.iscoroutine(result):
+                        await result
                 continue
 
             if event_type == "tick_size_change":
@@ -209,7 +211,9 @@ class WebSocketClient:
                 # This allows the detector to throttle per-token instead of doing a full scan
                 if self._on_opportunity_callback:
                     for token_id in updated_tokens:
-                        await self._on_opportunity_callback(token_id, event_type)
+                        result = self._on_opportunity_callback(token_id, event_type)
+                        if result is not None and asyncio.iscoroutine(result):
+                            await result
                 continue
 
             # Throttle: skip processing entirely if same token was handled < 2s ago
@@ -347,7 +351,9 @@ class WebSocketClient:
 
         # Trigger detector after REST update
         if self._on_opportunity_callback:
-            await self._on_opportunity_callback("", "rest_fallback")
+            result = self._on_opportunity_callback("", "rest_fallback")
+            if result is not None and asyncio.iscoroutine(result):
+                await result
 
     def _get_reconnect_delay(self) -> int:
         """Calculate reconnect delay with exponential backoff and jitter."""
