@@ -20,6 +20,24 @@ async def handle_health(request: web.Request) -> web.Response:
             "detector": stats.get("detector", {}),
             "executor": stats.get("executor", {}),
         })
+    # Price checker snapshot: last check per crypto
+    for acc in bot.accounts:
+        det = acc.detector
+        if det and hasattr(det, "_price_checker"):
+            pc = det._price_checker
+            prices = {}
+            for sym, price in pc._current_prices.items():
+                prices[sym] = round(price, 2)
+            open_prices = {}
+            for key, price in list(pc._open_prices.items())[-10:]:
+                open_prices[key] = round(price, 2)
+            data["price_checker"] = {
+                "current_prices": prices,
+                "open_prices_recent": open_prices,
+                "active_symbols": list(pc._active_symbols),
+                "pending_open_requests": len(pc._pending_open_requests),
+            }
+            break
     return web.json_response(data)
 
 
