@@ -8,6 +8,21 @@ from aiohttp import web
 routes = web.RouteTableDef()
 
 
+@routes.get("/api/health")
+async def handle_health(request: web.Request) -> web.Response:
+    """Diagnostic endpoint (no auth) for container-level debugging."""
+    bot = request.app["bot"]
+    data = {"ts": time.time(), "accounts": []}
+    for acc in bot.accounts:
+        stats = acc.get_stats()
+        data["accounts"].append({
+            "name": acc.name,
+            "detector": stats.get("detector", {}),
+            "executor": stats.get("executor", {}),
+        })
+    return web.json_response(data)
+
+
 @routes.get("/api/opportunities")
 async def handle_api(request: web.Request) -> web.Response:
     bot = request.app["bot"]

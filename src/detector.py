@@ -906,7 +906,7 @@ class ClosingArbitrageDetector:
             return 0.0
 
         total_settled = self._stats["settled_wins"] + self._stats["settled_losses"]
-        if total_settled < 10:  # Need minimum sample size
+        if total_settled < 50:  # Need meaningful sample size (was 10, too low)
             return 0.01  # Optimistic default for early stage
 
         win_rate = self._stats["settled_wins"] / total_settled

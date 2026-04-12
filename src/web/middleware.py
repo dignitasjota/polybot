@@ -7,7 +7,7 @@ from src.web.session import read_session_cookie, SESSION_COOKIE
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     path = request.path
-    if path == "/login" or path.startswith("/static/"):
+    if path == "/login" or path.startswith("/static/") or path == "/api/health":
         return await handler(request)
 
     cookie = request.cookies.get(SESSION_COOKIE, "")
