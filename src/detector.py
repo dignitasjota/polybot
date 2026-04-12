@@ -273,24 +273,35 @@ class ClosingArbitrageDetector:
             key = f"{condition_id}:{token_side}"
             if key in self._bet_placed:
                 continue
+            cost_usd = getattr(t, "cost_usd", 0.0) or 0.0
+            price = getattr(t, "price", 0.0) or 0.0
+            size = getattr(t, "size", 0.0) or 0.0
+            margin_net = (1.0 - price) - (TAKER_FEE_RATE * min(price, 1.0 - price)) - GAS_REDEEM_USD if price > 0 else 0.0
             opp = Opportunity(
                 timestamp=getattr(t, "created_at", 0.0) or 0.0,
                 condition_id=condition_id,
                 question=getattr(t, "question", "") or "",
                 token_side=token_side,
                 token_id=getattr(t, "token_id", "") or "",
-                token_price=getattr(t, "price", 0.0) or 0.0,
-                implied_probability=0.0,
-                margin_gross=0.0,
-                fee_estimated=0.0,
-                margin_net=0.0,
-                depth_at_price=0.0,
+                token_price=price,
+                implied_probability=price,
+                margin_gross=1.0 - price if price > 0 else 0.0,
+                fee_estimated=TAKER_FEE_RATE * min(price, 1.0 - price) if price > 0 else 0.0,
+                margin_net=margin_net,
+                depth_at_price=size,
                 resolved=False,
                 winning_token_id="",
+                suggested_bet=cost_usd if cost_usd > 0 else size * price,
+                potential_profit=size * margin_net if margin_net > 0 else 0.0,
                 source_strategy="directional",
                 mode=getattr(t, "mode", "paper") or "paper",
             )
+            # Restore outcome from trade status
+            s_val = status_str or ""
+            if s_val == "confirmed":
+                opp.outcome = "pending"
             self._bet_placed[key] = opp
+            self._opportunities_log.append(opp)
             restored += 1
         if restored:
             logger.info("directional_positions_restored", count=restored)
