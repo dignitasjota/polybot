@@ -26,56 +26,56 @@ max_time_to_resolution = "15m"    # Busca mercados que resuelven en <15min (capt
 min_margin_net = 0.05             # Margen minimo por share tras fees ($0.05) — aumentado de 0.008, EV positivo
 tag = "crypto"                    # Solo mercados con tag crypto
 max_price = 0.70                  # Precio maximo para bets Up/Down directional (bajado de 0.95 a 0.70, evita precios suicidas)
-min_buffer_pct = 0.10             # Buffer minimo % para confirmacion de precio Binance (0.10%) — requiere movimiento real
+min_buffer_pct = 0.001            # Buffer minimo como fraccion decimal (0.001 = 0.1%) para confirmacion Binance
 max_concurrent_bets = 3           # Max bets directionales concurrentes (bajado de 5 a 3, menos correlación)
 
 # Configuracion per-crypto para directional Up/Down
 # enabled = false desactiva el trading de esa crypto
-# buffer_pct = cambio minimo en Binance (%) para confirmar direccion
+# buffer_pct = cambio minimo en Binance como fraccion decimal (0.001 = 0.1%)
 # Cuanto mayor volatilidad, mayor buffer necesario para filtrar ruido
 [strategy.crypto_configs.bitcoin]
 enabled = true
-buffer_pct = 0.10      # 0.10% — BTC es menos volátil, ~$84 movimiento mínimo
+buffer_pct = 0.001     # 0.1% — BTC ~$84 movimiento mínimo
 
 [strategy.crypto_configs.ethereum]
 enabled = true
-buffer_pct = 0.15      # 0.15% — ETH algo más volátil
+buffer_pct = 0.0015    # 0.15%
 
 [strategy.crypto_configs.solana]
 enabled = true
-buffer_pct = 0.20      # 0.20% — altcoin, más ruido
+buffer_pct = 0.002     # 0.20% — altcoin, más ruido
 
 [strategy.crypto_configs.bnb]
 enabled = true
-buffer_pct = 0.15      # 0.15%
+buffer_pct = 0.0015    # 0.15%
 
 [strategy.crypto_configs.dogecoin]
 enabled = true
-buffer_pct = 0.25      # 0.25% — meme coin, mucho ruido
+buffer_pct = 0.0025    # 0.25% — meme coin, mucho ruido
 
 [strategy.crypto_configs.xrp]
 enabled = true
-buffer_pct = 0.20      # 0.20%
+buffer_pct = 0.002     # 0.20%
 
 [strategy.crypto_configs.cardano]
 enabled = true
-buffer_pct = 0.25      # 0.25%
+buffer_pct = 0.0025    # 0.25%
 
 [strategy.crypto_configs.avalanche]
 enabled = true
-buffer_pct = 0.25      # 0.25%
+buffer_pct = 0.0025    # 0.25%
 
 [strategy.crypto_configs.polkadot]
 enabled = true
-buffer_pct = 0.25      # 0.25%
+buffer_pct = 0.0025    # 0.25%
 
 [strategy.crypto_configs.polygon]
 enabled = true
-buffer_pct = 0.25      # 0.25%
+buffer_pct = 0.0025    # 0.25%
 
 [strategy.crypto_configs.chainlink]
 enabled = true
-buffer_pct = 0.20      # 0.20%
+buffer_pct = 0.002     # 0.20%
 
 [strategy.crypto_configs.litecoin]
 enabled = true
