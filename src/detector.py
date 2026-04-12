@@ -1007,6 +1007,13 @@ class ClosingArbitrageDetector:
         if is_new_bet and opp.suggested_bet > 0:
             self._bet_placed[key] = opp
             self._no_depth_cooldown.pop(key, None)  # Clear cooldown on successful bet
+            logger.info(
+                "bet_placed_in_log",
+                key=key,
+                suggested_bet=f"${opp.suggested_bet:.2f}",
+                bets_in_log=sum(1 for o in self._opportunities_log if o.suggested_bet > 0),
+                total_log=len(self._opportunities_log),
+            )
             # Fire executor callback (non-blocking)
             if self._on_opportunity_cb:
                 asyncio.create_task(self._on_opportunity_cb(opp))
@@ -1114,9 +1121,13 @@ class ClosingArbitrageDetector:
 
     def get_stats(self) -> dict:
         roi = ((self._balance - self._starting_balance) / self._starting_balance * 100) if self._starting_balance > 0 else 0
+        bets_in_log = sum(1 for o in self._opportunities_log if o.suggested_bet > 0)
         return {
             **self._stats,
             "opportunities_logged": len(self._opportunities_log),
+            "bets_in_log": bets_in_log,
+            "bet_placed_count": len(self._bet_placed),
+            "cooldown_count": len(self._no_depth_cooldown),
             "starting_balance": self._starting_balance,
             "current_balance": self._balance,
             "roi_pct": round(roi, 2),
