@@ -84,6 +84,7 @@ class ClosingArbitrageDetector:
         self._last_log_time: dict[str, float] = {}  # "condition_id:side:event" -> timestamp
         self._active_opportunities: dict[str, Opportunity] = {}  # "condition_id:side" -> latest opp
         self._bet_placed: dict[str, Opportunity] = {}  # "condition_id:side" -> first bet (for paper trading)
+        self._dashboard_bets: list[Opportunity] = []  # Permanent bet log for dashboard (never trimmed by cleanup)
         self._no_depth_cooldown: dict[str, float] = {}  # "condition_id:side" -> timestamp (retry after 60s)
         self._settled_conditions: set[str] = set()  # Already settled condition_ids
         self._confirmed_orders: dict[str, dict] = {}  # "condition_id:side" -> {"order_id": ..., "cost": ...}
@@ -215,6 +216,7 @@ class ClosingArbitrageDetector:
         self._opportunities_log.clear()
         self._active_opportunities.clear()
         self._bet_placed.clear()
+        self._dashboard_bets.clear()
         self._no_depth_cooldown.clear()
         self._settled_conditions.clear()
         self._confirmed_orders.clear()  # Clear executor-confirmed orders on reset
@@ -302,6 +304,7 @@ class ClosingArbitrageDetector:
                 opp.outcome = "pending"
             self._bet_placed[key] = opp
             self._opportunities_log.append(opp)
+            self._dashboard_bets.append(opp)
             restored += 1
         if restored:
             logger.info("directional_positions_restored", count=restored)
@@ -1006,13 +1009,16 @@ class ClosingArbitrageDetector:
 
         if is_new_bet and opp.suggested_bet > 0:
             self._bet_placed[key] = opp
+            self._dashboard_bets.append(opp)  # Permanent record for dashboard
+            # Keep only last 100 bets in dashboard list
+            if len(self._dashboard_bets) > 100:
+                self._dashboard_bets = self._dashboard_bets[-100:]
             self._no_depth_cooldown.pop(key, None)  # Clear cooldown on successful bet
             logger.info(
                 "bet_placed_in_log",
                 key=key,
                 suggested_bet=f"${opp.suggested_bet:.2f}",
-                bets_in_log=sum(1 for o in self._opportunities_log if o.suggested_bet > 0),
-                total_log=len(self._opportunities_log),
+                dashboard_bets=len(self._dashboard_bets),
             )
             # Fire executor callback (non-blocking)
             if self._on_opportunity_cb:
@@ -1115,6 +1121,14 @@ class ClosingArbitrageDetector:
             updates = [o for o in self._opportunities_log if o.suggested_bet <= 0]
             kept_bets = bets[-30:]  # Last 30 bets (matches dashboard display)
             kept_updates = updates[-(500 - len(kept_bets)):]
+            if bets:
+                logger.info(
+                    "trim_preserving_bets",
+                    total_bets=len(bets),
+                    kept_bets=len(kept_bets),
+                    total_before=len(self._opportunities_log),
+                    sample_bet=f"${bets[-1].suggested_bet:.2f}" if bets else "none",
+                )
             self._opportunities_log = sorted(
                 kept_bets + kept_updates, key=lambda o: o.timestamp
             )
@@ -1126,6 +1140,7 @@ class ClosingArbitrageDetector:
             **self._stats,
             "opportunities_logged": len(self._opportunities_log),
             "bets_in_log": bets_in_log,
+            "dashboard_bets": len(self._dashboard_bets),
             "bet_placed_count": len(self._bet_placed),
             "cooldown_count": len(self._no_depth_cooldown),
             "starting_balance": self._starting_balance,
@@ -1137,9 +1152,14 @@ class ClosingArbitrageDetector:
         return self._opportunities_log[-count:]
 
     def export_opportunities(self) -> list[dict]:
-        """Export all opportunities as dicts for analysis."""
-        return [
-            {
+        """Export opportunities for dashboard display.
+
+        Uses _dashboard_bets (permanent bet records) merged with recent
+        price updates from _opportunities_log.  This ensures bets always
+        appear in the dashboard even after the log is trimmed.
+        """
+        def _to_dict(o: Opportunity) -> dict:
+            return {
                 "timestamp": o.timestamp,
                 "condition_id": o.condition_id,
                 "question": o.question,
@@ -1161,10 +1181,19 @@ class ClosingArbitrageDetector:
                 "resolved_at": o.resolved_at,
                 "disappeared_at": o.disappeared_at,
                 "duration_seconds": o.duration_seconds,
-                "strategy_type": o.strategy_type,  # Distinguish Up/Down vs Closing Arb
+                "strategy_type": o.strategy_type,
             }
-            for o in self._opportunities_log
-        ]
+
+        # Merge: dashboard_bets (guaranteed suggested_bet > 0) + log updates
+        seen_ids = set()
+        result = []
+        for o in self._dashboard_bets:
+            result.append(_to_dict(o))
+            seen_ids.add(id(o))
+        for o in self._opportunities_log:
+            if id(o) not in seen_ids:
+                result.append(_to_dict(o))
+        return result
 
     def get_stats_by_strategy(self) -> dict:
         """Aggregate stats by strategy type: updown_directional, closing_arb_pre, closing_arb_post."""
