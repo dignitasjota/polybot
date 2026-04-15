@@ -162,3 +162,50 @@ async def handle_scanner_stats(request: web.Request) -> web.Response:
         return web.json_response(report)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.get("/api/rewards/markets")
+async def handle_reward_markets(request: web.Request) -> web.Response:
+    """Get reward markets ranked by profitability."""
+    bot = request.app["bot"]
+    scanner = None
+
+    # Find scanner from liquidity strategy
+    for acc in bot.accounts:
+        for strat_name, strat in acc.strategies.items():
+            if strat_name == "liquidity" and hasattr(strat, "scanner"):
+                scanner = strat.scanner
+                break
+        if scanner:
+            break
+
+    # Fallback: standalone scanner
+    if not scanner:
+        scanner = request.app.get("reward_scanner")
+
+    if not scanner:
+        return web.json_response({"error": "no reward scanner active", "markets": []})
+
+    limit = int(request.query.get("limit", "50"))
+    report = scanner.export_report()
+    report["exported_at"] = time.time()
+    report["markets"] = report["markets"][:limit]
+    return web.json_response(report)
+
+
+@routes.get("/api/rewards/metrics")
+async def handle_reward_metrics(request: web.Request) -> web.Response:
+    """Get liquidity provider daily metrics and summary."""
+    bot = request.app["bot"]
+
+    for acc in bot.accounts:
+        for strat_name, strat in acc.strategies.items():
+            if strat_name == "liquidity" and hasattr(strat, "metrics"):
+                days = int(request.query.get("days", "7"))
+                return web.json_response({
+                    "today": strat.metrics.get_today(),
+                    "history": strat.metrics.get_history(days),
+                    "summary": strat.metrics.get_summary(days),
+                })
+
+    return web.json_response({"error": "no liquidity strategy active"})

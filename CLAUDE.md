@@ -2,9 +2,10 @@
 
 ## Resumen
 
-Bot de trading automatizado para Polymarket que ejecuta dos estrategias independientes en paralelo:
+Bot de trading automatizado para Polymarket que ejecuta tres estrategias independientes en paralelo:
 - **Directional**: detecta oportunidades de arbitraje en mercados crypto de 5 minutos
 - **Copy Trade**: copia trades de wallets rentables con sistema de roles (primary/confirmation)
+- **Liquidity** (Fases 1-5): market making con rewards — scanner, provider, risk management, métricas
 
 Corre en Docker (VPS Alemania), desplegado via Portainer. Soporta **paper trading** (simulado) y **live trading** (real contra Polymarket CLOB).
 
@@ -16,9 +17,12 @@ Corre en Docker (VPS Alemania), desplegado via Portainer. Soporta **paper tradin
 src/
   main.py              # Bot: orquestador principal, arranca cuentas + web
   config.py            # Dataclasses de configuración (cargadas desde TOML)
-  account_runner.py    # Runner independiente por cuenta (directional o copy_trade)
+  account_runner.py    # Runner independiente por cuenta (directional, copy_trade, liquidity)
   detector.py          # ClosingArbitrageDetector: detecta oportunidades directional
   copy_trader.py       # CopyTrader: monitorea wallets y genera oportunidades copy
+  reward_scanner.py    # RewardScanner: escanea CLOB API por mercados con rewards
+  liquidity_provider.py # LiquidityProvider: market making engine (quotes, inventory, risk)
+  liquidity_metrics.py  # LiquidityMetrics: daily P&L tracking y KPIs
   executor.py          # Executor: ejecuta trades (paper/dry_run/live)
   market_tracker.py    # MarketTracker: estado in-memory de mercados via WebSocket
   websocket_client.py  # WebSocket a Polymarket para precios en tiempo real
@@ -318,6 +322,60 @@ El CopyTrader resuelve bets de dos formas:
 
 ---
 
+## Estrategia 3: Liquidity Rewards (Fases 1-5)
+
+Market making incentivado: ganar rewards de Polymarket por proveer liquidez.
+
+### Fase 1: RewardScanner (read-only)
+- `RewardScanner` consulta `GET /rewards/markets/multi` (CLOB API, sin auth)
+- Rankea mercados por `score = (daily_rate / competitiveness) × spread_factor × volume_factor / risk_factor`
+- Panel web muestra top mercados con rewards, competencia, spread y ROI estimado
+
+### Fase 2: LiquidityProvider (market making)
+- `LiquidityProvider` coloca órdenes GTC bidireccionales en los top mercados del scanner
+- **Two-sided quoting**: BUY YES a `bid_price` (bid) + BUY NO a `1-ask_price` (ask, equivalente a SELL YES)
+- Todas las órdenes con `post_only=True` (maker, 0% fees)
+- ClobClient propio (no reutiliza Executor — incompatible por ORDER_TIMEOUT=30s y solo BUY)
+- Paper mode: simula órdenes sin ClobClient
+- Quote refresh cada 30s: cancel+replace si precio difiere >0.5¢ del calculado
+
+### Fase 3: Risk & Inventory
+- **Inventory skew**: `(fills_yes - fills_no) / (fills_yes + fills_no)`, rango [-1, 1]
+- **Rebalanceo automático** (3 niveles según |skew| vs `max_inventory_skew`=0.6):
+  - Mild (0.6-0.7): spread ×1.5 lado largo, ×0.8 lado corto
+  - Moderate (0.7-0.8): size ×0.5 largo / ×1.5 corto + ajuste spread
+  - Severe (>0.8): solo cotiza lado rebalanceador
+- **Adverse selection**: estimada como `|fill_price - midpoint| × size`; mercado abandonado si ratio > 0.7
+- **Emergency cancel**: si midpoint mueve >5% en <30s → cancela todo en ese mercado
+
+### Fase 3.5: Heartbeat, Scoring & Block Hiding
+- **Heartbeat**: POST `/heartbeat` cada 5s; si se pierde >10s, Polymarket cancela todas las órdenes
+- **Order scoring**: GET `/order-scoring?order_id=X` verifica que las órdenes earning rewards
+- **Order block hiding**: detecta bloques grandes en el book, coloca órdenes 1 tick detrás para protección
+
+### Fase 4-5: Metrics & KPIs
+- `LiquidityMetrics`: snapshots diarios con rollover a medianoche UTC, retención 90 días
+- Tracking: fill rate, scoring rate, rewards, adverse loss, net P&L, ROI, APY estimado
+- Panel web: P&L del día + resumen 7 días + quotes activas + botón emergency cancel
+
+### Parámetros configurables (hot-reload via panel)
+| Parámetro | Default | Descripción |
+|-----------|---------|-------------|
+| scan_interval | 300 | Segundos entre scans de mercados con rewards |
+| min_daily_rate | 1.0 | Mínimo $/día para considerar un mercado |
+| min_reward_per_dollar | 0.001 | Ratio mínimo reward/competencia |
+| capital_per_market | 50.0 | USDC a asignar por mercado |
+| max_markets | 5 | Máximo mercados cotizando simultáneamente |
+| quote_refresh_s | 30 | Segundos entre refresh de quotes |
+| use_heartbeat | true | Activar heartbeat loop |
+| heartbeat_interval | 5 | Segundos entre heartbeats |
+| scoring_check_interval | 60 | Segundos entre checks de scoring |
+
+### Spec completo
+Ver `LIQUIDITY_STRATEGY_SPEC.md` para arquitectura detallada, fórmulas, y roadmap.
+
+---
+
 ## Panel de Control Web
 
 Accesible en `http://host:8080`. Protegido por login con cookie HMAC-SHA256.
@@ -329,9 +387,13 @@ Accesible en `http://host:8080`. Protegido por login con cookie HMAC-SHA256.
 | `/` | Dashboard (read-only, auto-refresh cada 5s) |
 | `/panel/copy-trade` | Gestión wallets (add/remove/toggle/set_role) + parámetros |
 | `/panel/directional` | Kill switch + market filter (crypto_only) + parámetros |
+| `/panel/liquidity` | Scanner + provider + quotes activas + métricas P&L |
+| `/panel/liquidity/cancel-all` | POST: emergency cancel de todas las órdenes de liquidez |
 | `/panel/settings` | Cambio password + execution mode (paper/live) + audit log |
 | `/api/report` | JSON completo de estado del bot |
 | `/api/report/{account}` | JSON por cuenta específica |
+| `/api/rewards/markets` | JSON con mercados rankeados por reward/competencia |
+| `/api/rewards/metrics` | JSON con métricas diarias, historial y resumen P&L |
 
 ### Hot-Reload
 Los cambios desde el panel se aplican **inmediatamente** (mutación in-memory de dataclasses) y se persisten al archivo `config/config.toml` para sobrevivir reinicios.

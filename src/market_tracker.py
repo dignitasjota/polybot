@@ -130,15 +130,15 @@ class MarketTracker:
     def update_book(self, token_id: str, bids: list[dict], asks: list[dict]):
         """Update order book from a 'book' snapshot event.
 
-        Only keeps top 3 levels to minimize object creation and memory.
+        Only keeps top 10 levels (liquidity provider needs deeper book).
         """
         state = self._markets.get(token_id)
         if not state:
             return
 
-        # Only parse top 3 levels — we only use level 0 for price/depth
-        parsed_bids = [PriceLevel(float(b["price"]), float(b["size"])) for b in bids[:3]]
-        parsed_asks = [PriceLevel(float(a["price"]), float(a["size"])) for a in asks[:3]]
+        # Parse top 10 levels — liquidity provider uses deeper book for quoting
+        parsed_bids = [PriceLevel(float(b["price"]), float(b["size"])) for b in bids[:10]]
+        parsed_asks = [PriceLevel(float(a["price"]), float(a["size"])) for a in asks[:10]]
 
         now = time.time()
         is_yes = token_id == state.yes_token_id
@@ -174,6 +174,19 @@ class MarketTracker:
             state.best_ask_no = best_ask
 
         state.last_update = time.time()
+
+    def get_midpoint(self, token_id: str) -> float | None:
+        """Get midpoint price for a token (best_bid + best_ask) / 2."""
+        state = self._markets.get(token_id)
+        if not state:
+            return None
+        if token_id == state.yes_token_id:
+            bid, ask = state.best_bid_yes, state.best_ask_yes
+        else:
+            bid, ask = state.best_bid_no, state.best_ask_no
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2
+        return None
 
     def update_last_trade(self, token_id: str, price: float):
         """Update last trade price."""

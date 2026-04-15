@@ -201,3 +201,50 @@ max_bet_per_trade = 50.0
 max_daily_loss = 50.0
 max_concurrent_positions = 10
 simulated_balance = 500.0
+
+# Cuenta 3: Liquidity Rewards (Fases 1-5: Scanner + Provider + Risk + Metrics)
+[[accounts]]
+name = "liquidity_rewards"
+enabled = true
+strategy_type = "liquidity"
+execution_mode = "paper"  # Cambiar a "dry_run" o "live" cuando esté listo
+
+[accounts.credentials]
+private_key_env = "PRIVATE_KEY"
+api_key_env = "POLYMARKET_API_KEY"
+api_secret_env = "POLYMARKET_SECRET"
+passphrase_env = "POLYMARKET_PASSPHRASE"
+signature_type_env = "WALLET_TYPE"
+proxy_address_env = "POLYMARKET_PROXY_ADDRESS"
+builder_key_env = "BUILDER_API_KEY"
+builder_secret_env = "BUILDER_SECRET"
+builder_passphrase_env = "BUILDER_PASSPHRASE"
+
+[accounts.liquidity]
+# Fase 1: Scanner
+scan_interval = 300                 # Segundos entre scans de mercados con rewards
+min_daily_rate = 1.0                # Mínimo $/día para considerar un mercado
+min_reward_per_dollar = 0.001       # Ratio mínimo reward/competencia
+
+# Fase 2: Provider
+capital_per_market = 50.0           # USDC a asignar por mercado (paper)
+max_markets = 5                     # Máximo mercados cotizando simultáneamente
+quote_refresh_s = 30                # Segundos entre refresh de quotes
+max_spread_pct = 0.20               # Spread máximo como % de midpoint (20% = muy conservador)
+
+# Fase 3: Risk & Inventory
+max_inventory_skew = 0.6            # |skew| antes de rebalanceo automático
+emergency_cancel_midpoint_move_pct = 0.05  # 5% — cancela todo en ese mercado
+adverse_abandonment_ratio = 0.7     # Mercado abandonado si ratio > 0.7
+
+# Fase 3.5: Heartbeat & Scoring
+use_heartbeat = true                # Activar heartbeat loop
+heartbeat_interval = 5              # Segundos entre heartbeats
+scoring_check_interval = 60         # Segundos entre checks de scoring
+
+# Block hiding
+min_block_usd = 5000.0              # USD mínimo para detectar order block
+block_hide_distance_ticks = 1       # Distancia atrás del block (ticks)
+
+[accounts.risk]
+simulated_balance = 500.0           # Capital inicial para paper trading

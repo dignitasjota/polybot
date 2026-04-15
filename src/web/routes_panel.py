@@ -355,6 +355,130 @@ async def panel_strategy_mode(request: web.Request) -> web.Response:
     raise web.HTTPFound("/panel/settings")
 
 
+# ── Liquidity ──────────────────────────────────────────────────────
+
+def _get_liquidity_scanner(request: web.Request):
+    """Find the first liquidity strategy's scanner, or a standalone one."""
+    bot = request.app["bot"]
+    for runner in bot.accounts:
+        for strat_name, strat in runner.strategies.items():
+            if strat_name == "liquidity" and hasattr(strat, "scanner"):
+                return strat.scanner
+    return request.app.get("reward_scanner")
+
+
+def _get_liquidity_provider(request: web.Request):
+    """Find the first liquidity strategy's provider."""
+    bot = request.app["bot"]
+    for runner in bot.accounts:
+        for strat_name, strat in runner.strategies.items():
+            if strat_name == "liquidity" and hasattr(strat, "provider"):
+                return strat.provider
+    return None
+
+
+@routes.get("/panel/liquidity")
+async def panel_liquidity(request: web.Request) -> web.Response:
+    ctx = await _base_context(request)
+    scanner = _get_liquidity_scanner(request)
+
+    if scanner:
+        stats = scanner.get_stats()
+        all_markets = scanner.get_all_markets()
+        markets = [m.to_dict() for m in all_markets]
+    else:
+        stats = {
+            "total_reward_markets": 0,
+            "last_scan_ago": None,
+            "scan_count": 0,
+            "scan_errors": 0,
+            "total_daily_rewards_available": 0,
+        }
+        markets = []
+
+    # Get config params
+    params = {
+        "scan_interval": 300,
+        "min_daily_rate": 1.0,
+        "min_reward_per_dollar": 0.0005,
+        "capital_per_market": 50.0,
+        "max_markets": 5,
+    }
+    if scanner:
+        params.update({
+            "scan_interval": scanner._scan_interval,
+            "min_daily_rate": scanner._min_daily_rate,
+            "min_reward_per_dollar": scanner._min_reward_per_dollar,
+            "capital_per_market": scanner._capital_per_market,
+        })
+    # Check if there's a LiquidityConfig
+    bot = request.app["bot"]
+    for runner in bot.accounts:
+        for strat_name, strat in runner.strategies.items():
+            if strat_name == "liquidity" and hasattr(strat, "config"):
+                params["max_markets"] = strat.config.max_markets
+                break
+
+    # Provider stats
+    provider = _get_liquidity_provider(request)
+    provider_stats = provider.get_stats() if provider else {"running": False, "positions": []}
+
+    # Metrics
+    metrics_today = {}
+    metrics_summary = {}
+    bot = request.app["bot"]
+    for runner in bot.accounts:
+        for strat_name, strat in runner.strategies.items():
+            if strat_name == "liquidity" and hasattr(strat, "metrics"):
+                metrics_today = strat.metrics.get_today()
+                metrics_summary = strat.metrics.get_summary(days=7)
+                break
+
+    ctx.update({
+        "active_tab": "liquidity",
+        "stats": stats,
+        "markets": markets,
+        "params": params,
+        "provider": provider_stats,
+        "metrics_today": metrics_today,
+        "metrics_summary": metrics_summary,
+    })
+    return aiohttp_jinja2.render_template("panel/liquidity.html", request, ctx)
+
+
+@routes.post("/panel/liquidity/scan")
+async def panel_liquidity_scan(request: web.Request) -> web.Response:
+    """Trigger an immediate scan."""
+    scanner = _get_liquidity_scanner(request)
+    if not scanner:
+        # Create standalone scanner on first use
+        from src.reward_scanner import RewardScanner
+        scanner = RewardScanner()
+        request.app["reward_scanner"] = scanner
+
+    await scanner.scan()
+
+    raise web.HTTPFound("/panel/liquidity")
+
+
+@routes.post("/panel/liquidity/params")
+async def panel_liquidity_params(request: web.Request) -> web.Response:
+    """Update scanner config via ConfigManager (hot-reload + persist)."""
+    cm = _get_cm(request)
+    data = await request.post()
+    cm.set_liquidity_params(dict(data))
+    raise web.HTTPFound("/panel/liquidity")
+
+
+@routes.post("/panel/liquidity/cancel-all")
+async def panel_liquidity_cancel_all(request: web.Request) -> web.Response:
+    """Emergency: cancel all outstanding liquidity orders."""
+    provider = _get_liquidity_provider(request)
+    if provider:
+        await provider._cancel_all_orders()
+    raise web.HTTPFound("/panel/liquidity")
+
+
 async def _settings_with_flash(request, msg, flash_type):
     cm = _get_cm(request)
     ctx = await _base_context(request)

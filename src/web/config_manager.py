@@ -265,6 +265,78 @@ class ConfigManager:
                 return True
         return False
 
+    # ── Liquidity ──────────────────────────────────────────────────
+
+    def get_liquidity_params(self) -> dict:
+        """Return current liquidity scanner params."""
+        # From live strategy if available
+        for runner in self.bot.accounts:
+            strat = runner.strategies.get("liquidity")
+            if strat and hasattr(strat, "config"):
+                cfg = strat.config
+                return {
+                    "scan_interval": cfg.scan_interval,
+                    "min_daily_rate": cfg.min_daily_rate,
+                    "min_reward_per_dollar": cfg.min_reward_per_dollar,
+                    "capital_per_market": cfg.capital_per_market,
+                    "max_markets": cfg.max_markets,
+                    "spread_pct_of_max": cfg.spread_pct_of_max,
+                    "max_inventory_skew": cfg.max_inventory_skew,
+                    "max_adverse_ratio": cfg.max_adverse_ratio,
+                }
+        # Defaults
+        return {
+            "scan_interval": 300,
+            "min_daily_rate": 1.0,
+            "min_reward_per_dollar": 0.5,
+            "capital_per_market": 50.0,
+            "max_markets": 5,
+            "spread_pct_of_max": 0.20,
+            "max_inventory_skew": 0.6,
+            "max_adverse_ratio": 0.70,
+        }
+
+    def set_liquidity_params(self, params: dict):
+        """Update liquidity params in-memory (scanner + strategy config) and persist."""
+        for runner in self.bot.accounts:
+            strat = runner.strategies.get("liquidity")
+            if not strat:
+                continue
+
+            cfg = strat.config
+            scanner = strat.scanner if hasattr(strat, "scanner") else None
+
+            if "scan_interval" in params:
+                val = max(60.0, float(params["scan_interval"]))
+                cfg.scan_interval = val
+                if scanner:
+                    scanner._scan_interval = val
+            if "min_daily_rate" in params:
+                val = float(params["min_daily_rate"])
+                cfg.min_daily_rate = val
+                if scanner:
+                    scanner._min_daily_rate = val
+            if "min_reward_per_dollar" in params:
+                val = float(params["min_reward_per_dollar"])
+                cfg.min_reward_per_dollar = val
+                if scanner:
+                    scanner._min_reward_per_dollar = val
+            if "capital_per_market" in params:
+                val = float(params["capital_per_market"])
+                cfg.capital_per_market = val
+                if scanner:
+                    scanner._capital_per_market = val
+            if "max_markets" in params:
+                cfg.max_markets = int(params["max_markets"])
+            if "spread_pct_of_max" in params:
+                cfg.spread_pct_of_max = float(params["spread_pct_of_max"])
+            if "max_inventory_skew" in params:
+                cfg.max_inventory_skew = float(params["max_inventory_skew"])
+            if "max_adverse_ratio" in params:
+                cfg.max_adverse_ratio = float(params["max_adverse_ratio"])
+
+        self._persist()
+
     # ── Crypto Configs ────────────────────────────────────────────
 
     def get_crypto_configs(self) -> dict:

@@ -26,6 +26,7 @@ from src.market_tracker import MarketTracker
 from src.strategies.base import AccountContext, PAPER_DAILY_TRADE_CAP, Strategy
 from src.strategies.copy_trade import CopyTradeConfig, CopyTradeStrategy
 from src.strategies.directional import DirectionalConfig, DirectionalStrategy
+from src.strategies.liquidity import LiquidityConfig, LiquidityStrategy
 from src.wallet_scanner import WalletScanner
 from src.websocket_client import WebSocketClient
 
@@ -113,6 +114,8 @@ class AccountRunner:
                 )
             elif strat_name == "copy_trade":
                 self._init_copy_trade(account, strat_mode, strat_raw)
+            elif strat_name == "liquidity":
+                self._init_liquidity(strat_mode, strat_raw)
 
         self._running = False
         self._data_config = data
@@ -154,6 +157,17 @@ class AccountRunner:
 
         dstrat = DirectionalStrategy(dcfg, self.context, det)
         self.strategies["directional"] = dstrat
+
+    def _init_liquidity(self, mode_str: str, strat_raw: dict):
+        """Create liquidity strategy (Phase 2: scanner + provider)."""
+        lcfg = LiquidityConfig.from_dict(strat_raw, mode=mode_str)
+        lstrat = LiquidityStrategy(
+            lcfg,
+            self.context,
+            credentials=self.account.credentials,
+            tracker=self.tracker,
+        )
+        self.strategies["liquidity"] = lstrat
 
     def _init_copy_trade(self, account: AccountConfig, mode_str: str, strat_raw: dict):
         """Create copy-trade strategy."""

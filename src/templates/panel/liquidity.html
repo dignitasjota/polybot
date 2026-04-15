@@ -1,0 +1,317 @@
+{% extends "base.html" %}
+{% block title %}Liquidity Rewards — Polymarket Bot{% endblock %}
+
+{% block content %}
+<h2>LIQUIDITY REWARD SCANNER</h2>
+
+{# Scanner Stats #}
+<div class="section">
+    <h3>SCANNER STATUS</h3>
+    <div class="stats">
+        <div class="stat">
+            <div class="label">Markets Found</div>
+            <div class="value">{{ stats.total_reward_markets }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Total Daily Rewards</div>
+            <div class="value">${{ "%.0f"|format(stats.total_daily_rewards_available) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Scans</div>
+            <div class="value">{{ stats.scan_count }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Errors</div>
+            <div class="value {% if stats.scan_errors > 0 %}warn{% endif %}">{{ stats.scan_errors }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Last Scan</div>
+            <div class="value" style="font-size:0.9em;">
+                {% if stats.last_scan_ago is not none %}{{ "%.0f"|format(stats.last_scan_ago) }}s ago{% else %}never{% endif %}
+            </div>
+        </div>
+    </div>
+    <div style="margin-top:10px;">
+        <form method="POST" action="/panel/liquidity/scan" style="display:inline;">
+            <button type="submit" class="btn btn-success">Scan Now</button>
+        </form>
+    </div>
+</div>
+
+{# Scanner Config #}
+<div class="section">
+    <h3>SCANNER CONFIGURATION</h3>
+    <form method="POST" action="/panel/liquidity/params">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Scan Interval (sec)</label>
+                <input type="number" name="scan_interval" value="{{ params.scan_interval }}" min="60" max="3600" step="30">
+                <span class="desc">Seconds between reward scans</span>
+            </div>
+            <div class="form-group">
+                <label>Min Daily Rate ($)</label>
+                <input type="number" name="min_daily_rate" value="{{ params.min_daily_rate }}" min="0.1" max="1000" step="0.1">
+                <span class="desc">Minimum $/day to consider a market</span>
+            </div>
+            <div class="form-group">
+                <label>Min Reward/Dollar</label>
+                <input type="number" name="min_reward_per_dollar" value="{{ params.min_reward_per_dollar }}" min="0.0001" max="1" step="0.0001">
+                <span class="desc">Minimum reward ratio to rank</span>
+            </div>
+        </div>
+        <div class="form-row" style="margin-top:10px;">
+            <div class="form-group">
+                <label>Capital Per Market ($)</label>
+                <input type="number" name="capital_per_market" value="{{ params.capital_per_market }}" min="10" max="10000" step="5">
+                <span class="desc">USDC to allocate per market (Phase 2)</span>
+            </div>
+            <div class="form-group">
+                <label>Max Markets</label>
+                <input type="number" name="max_markets" value="{{ params.max_markets }}" min="1" max="50" step="1">
+                <span class="desc">Max markets to quote simultaneously (Phase 2)</span>
+            </div>
+        </div>
+        <div style="margin-top:15px;">
+            <button type="submit" class="btn btn-success">Save Config</button>
+        </div>
+    </form>
+</div>
+
+{# Top Markets Table #}
+<div class="section">
+    <h3>TOP REWARD MARKETS ({{ markets|length }})</h3>
+    {% if markets %}
+    <div style="overflow-x:auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Market</th>
+                    <th>Daily $</th>
+                    <th>Max Spread</th>
+                    <th>Competition</th>
+                    <th>Volume 24h</th>
+                    <th>Spread</th>
+                    <th>Midpoint</th>
+                    <th>R/Dollar</th>
+                    <th>Score</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for m in markets %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td class="question" title="{{ m.question }}">{{ m.question[:60] }}</td>
+                    <td style="color:#00ff88;font-weight:bold;">${{ "%.2f"|format(m.daily_rate) }}</td>
+                    <td>{{ "%.1f"|format(m.max_spread) }}¢</td>
+                    <td>
+                        {% if m.competitiveness > 0.8 %}
+                        <span style="color:#ff4444;">{{ "%.2f"|format(m.competitiveness) }}</span>
+                        {% elif m.competitiveness > 0.5 %}
+                        <span style="color:#ffaa00;">{{ "%.2f"|format(m.competitiveness) }}</span>
+                        {% else %}
+                        <span style="color:#00ff88;">{{ "%.2f"|format(m.competitiveness) }}</span>
+                        {% endif %}
+                    </td>
+                    <td>${{ "%.0f"|format(m.volume_24h) }}</td>
+                    <td>{{ "%.3f"|format(m.spread) }}</td>
+                    <td>{{ "%.2f"|format(m.midpoint) }}</td>
+                    <td style="color:#00aaff;">{{ "%.6f"|format(m.reward_per_dollar) }}</td>
+                    <td style="color:#ffaa00;font-weight:bold;">{{ "%.4f"|format(m.score) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p style="color:#555;">No reward markets found. Click "Scan Now" to fetch.</p>
+    {% endif %}
+</div>
+
+{# Provider / Active Quotes #}
+<div class="section">
+    <h3>LIQUIDITY PROVIDER</h3>
+    <div class="stats">
+        <div class="stat">
+            <div class="label">Status</div>
+            <div class="value" style="color:{% if provider.running %}#00ff88{% else %}#ff4444{% endif %};">
+                {% if provider.running %}RUNNING{% else %}STOPPED{% endif %}
+            </div>
+        </div>
+        <div class="stat">
+            <div class="label">Active Markets</div>
+            <div class="value">{{ provider.active_markets|default(0) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Orders Placed</div>
+            <div class="value">{{ provider.total_orders_placed|default(0) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Fills</div>
+            <div class="value" style="color:#00ff88;">{{ provider.total_fills|default(0) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Rewards</div>
+            <div class="value" style="color:#00ff88;">${{ "%.2f"|format(provider.total_rewards|default(0)) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Adverse</div>
+            <div class="value" style="color:#ff4444;">${{ "%.2f"|format(provider.total_adverse|default(0)) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Adv. Ratio</div>
+            <div class="value {% if provider.adverse_ratio|default(0) > 0.5 %}warn{% endif %}">
+                {{ "%.1f"|format((provider.adverse_ratio|default(0)) * 100) }}%
+            </div>
+        </div>
+        <div class="stat">
+            <div class="label">Emergencies</div>
+            <div class="value {% if provider.emergency_cancels|default(0) > 0 %}warn{% endif %}">{{ provider.emergency_cancels|default(0) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Errors</div>
+            <div class="value {% if provider.errors|default(0) > 0 %}warn{% endif %}">{{ provider.errors|default(0) }}</div>
+        </div>
+    </div>
+
+    {# Heartbeat & Scoring #}
+    <div class="stats" style="margin-top:10px;">
+        <div class="stat">
+            <div class="label">Heartbeat</div>
+            <div class="value" style="color:{% if provider.heartbeat_active|default(false) %}#00ff88{% else %}#555{% endif %};">
+                {% if provider.heartbeat_active|default(false) %}ON ({{ provider.heartbeat_count|default(0) }}){% else %}OFF{% endif %}
+            </div>
+        </div>
+        <div class="stat">
+            <div class="label">Scoring Rate</div>
+            <div class="value" style="color:{% if provider.scoring_rate|default(0) >= 0.95 %}#00ff88{% elif provider.scoring_rate|default(0) >= 0.8 %}#ffaa00{% else %}#ff4444{% endif %};">
+                {{ "%.1f"|format((provider.scoring_rate|default(0)) * 100) }}%
+            </div>
+        </div>
+        <div class="stat">
+            <div class="label">Orders Scoring</div>
+            <div class="value">{{ provider.orders_scoring|default(0) }}/{{ (provider.orders_scoring|default(0) + provider.orders_not_scoring|default(0)) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Scoring Checks</div>
+            <div class="value">{{ provider.scoring_checks|default(0) }}</div>
+        </div>
+    </div>
+
+    {% if provider.positions|default([])|length > 0 %}
+    <h4 style="margin-top:15px;">ACTIVE QUOTES</h4>
+    <div style="overflow-x:auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th>Market</th>
+                    <th>Midpoint</th>
+                    <th>Bid (YES)</th>
+                    <th>Ask (YES)</th>
+                    <th>Fills</th>
+                    <th>Skew</th>
+                    <th>Adv. Ratio</th>
+                    <th>Capital</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in provider.positions %}
+                <tr{% if p.abandoned %} style="opacity:0.4;"{% endif %}>
+                    <td class="question" title="{{ p.question }}">{{ p.question[:50] }}</td>
+                    <td>{{ "%.4f"|format(p.midpoint) }}</td>
+                    <td style="color:#00ff88;">{% if p.bid %}${{ "%.4f"|format(p.bid) }}{% else %}-{% endif %}</td>
+                    <td style="color:#ff4444;">{% if p.ask %}${{ "%.4f"|format(p.ask) }}{% else %}-{% endif %}</td>
+                    <td>{{ p.fill_count }}</td>
+                    <td style="{% if p.inventory_skew|abs > 0.6 %}color:#ffaa00;{% endif %}">{{ "%.2f"|format(p.inventory_skew) }}</td>
+                    <td style="{% if p.adverse_ratio > 0.5 %}color:#ff4444;{% endif %}">{{ "%.1f"|format(p.adverse_ratio * 100) }}%</td>
+                    <td>${{ "%.0f"|format(p.capital_allocated) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <div style="margin-top:10px;">
+        <form method="POST" action="/panel/liquidity/cancel-all" style="display:inline;"
+              onsubmit="return confirm('Cancel ALL liquidity orders?');">
+            <button type="submit" class="btn" style="background:#ff4444;color:#000;">Cancel All Orders</button>
+        </form>
+    </div>
+</div>
+
+{# Daily Metrics #}
+{% if metrics_today %}
+<div class="section">
+    <h3>TODAY'S P&amp;L</h3>
+    <div class="stats">
+        <div class="stat">
+            <div class="label">Net P&amp;L</div>
+            <div class="value" style="color:{% if metrics_today.net_pnl|default(0) >= 0 %}#00ff88{% else %}#ff4444{% endif %};">
+                ${{ "%.2f"|format(metrics_today.net_pnl|default(0)) }}
+            </div>
+        </div>
+        <div class="stat">
+            <div class="label">Rewards</div>
+            <div class="value" style="color:#00ff88;">${{ "%.2f"|format(metrics_today.rewards_earned|default(0)) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Adverse</div>
+            <div class="value" style="color:#ff4444;">${{ "%.2f"|format(metrics_today.adverse_loss|default(0)) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Fill Rate</div>
+            <div class="value">{{ "%.1f"|format((metrics_today.fill_rate|default(0)) * 100) }}%</div>
+        </div>
+        <div class="stat">
+            <div class="label">Daily ROI</div>
+            <div class="value" style="color:{% if metrics_today.roi_pct|default(0) >= 2 %}#00ff88{% elif metrics_today.roi_pct|default(0) >= 0.5 %}#ffaa00{% else %}#ff4444{% endif %};">
+                {{ "%.2f"|format(metrics_today.roi_pct|default(0)) }}%
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{# Weekly Summary #}
+{% if metrics_summary and metrics_summary.days|default(0) > 0 %}
+<div class="section">
+    <h3>{{ metrics_summary.days }}-DAY SUMMARY ({{ metrics_summary.period }})</h3>
+    <div class="stats">
+        <div class="stat">
+            <div class="label">Cumulative P&amp;L</div>
+            <div class="value" style="color:{% if metrics_summary.cumulative_pnl >= 0 %}#00ff88{% else %}#ff4444{% endif %};">
+                ${{ "%.2f"|format(metrics_summary.cumulative_pnl) }}
+            </div>
+        </div>
+        <div class="stat">
+            <div class="label">Total Rewards</div>
+            <div class="value">${{ "%.2f"|format(metrics_summary.total_rewards) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Total Adverse</div>
+            <div class="value">${{ "%.2f"|format(metrics_summary.total_adverse) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Adv. Ratio</div>
+            <div class="value {% if metrics_summary.adverse_ratio > 0.3 %}warn{% endif %}">
+                {{ "%.1f"|format(metrics_summary.adverse_ratio * 100) }}%
+            </div>
+        </div>
+        <div class="stat">
+            <div class="label">ROI</div>
+            <div class="value">{{ "%.1f"|format(metrics_summary.roi_pct) }}%</div>
+        </div>
+        <div class="stat">
+            <div class="label">APY (Est.)</div>
+            <div class="value" style="color:#ffaa00;">{{ "%.0f"|format(metrics_summary.annualized_apy) }}%</div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<script>
+// Auto-refresh every 60s
+setTimeout(() => location.reload(), 60000);
+</script>
+{% endblock %}
