@@ -277,7 +277,18 @@ class Config:
                 acc_risk = RiskConfig(**risk_raw)
 
             # Auto-detect: new multi-strategy format has "strategies" key
+            # Also handle liquidity config which goes into strategies
             strategies_raw = acc_raw.pop("strategies", None)
+            liquidity_raw = acc_raw.pop("liquidity", None)
+
+            # If strategy_type is "liquidity" but no strategies dict, build one
+            if not strategies_raw and acc_raw.get("strategy_type") == "liquidity" and liquidity_raw:
+                strategies_raw = {
+                    "liquidity": {
+                        "mode": acc_raw.get("execution_mode", "paper"),
+                        **liquidity_raw,
+                    }
+                }
 
             if strategies_raw:
                 # ── New format (Fase 9) ──
@@ -293,6 +304,10 @@ class Config:
                 ct_raw.pop("enabled", None)
                 copy_cfg = CopyTradeConfig(**ct_raw) if ct_raw else CopyTradeConfig()
 
+                # Remove strategy_type and execution_mode from acc_raw (we pass them explicitly)
+                acc_raw.pop("strategy_type", None)
+                acc_raw.pop("execution_mode", None)
+
                 accounts.append(AccountConfig(
                     credentials=creds,
                     risk=acc_risk,
@@ -307,11 +322,15 @@ class Config:
                 copy_raw = acc_raw.pop("copy_trade", {})
                 copy_cfg = CopyTradeConfig(**copy_raw) if copy_raw else CopyTradeConfig()
 
+                # Also remove credentials if present (already extracted)
+                acc_raw.pop("credentials", None)
+
                 accounts.append(AccountConfig(
                     credentials=creds,
                     copy_trade=copy_cfg,
                     risk=acc_risk,
                     **acc_raw,
+                    # Note: liquidity_raw already popped above, so no liquidity key will be passed
                 ))
 
         # Fallback: if no accounts defined, create one default account
