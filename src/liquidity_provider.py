@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -514,6 +515,10 @@ class LiquidityProvider:
         if self._metrics:
             self._metrics.update_active_markets(len(self._positions))
 
+        # Paper mode: simulate fills for testing
+        if self.is_paper:
+            await self._simulate_paper_fills()
+
     async def _open_position(self, market: RewardMarket):
         """Start quoting a new market."""
         # Need token IDs from the market
@@ -950,6 +955,60 @@ class LiquidityProvider:
             condition_id=condition_id,
             placed_at=time.time(),
         )
+
+    async def _simulate_paper_fills(self):
+        """Simulate random fills in paper mode for realistic testing.
+
+        Each active position has a 35% chance of getting a fill each cycle.
+        Fill sizes are small (5-20 shares) to simulate organic trading.
+        This allows testing P&L, metrics, and inventory management without
+        needing real blockchain interaction.
+        """
+        for cid, pos in list(self._positions.items()):
+            if pos.abandoned:
+                continue
+
+            # 35% chance of a fill each cycle
+            if random.random() > 0.35:
+                continue
+
+            # Randomly fill bid or ask (or both, 20% chance)
+            fill_bid = random.random() < 0.50
+            fill_ask = random.random() < 0.50
+
+            if fill_bid and pos.bid_order:
+                size = random.uniform(5, 20)
+                # Bid fills slightly worse (adverse slippage)
+                fill_price = pos.bid_order.price - random.uniform(0.0, 0.01)
+                self.record_fill(
+                    condition_id=cid,
+                    is_yes=True,
+                    size=size,
+                    fill_price=fill_price,
+                )
+                logger.debug(
+                    "paper_fill_bid",
+                    condition_id=cid[:16],
+                    size=round(size, 2),
+                    price=f"${fill_price:.4f}",
+                )
+
+            if fill_ask and pos.ask_order:
+                size = random.uniform(5, 20)
+                # Ask fills slightly worse (adverse slippage)
+                fill_price = pos.ask_order.price + random.uniform(0.0, 0.01)
+                self.record_fill(
+                    condition_id=cid,
+                    is_yes=False,
+                    size=size,
+                    fill_price=fill_price,
+                )
+                logger.debug(
+                    "paper_fill_ask",
+                    condition_id=cid[:16],
+                    size=round(size, 2),
+                    price=f"${fill_price:.4f}",
+                )
 
     # ── Emergency & risk (Phase 3) ───────────────────────────────────
 
