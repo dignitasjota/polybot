@@ -672,6 +672,18 @@ class AccountRunner:
 
     def export_full_report(self) -> dict | None:
         """Export full report for JSON analysis."""
+        # Check new multi-strategy format first
+        if "liquidity" in self.strategies:
+            return self.strategies["liquidity"].export_full_report()
+        if "directional" in self.strategies:
+            strat = self.strategies["directional"]
+            if hasattr(strat, "export_full_report"):
+                return strat.export_full_report()
+        if "copy_trade" in self.strategies:
+            strat = self.strategies["copy_trade"]
+            if hasattr(strat, "export_full_report"):
+                return strat.export_full_report()
+        # Legacy fallback
         if self.detector:
             return self.detector.export_full_report()
         if self.copy_trader:

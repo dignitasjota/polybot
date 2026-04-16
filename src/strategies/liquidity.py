@@ -158,5 +158,17 @@ class LiquidityStrategy(Strategy):
         # Phase 1: no positions to restore (scanner only)
         pass
 
+    def export_full_report(self) -> dict:
+        """Export complete liquidity strategy state (for API endpoints)."""
+        return {
+            "strategy": "liquidity",
+            "mode": self.config.mode,
+            "scanner": self._scanner.get_stats(),
+            "provider": self._provider.get_stats(),
+            "metrics_today": self._metrics.get_today(),
+            "metrics_summary": self._metrics.get_summary(days=7),
+            "config": self.get_config(),
+        }
+
 
 register_strategy("liquidity", LiquidityStrategy, LiquidityConfig)
