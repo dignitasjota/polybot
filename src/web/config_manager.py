@@ -223,7 +223,7 @@ class ConfigManager:
 
     async def set_account_mode(self, account_name: str, mode: str) -> bool:
         """Change execution mode for a specific account (legacy). Returns True if changed."""
-        if mode not in ("paper", "live"):
+        if mode not in ("paper", "dry_run", "live"):
             return False
 
         for runner in self.bot.accounts:
@@ -240,9 +240,9 @@ class ConfigManager:
     async def set_strategy_mode(self, account_name: str, strategy_name: str, mode: str) -> bool:
         """Change mode for a specific strategy within an account (Fase 11).
 
-        Supports disabled/paper/live. Returns True if changed.
+        Supports disabled/paper/dry_run/live. Returns True if changed.
         """
-        if mode not in ("disabled", "paper", "live"):
+        if mode not in ("disabled", "paper", "dry_run", "live"):
             return False
 
         for runner in self.bot.accounts:
