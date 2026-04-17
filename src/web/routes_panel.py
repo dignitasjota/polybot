@@ -310,13 +310,14 @@ async def panel_execution_mode(request: web.Request) -> web.Response:
     account_name = data.get("account", "")
     mode = data.get("mode", "")
 
-    if mode not in ("paper", "live"):
+    if mode not in ("paper", "dry_run", "live"):
         msg = '<div class="flash flash-error">Invalid mode</div>'
     else:
         ok = await cm.set_account_mode(account_name, mode)
         if ok:
             await add_audit(user, "execution_mode", f"{account_name} → {mode}")
-            color = "#ff4444" if mode == "live" else "#00ff88"
+            colors = {"live": "#ff4444", "dry_run": "#ffaa00", "paper": "#00ff88"}
+            color = colors.get(mode, "#00ff88")
             msg = f'<div class="flash flash-info">{account_name}: <span style="color:{color};font-weight:bold;">{mode.upper()}</span></div>'
         else:
             msg = f'<div class="flash flash-error">Account not found: {account_name}</div>'
@@ -338,13 +339,13 @@ async def panel_strategy_mode(request: web.Request) -> web.Response:
     strategy_name = data.get("strategy", "")
     mode = data.get("mode", "")
 
-    if mode not in ("disabled", "paper", "live"):
+    if mode not in ("disabled", "paper", "dry_run", "live"):
         msg = '<div class="flash flash-error">Modo invalido</div>'
     else:
         ok = await cm.set_strategy_mode(account_name, strategy_name, mode)
         if ok:
             await add_audit(user, "strategy_mode", f"{account_name}/{strategy_name} → {mode}")
-            colors = {"live": "#ff4444", "paper": "#00ff88", "disabled": "#888"}
+            colors = {"live": "#ff4444", "dry_run": "#ffaa00", "paper": "#00ff88", "disabled": "#888"}
             color = colors.get(mode, "#888")
             msg = f'<div class="flash flash-info">{account_name}/{strategy_name}: <span style="color:{color};font-weight:bold;">{mode.upper()}</span></div>'
         else:
