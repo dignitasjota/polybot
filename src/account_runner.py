@@ -441,13 +441,18 @@ class AccountRunner:
         if old_mode == new_mode:
             return
 
-        # If switching ANY strategy to live, ensure executor is initialized
-        switching_to_live = new_mode == "live" and self.exec_mode == ExecutionMode.PAPER
-        if switching_to_live:
+        # If switching ANY strategy to live or dry_run, ensure executor is initialized
+        needs_clob = new_mode in ("live", "dry_run") and self.exec_mode == ExecutionMode.PAPER
+        if needs_clob:
             self.executor._credentials = self.account.credentials
-            self.exec_mode = ExecutionMode.LIVE
-            self.account.execution_mode = "live"
-            await self.executor.set_mode(ExecutionMode.LIVE)
+            if new_mode == "live":
+                self.exec_mode = ExecutionMode.LIVE
+                self.account.execution_mode = "live"
+                await self.executor.set_mode(ExecutionMode.LIVE)
+            else:  # dry_run
+                self.exec_mode = ExecutionMode.DRY_RUN
+                self.account.execution_mode = "dry_run"
+                await self.executor.set_mode(ExecutionMode.DRY_RUN)
 
         await strat.set_mode(new_mode)
 
@@ -479,10 +484,10 @@ class AccountRunner:
                 self.copy_trader.reset_stats(new_balance=sim_balance)
 
         # If all strategies are paper/disabled, downgrade executor to paper
-        any_live = any(
-            s.config.mode == "live" for s in self.strategies.values()
+        any_needs_clob = any(
+            s.config.mode in ("live", "dry_run") for s in self.strategies.values()
         )
-        if not any_live and self.exec_mode == ExecutionMode.LIVE:
+        if not any_needs_clob and self.exec_mode != ExecutionMode.PAPER:
             self.exec_mode = ExecutionMode.PAPER
             self.account.execution_mode = "paper"
 

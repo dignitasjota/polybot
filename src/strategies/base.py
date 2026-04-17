@@ -173,7 +173,7 @@ class Strategy(ABC):
           - paper ↔ live           : no restart, in-flight positions settle
                                      and new opportunities use the new mode
         """
-        if new_mode not in ("disabled", "paper", "live"):
+        if new_mode not in ("disabled", "paper", "dry_run", "live"):
             raise ValueError(f"invalid mode: {new_mode}")
 
         old_mode = self.config.mode

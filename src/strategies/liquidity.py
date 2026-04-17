@@ -154,6 +154,16 @@ class LiquidityStrategy(Strategy):
             "max_adverse_ratio": cfg.max_adverse_ratio,
         }
 
+    async def set_mode(self, new_mode: str) -> None:
+        old_mode = self.config.mode
+        await super().set_mode(new_mode)
+
+        # If transitioning from paper to dry_run/live, initialize ClobClient
+        if old_mode == "paper" and new_mode in ("dry_run", "live"):
+            if not self._provider._initialized:
+                await self._provider._init_clob_client()
+                logger.info("provider_clob_initialized", mode=new_mode)
+
     async def restore_open_positions(self, positions: list[Any]) -> None:
         # Phase 1: no positions to restore (scanner only)
         pass

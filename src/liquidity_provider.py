@@ -190,6 +190,15 @@ class LiquidityProvider:
         return self._config.mode == "paper"
 
     @property
+    def is_dry_run(self) -> bool:
+        return self._config.mode == "dry_run"
+
+    @property
+    def should_simulate(self) -> bool:
+        """True if orders should be simulated (paper or dry_run)."""
+        return self._config.mode in ("paper", "dry_run")
+
+    @property
     def quote_refresh_s(self) -> float:
         return getattr(self._config, "quote_refresh_s", 30.0)
 
@@ -218,13 +227,13 @@ class LiquidityProvider:
         self._started_at = time.time()
         self._quote_task = asyncio.create_task(self._quote_loop())
 
-        # Heartbeat: only in live mode when enabled
-        if not self.is_paper and getattr(self._config, "use_heartbeat", False):
+        # Heartbeat: only in live mode when enabled (not dry_run)
+        if not self.should_simulate and getattr(self._config, "use_heartbeat", False):
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             self._heartbeat_active = True
 
-        # Order scoring check: only when we have a ClobClient
-        if not self.is_paper and self._initialized:
+        # Order scoring check: only in live mode with ClobClient
+        if not self.should_simulate and self._initialized:
             self._scoring_task = asyncio.create_task(self._scoring_loop())
 
         logger.info(
@@ -409,7 +418,7 @@ class LiquidityProvider:
 
     async def _check_order_scoring(self):
         """Check all active orders against the /order-scoring endpoint."""
-        if not self._client or self.is_paper:
+        if not self._client or self.should_simulate:
             return
 
         scoring = 0
@@ -515,8 +524,8 @@ class LiquidityProvider:
         if self._metrics:
             self._metrics.update_active_markets(len(self._positions))
 
-        # Paper mode: simulate fills for testing
-        if self.is_paper:
+        # Paper/dry_run mode: simulate fills for testing
+        if self.should_simulate:
             await self._simulate_paper_fills()
 
     async def _open_position(self, market: RewardMarket):
@@ -876,7 +885,15 @@ class LiquidityProvider:
         condition_id: str,
     ) -> QuoteOrder | None:
         """Place a single order (live or paper)."""
-        if self.is_paper:
+        if self.should_simulate:
+            if self.is_dry_run:
+                logger.info(
+                    "dry_run_order",
+                    token_id=token_id[:16],
+                    price=price,
+                    size=size,
+                    side="BUY_YES" if is_yes else "BUY_NO",
+                )
             return self._paper_place(token_id, price, size, is_yes, condition_id)
 
         if not self._client or not self._initialized:
@@ -1090,7 +1107,7 @@ class LiquidityProvider:
         if order.status != "active":
             return
 
-        if self.is_paper:
+        if self.should_simulate:
             order.status = "cancelled"
             self._total_orders_cancelled += 1
             if self._metrics:
