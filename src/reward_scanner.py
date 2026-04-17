@@ -238,17 +238,20 @@ class RewardScanner:
         for tok in tokens:
             outcome = tok.get("outcome", "").lower()
             price = float(tok.get("price", 0) or 0)
-            if outcome == "yes" or (not yes_price and len(tokens) >= 1):
+            if outcome == "yes":
                 yes_price = price
-            if outcome == "no" or (not no_price and len(tokens) >= 2):
+            elif outcome == "no":
                 no_price = price
 
-        # For binary markets with non-yes/no outcomes, use first two tokens
+        # Fallback: non-yes/no outcomes → use first two tokens
         if not yes_price and not no_price and len(tokens) >= 2:
             yes_price = float(tokens[0].get("price", 0) or 0)
             no_price = float(tokens[1].get("price", 0) or 0)
-        elif not no_price and yes_price:
+        # If only one side found, derive the other (binary market: yes + no = 1)
+        elif yes_price and not no_price:
             no_price = 1.0 - yes_price
+        elif no_price and not yes_price:
+            yes_price = 1.0 - no_price
 
         midpoint = (yes_price + no_price) / 2 if (yes_price > 0 and no_price > 0) else 0.5
 
