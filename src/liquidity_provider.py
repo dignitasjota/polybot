@@ -957,58 +957,74 @@ class LiquidityProvider:
         )
 
     async def _simulate_paper_fills(self):
-        """Simulate random fills in paper mode for realistic testing.
+        """Simulate realistic fills, rewards, and spread income in paper mode.
 
-        Each active position has a 35% chance of getting a fill each cycle.
-        Fill sizes are small (5-20 shares) to simulate organic trading.
-        This allows testing P&L, metrics, and inventory management without
-        needing real blockchain interaction.
+        Simulates the full P&L picture a real market maker would see:
+        1. Fills: ~10% chance per cycle, one side at a time (not both)
+        2. Spread income: earned when both sides have filled
+        3. Rewards: proportional to capital vs market's daily_rate
+        4. Adverse: small random slippage on fills (realistic)
         """
+        cycle_seconds = self.quote_refresh_s  # typically 30s
+        seconds_per_day = 86400
+
         for cid, pos in list(self._positions.items()):
             if pos.abandoned:
                 continue
 
-            # 35% chance of a fill each cycle
-            if random.random() > 0.35:
-                continue
+            # ── 1. Simulate fill (10% chance per cycle, one side only) ──
+            if random.random() < 0.10 and (pos.bid_order or pos.ask_order):
+                # Pick one side (not both — realistic, orders fill one at a time)
+                if pos.bid_order and pos.ask_order:
+                    is_bid = random.random() < 0.50
+                elif pos.bid_order:
+                    is_bid = True
+                else:
+                    is_bid = False
 
-            # Randomly fill bid or ask (or both, 20% chance)
-            fill_bid = random.random() < 0.50
-            fill_ask = random.random() < 0.50
+                size = random.uniform(5, 15)
+                if is_bid and pos.bid_order:
+                    # Bid fill: small adverse slippage (0-0.3¢)
+                    slip = random.uniform(0.0, 0.003)
+                    fill_price = pos.bid_order.price - slip
+                    self.record_fill(cid, is_yes=True, size=size, fill_price=fill_price)
+                elif not is_bid and pos.ask_order:
+                    slip = random.uniform(0.0, 0.003)
+                    fill_price = pos.ask_order.price + slip
+                    self.record_fill(cid, is_yes=False, size=size, fill_price=fill_price)
 
-            if fill_bid and pos.bid_order:
-                size = random.uniform(5, 20)
-                # Bid fills slightly worse (adverse slippage)
-                fill_price = pos.bid_order.price - random.uniform(0.0, 0.01)
-                self.record_fill(
-                    condition_id=cid,
-                    is_yes=True,
-                    size=size,
-                    fill_price=fill_price,
-                )
-                logger.debug(
-                    "paper_fill_bid",
-                    condition_id=cid[:16],
-                    size=round(size, 2),
-                    price=f"${fill_price:.4f}",
-                )
+            # ── 2. Simulate spread income (when both sides have filled) ──
+            if pos.fills_yes > 0 and pos.fills_no > 0:
+                matched = min(pos.fills_yes, pos.fills_no)
+                spread = pos.max_spread * self._config.spread_pct_of_max
+                # Spread income accrues proportionally per cycle
+                # Only count the new matched volume since last cycle
+                income_per_cycle = spread * matched * (cycle_seconds / seconds_per_day) * 0.5
+                if income_per_cycle > 0.001:
+                    if self._metrics:
+                        self._metrics.record_spread_income(income_per_cycle)
 
-            if fill_ask and pos.ask_order:
-                size = random.uniform(5, 20)
-                # Ask fills slightly worse (adverse slippage)
-                fill_price = pos.ask_order.price + random.uniform(0.0, 0.01)
-                self.record_fill(
-                    condition_id=cid,
-                    is_yes=False,
-                    size=size,
-                    fill_price=fill_price,
-                )
-                logger.debug(
-                    "paper_fill_ask",
-                    condition_id=cid[:16],
-                    size=round(size, 2),
-                    price=f"${fill_price:.4f}",
-                )
+            # ── 3. Simulate rewards (proportional to capital/daily_rate) ──
+            # Lookup daily_rate from scanner for this market
+            daily_rate = self._get_market_daily_rate(cid)
+            if daily_rate > 0 and pos.capital_allocated > 0:
+                # Our share: capital / (capital + competition_dollars)
+                # Simplified: assume we capture a small fraction
+                # Real formula: our_capital / total_liquidity * daily_rate
+                # Conservative estimate: 1-5% of daily_rate for $50 capital
+                our_fraction = min(0.05, pos.capital_allocated / max(daily_rate, 1.0))
+                reward_per_cycle = daily_rate * our_fraction * (cycle_seconds / seconds_per_day)
+                if reward_per_cycle > 0.0001:
+                    self.record_rewards(cid, reward_per_cycle)
+
+    def _get_market_daily_rate(self, condition_id: str) -> float:
+        """Get daily reward rate for a market from the scanner."""
+        if not self._scanner:
+            return 0.0
+        for m in self._scanner.get_top_markets(self._config.max_markets + 5):
+            if m.condition_id == condition_id:
+                return m.daily_rate
+        return 0.0
 
     # ── Emergency & risk (Phase 3) ───────────────────────────────────
 
