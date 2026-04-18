@@ -253,7 +253,9 @@ class RewardScanner:
         elif no_price and not yes_price:
             yes_price = 1.0 - no_price
 
-        midpoint = (yes_price + no_price) / 2 if (yes_price > 0 and no_price > 0) else 0.5
+        # Midpoint = YES price (NOT average of yes+no, which is always 0.5)
+        # The provider quotes around this price: bid slightly below, ask slightly above
+        midpoint = yes_price if yes_price > 0 else 0.5
 
         return RewardMarket(
             condition_id=condition_id,
