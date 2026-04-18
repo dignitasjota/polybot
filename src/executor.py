@@ -521,11 +521,19 @@ class Executor:
             return True
 
         except Exception as e:
-            logger.warning(
-                "redeem_via_builder_failed",
-                condition_id=condition_id[:20] + "...",
-                error=str(e),
-            )
+            error_str = str(e)
+            # Detect rate limit — don't spam logs on every retry
+            if "429" in error_str or "quota exceeded" in error_str:
+                logger.warning(
+                    "redeem_rate_limited",
+                    condition_id=condition_id[:20] + "...",
+                )
+            else:
+                logger.warning(
+                    "redeem_via_builder_failed",
+                    condition_id=condition_id[:20] + "...",
+                    error=error_str,
+                )
             return False
 
     async def _redeem_via_clob(self, condition_id: str) -> bool:
@@ -744,28 +752,59 @@ class Executor:
         return triggered
 
     async def _redeem_retry_loop(self):
-        """Periodically retry failed redeems every 60s."""
-        REDEEM_RETRY_INTERVAL = 60
+        """Periodically retry failed redeems with exponential backoff.
+
+        Starts at 60s, doubles on each consecutive failure up to 1 hour.
+        Resets to 60s after a successful redeem.
+        """
+        BASE_INTERVAL = 60
+        MAX_INTERVAL = 3600  # 1 hour max between retries
+        MAX_RETRIES_PER_CONDITION = 20  # Give up after 20 attempts
+        interval = BASE_INTERVAL
+        retry_counts: dict[str, int] = {}  # condition_id -> attempt count
         logger.info("redeem_retry_loop_started")
         while True:
             try:
-                await asyncio.sleep(REDEEM_RETRY_INTERVAL)
+                await asyncio.sleep(interval)
                 if not self._pending_redeems:
+                    interval = BASE_INTERVAL  # Reset when queue is empty
+                    retry_counts.clear()
                     continue
 
                 to_retry = list(self._pending_redeems)
-                logger.info("redeem_retry_batch", count=len(to_retry))
+                logger.info("redeem_retry_batch", count=len(to_retry), interval=interval)
+                any_success = False
                 for cid in to_retry:
+                    # Check retry count
+                    attempts = retry_counts.get(cid, 0)
+                    if attempts >= MAX_RETRIES_PER_CONDITION:
+                        logger.warning(
+                            "redeem_giving_up",
+                            condition_id=cid[:20] + "...",
+                            attempts=attempts,
+                        )
+                        self._pending_redeems.discard(cid)
+                        continue
+
+                    retry_counts[cid] = attempts + 1
                     success = await self.redeem_position(cid)
                     if success:
                         logger.info("redeem_retry_success", condition_id=cid[:20] + "...")
-                    # Small delay between retries to avoid hammering the API
-                    await asyncio.sleep(2)
+                        retry_counts.pop(cid, None)
+                        any_success = True
+                    await asyncio.sleep(5)
+
+                # Exponential backoff on failure, reset on success
+                if any_success:
+                    interval = BASE_INTERVAL
+                else:
+                    interval = min(interval * 2, MAX_INTERVAL)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.warning("redeem_retry_error", error=str(e))
+                interval = min(interval * 2, MAX_INTERVAL)
 
     async def close(self):
         """Stop order monitor and redeem retry loop."""
