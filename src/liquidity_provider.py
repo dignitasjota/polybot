@@ -213,6 +213,23 @@ class LiquidityProvider:
     def set_metrics(self, metrics: LiquidityMetrics):
         self._metrics = metrics
 
+    def _get_available_balance(self) -> float | None:
+        """Query USDC balance from CLOB API. Returns None if unavailable."""
+        if not self._client:
+            return None
+        try:
+            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            resp = self._client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            if not resp:
+                return None
+            balance_raw = float(resp.get("balance", 0) or 0)
+            return balance_raw / 1e6 if balance_raw > 1000 else balance_raw
+        except Exception as e:
+            logger.warning("balance_check_failed", error=str(e))
+            return None
+
     # ── Lifecycle ─────────────────────────────────────────────────────
 
     async def start(self):
@@ -826,10 +843,11 @@ class LiquidityProvider:
         # Recalculate ask_price from the hidden NO price
         ask_price = round(1.0 - ask_no_price_hidden, 2)
 
-        # Base sizes
-        bid_size = round(pos.capital_allocated / bid_price, 2) if bid_price > 0 else 0
+        # Base sizes — split capital between bid and ask (half each side)
+        half_capital = pos.capital_allocated / 2
+        bid_size = round(half_capital / bid_price, 2) if bid_price > 0 else 0
         ask_no_price = round(1.0 - ask_price, 2)
-        ask_size = round(pos.capital_allocated / ask_no_price, 2) if ask_no_price > 0 else 0
+        ask_size = round(half_capital / ask_no_price, 2) if ask_no_price > 0 else 0
 
         # Inventory-aware size adjustments
         skip_bid = False
@@ -855,6 +873,21 @@ class LiquidityProvider:
             else:
                 bid_size = round(bid_size * 1.5, 2)
                 ask_size = round(ask_size * 0.5, 2)
+
+        # Check balance before placing orders (live mode only)
+        if not self.should_simulate and self._client:
+            available = self._get_available_balance()
+            bid_cost = round(bid_price * bid_size, 2) if not skip_bid else 0
+            ask_cost = round(ask_no_price * ask_size, 2) if not skip_ask else 0
+            total_cost = bid_cost + ask_cost
+            if available is not None and total_cost > available:
+                logger.warning(
+                    "insufficient_balance_skip_quotes",
+                    condition_id=pos.condition_id[:16],
+                    needed=total_cost,
+                    available=available,
+                )
+                return
 
         # Place bid: BUY YES at bid_price
         if bid_size > 0 and not skip_bid:
