@@ -404,6 +404,10 @@ async def panel_liquidity(request: web.Request) -> web.Response:
         "min_reward_per_dollar": 0.0005,
         "capital_per_market": 50.0,
         "max_markets": 5,
+        "max_min_size": 0.0,
+        "spread_pct_of_max": 0.20,
+        "max_inventory_skew": 0.6,
+        "max_adverse_ratio": 0.70,
     }
     if scanner:
         params.update({
@@ -418,6 +422,10 @@ async def panel_liquidity(request: web.Request) -> web.Response:
         for strat_name, strat in runner.strategies.items():
             if strat_name == "liquidity" and hasattr(strat, "config"):
                 params["max_markets"] = strat.config.max_markets
+                params["max_min_size"] = strat.config.max_min_size
+                params["spread_pct_of_max"] = strat.config.spread_pct_of_max
+                params["max_inventory_skew"] = strat.config.max_inventory_skew
+                params["max_adverse_ratio"] = strat.config.max_adverse_ratio
                 break
 
     # Provider stats
