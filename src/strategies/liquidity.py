@@ -34,6 +34,9 @@ class LiquidityConfig(StrategyConfig):
     max_markets: int = 5                  # Max markets to quote simultaneously
     total_capital: float = 250.0          # Verification cap
 
+    # Filtering
+    max_min_size: float = 0.0             # Only markets with min_size <= this (0 = no filter)
+
     # Quoting (Phase 2+)
     spread_pct_of_max: float = 0.20       # Quote at 20% of max_spread
     use_order_block_hiding: bool = True
@@ -61,6 +64,7 @@ class LiquidityConfig(StrategyConfig):
             capital_per_market=float(raw.get("capital_per_market", 50.0)),
             max_markets=int(raw.get("max_markets", 5)),
             total_capital=float(raw.get("total_capital", 250.0)),
+            max_min_size=float(raw.get("max_min_size", 0.0)),
             spread_pct_of_max=float(raw.get("spread_pct_of_max", 0.20)),
             use_order_block_hiding=raw.get("use_order_block_hiding", True),
             min_block_usd=float(raw.get("min_block_usd", 500.0)),
@@ -99,6 +103,7 @@ class LiquidityStrategy(Strategy):
             min_daily_rate=config.min_daily_rate,
             min_reward_per_dollar=config.min_reward_per_dollar,
             capital_per_market=config.capital_per_market,
+            max_min_size=config.max_min_size,
         )
         self._metrics = LiquidityMetrics(total_capital=config.total_capital)
         self._provider = LiquidityProvider(

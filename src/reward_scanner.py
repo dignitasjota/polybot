@@ -91,6 +91,7 @@ class RewardScanner:
         min_daily_rate: float = 1.0,
         min_reward_per_dollar: float = 0.5,
         capital_per_market: float = 50.0,
+        max_min_size: float = 0.0,
     ):
         self._session = session
         self._owns_session = session is None
@@ -98,6 +99,7 @@ class RewardScanner:
         self._min_daily_rate = min_daily_rate
         self._min_reward_per_dollar = min_reward_per_dollar
         self._capital_per_market = capital_per_market
+        self._max_min_size = max_min_size
 
         self._markets: list[RewardMarket] = []
         self._last_scan: float = 0.0
@@ -315,8 +317,10 @@ class RewardScanner:
 
             m.score = (m.reward_per_dollar * spread_factor * volume_factor) / risk_factor
 
-        # Filter by minimum reward_per_dollar
+        # Filter by minimum reward_per_dollar and max_min_size
         scored = [m for m in markets if m.reward_per_dollar >= self._min_reward_per_dollar]
+        if self._max_min_size > 0:
+            scored = [m for m in scored if m.min_size <= self._max_min_size]
 
         # Sort by score descending
         scored.sort(key=lambda m: m.score, reverse=True)
@@ -359,6 +363,7 @@ class RewardScanner:
                 "min_daily_rate": self._min_daily_rate,
                 "min_reward_per_dollar": self._min_reward_per_dollar,
                 "capital_per_market": self._capital_per_market,
+                "max_min_size": self._max_min_size,
             },
             "markets": [m.to_dict() for m in self._markets],
         }

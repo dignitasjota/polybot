@@ -71,6 +71,13 @@
                 <span class="desc">Max markets to quote simultaneously (Phase 2)</span>
             </div>
         </div>
+        <div class="form-row" style="margin-top:10px;">
+            <div class="form-group">
+                <label>Max Min Size ($)</label>
+                <input type="number" name="max_min_size" value="{{ params.max_min_size }}" min="0" max="10000" step="10">
+                <span class="desc">Only markets with min_size ≤ this value (0 = no filter)</span>
+            </div>
+        </div>
         <div style="margin-top:15px;">
             <button type="submit" class="btn btn-success">Save Config</button>
         </div>

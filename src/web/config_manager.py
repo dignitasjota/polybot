@@ -283,6 +283,7 @@ class ConfigManager:
                     "spread_pct_of_max": cfg.spread_pct_of_max,
                     "max_inventory_skew": cfg.max_inventory_skew,
                     "max_adverse_ratio": cfg.max_adverse_ratio,
+                    "max_min_size": cfg.max_min_size,
                 }
         # Defaults
         return {
@@ -294,6 +295,7 @@ class ConfigManager:
             "spread_pct_of_max": 0.20,
             "max_inventory_skew": 0.6,
             "max_adverse_ratio": 0.70,
+            "max_min_size": 0.0,
         }
 
     def set_liquidity_params(self, params: dict):
@@ -334,6 +336,11 @@ class ConfigManager:
                 cfg.max_inventory_skew = float(params["max_inventory_skew"])
             if "max_adverse_ratio" in params:
                 cfg.max_adverse_ratio = float(params["max_adverse_ratio"])
+            if "max_min_size" in params:
+                val = float(params["max_min_size"])
+                cfg.max_min_size = val
+                if scanner:
+                    scanner._max_min_size = val
 
         self._persist()
 
@@ -433,6 +440,25 @@ class ConfigManager:
                         acc_raw["strategies"][strat_name]["mode"] = strat_raw.get("mode", "paper")
                     else:
                         acc_raw["strategies"][strat_name]["mode"] = "paper"
+
+            # Persist liquidity config if this account has a liquidity strategy
+            if i < len(self.bot.accounts):
+                runner = self.bot.accounts[i]
+                liq_strat = runner.strategies.get("liquidity")
+                if liq_strat and hasattr(liq_strat, "config"):
+                    lc = liq_strat.config
+                    acc_raw.setdefault("strategies", {})
+                    acc_raw["strategies"].setdefault("liquidity", {})
+                    liq_raw = acc_raw["strategies"]["liquidity"]
+                    liq_raw["capital_per_market"] = lc.capital_per_market
+                    liq_raw["max_markets"] = lc.max_markets
+                    liq_raw["max_min_size"] = lc.max_min_size
+                    liq_raw["spread_pct_of_max"] = lc.spread_pct_of_max
+                    liq_raw["max_inventory_skew"] = lc.max_inventory_skew
+                    liq_raw["max_adverse_ratio"] = lc.max_adverse_ratio
+                    liq_raw["scan_interval"] = lc.scan_interval
+                    liq_raw["min_daily_rate"] = lc.min_daily_rate
+                    liq_raw["min_reward_per_dollar"] = lc.min_reward_per_dollar
 
         with open(self._toml_path, "wb") as f:
             tomli_w.dump(raw, f)
