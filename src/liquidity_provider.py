@@ -293,6 +293,35 @@ class LiquidityProvider:
         self._positions.clear()
         logger.info("provider_stopped")
 
+    async def clear_positions(self, old_mode: str, new_mode: str):
+        """Clear positions on mode transition to avoid ghost orders.
+
+        When switching from paper/dry_run to live, paper orders (paper-xxx)
+        don't exist in the CLOB. Trying to cancel them causes API errors.
+        When switching from live to paper, real orders should be cancelled first.
+        """
+        if not self._positions:
+            return
+
+        paper_modes = ("paper", "dry_run")
+
+        if old_mode in paper_modes and new_mode == "live":
+            # Paper → live: just discard paper positions (they don't exist in CLOB)
+            count = len(self._positions)
+            self._positions.clear()
+            logger.info("cleared_paper_positions_for_live", count=count)
+
+        elif old_mode == "live" and new_mode in paper_modes:
+            # Live → paper: cancel real orders first, then clear
+            await self._cancel_all_orders()
+            self._positions.clear()
+            logger.info("cancelled_live_positions_for_paper")
+
+        elif old_mode in paper_modes and new_mode in paper_modes:
+            # dry_run ↔ paper: just clear
+            self._positions.clear()
+            logger.info("cleared_positions_mode_change", old=old_mode, new=new_mode)
+
     # ── ClobClient init (mirrors executor.py pattern) ─────────────────
 
     async def _init_clob_client(self):

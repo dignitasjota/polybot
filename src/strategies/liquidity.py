@@ -176,8 +176,13 @@ class LiquidityStrategy(Strategy):
         old_mode = self.config.mode
         await super().set_mode(new_mode)
 
-        # If transitioning from paper to dry_run/live, initialize ClobClient
-        if old_mode == "paper" and new_mode in ("dry_run", "live"):
+        # Clear paper/dry_run positions when transitioning to live (or vice versa)
+        # Paper orders don't exist in the CLOB — trying to cancel them causes errors
+        if old_mode != new_mode and old_mode in ("paper", "dry_run", "live"):
+            await self._provider.clear_positions(old_mode, new_mode)
+
+        # If transitioning to dry_run/live, initialize ClobClient
+        if new_mode in ("dry_run", "live"):
             if not self._provider._initialized:
                 await self._provider._init_clob_client()
                 logger.info("provider_clob_initialized", mode=new_mode)
