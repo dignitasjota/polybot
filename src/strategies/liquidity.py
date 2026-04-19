@@ -38,7 +38,7 @@ class LiquidityConfig(StrategyConfig):
     max_min_size: float = 0.0             # Only markets with min_size <= this (0 = no filter)
 
     # Quoting (Phase 2+)
-    spread_pct_of_max: float = 0.20       # Quote at 20% of max_spread
+    spread_pct_of_max: float = 0.60       # Quote at 60% of max_spread
     use_order_block_hiding: bool = True
     min_block_usd: float = 500.0
 
@@ -70,7 +70,7 @@ class LiquidityConfig(StrategyConfig):
             max_markets=int(raw.get("max_markets", 5)),
             total_capital=float(raw.get("total_capital", 250.0)),
             max_min_size=float(raw.get("max_min_size", 0.0)),
-            spread_pct_of_max=float(raw.get("spread_pct_of_max", 0.20)),
+            spread_pct_of_max=float(raw.get("spread_pct_of_max", 0.60)),
             use_order_block_hiding=raw.get("use_order_block_hiding", True),
             min_block_usd=float(raw.get("min_block_usd", 500.0)),
             max_inventory_skew=float(raw.get("max_inventory_skew", 0.6)),

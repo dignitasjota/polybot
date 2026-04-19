@@ -68,6 +68,7 @@ class MarketPosition:
     yes_token_id: str
     no_token_id: str
     max_spread: float
+    min_size: float = 0.0  # Min order size (shares) to earn rewards
     midpoint: float = 0.5
 
     bid_order: QuoteOrder | None = None
@@ -110,8 +111,11 @@ class MarketPosition:
             "question": self.question[:60],
             "midpoint": round(self.midpoint, 4),
             "max_spread": self.max_spread,
+            "min_size": self.min_size,
             "bid": round(self.bid_order.price, 2) if self.bid_order else None,
             "ask": round(1.0 - self.ask_order.price, 2) if self.ask_order else None,
+            "bid_size": round(self.bid_order.size, 2) if self.bid_order else None,
+            "ask_size": round(self.ask_order.size, 2) if self.ask_order else None,
             "bid_order_id": self.bid_order.order_id[:12] if self.bid_order else None,
             "ask_order_id": self.ask_order.order_id[:12] if self.ask_order else None,
             "fills_yes": round(self.fills_yes, 2),
@@ -625,6 +629,7 @@ class LiquidityProvider:
             yes_token_id=yes_token_id,
             no_token_id=no_token_id,
             max_spread=market.max_spread / 100.0,  # centavos → price units
+            min_size=market.min_size,
             midpoint=midpoint,
             capital_allocated=self._config.capital_per_market,
         )
@@ -921,6 +926,36 @@ class LiquidityProvider:
             else:
                 bid_size = round(bid_size * 1.5, 2)
                 ask_size = round(ask_size * 0.5, 2)
+
+        # ── Min size check: skip orders that won't earn rewards ──
+        min_size = pos.min_size
+        if min_size > 0:
+            if bid_size < min_size and not skip_bid:
+                logger.warning(
+                    "skip_bid_below_min_size",
+                    condition_id=pos.condition_id[:16],
+                    bid_size=bid_size,
+                    min_size=min_size,
+                )
+                skip_bid = True
+            if ask_size < min_size and not skip_ask:
+                logger.warning(
+                    "skip_ask_below_min_size",
+                    condition_id=pos.condition_id[:16],
+                    ask_size=ask_size,
+                    min_size=min_size,
+                )
+                skip_ask = True
+
+        if skip_bid and skip_ask:
+            logger.warning(
+                "skip_market_all_below_min_size",
+                condition_id=pos.condition_id[:16],
+                bid_size=bid_size,
+                ask_size=ask_size,
+                min_size=min_size,
+            )
+            return
 
         # Check balance before placing orders (live mode only)
         if not self.should_simulate and self._client:
