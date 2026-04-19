@@ -533,15 +533,32 @@ class LiquidityProvider:
                 async with session.get(
                     url,
                     params=params,
-                    headers=self._get_auth_headers(),
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
                     if resp.status != 200:
+                        logger.debug(
+                            "scoring_api_non_200",
+                            order_id=order_id[:12],
+                            status=resp.status,
+                        )
                         return False
                     data = await resp.json()
-                    # The API returns scoring info — consider scoring if present
-                    return bool(data.get("scoring", False))
-        except Exception:
+                    # Log full response to diagnose field names
+                    logger.info(
+                        "scoring_api_response",
+                        order_id=order_id[:12],
+                        response=str(data)[:200],
+                    )
+                    # Check multiple possible field names
+                    if data.get("scoring"):
+                        return True
+                    if data.get("is_scoring"):
+                        return True
+                    if data.get("score", 0) > 0:
+                        return True
+                    return False
+        except Exception as e:
+            logger.debug("scoring_check_exception", order_id=order_id[:12], error=str(e))
             return False
 
     async def _refresh_all(self):
@@ -1027,7 +1044,7 @@ class LiquidityProvider:
             )
 
             signed = self._client.create_order(order_args)
-            resp = self._client.post_order(signed, OrderType.GTC)
+            resp = self._client.post_order(signed, OrderType.GTC, post_only=True)
 
             order_id = resp.get("orderID", "") if resp else ""
             if not order_id:
