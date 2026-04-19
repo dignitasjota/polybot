@@ -114,6 +114,11 @@ class LiquidityStrategy(Strategy):
         )
         self._provider.set_scanner(self._scanner)
 
+        # Wire auto-redeem: when matched pairs are detected, use executor's redeem
+        executor = context._executor
+        if hasattr(executor, 'redeem_position'):
+            self._provider.set_redeem_callback(executor.redeem_position)
+
     @property
     def scanner(self) -> RewardScanner:
         return self._scanner

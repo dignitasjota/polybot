@@ -172,6 +172,12 @@ class LiquidityProvider:
         self._emergency_cancels = 0
         self._markets_abandoned = 0
 
+        # Auto-redeem callback: called when matched pairs detected
+        # signature: async callback(condition_id: str) -> bool
+        self._on_redeem: asyncio.coroutine | None = None
+        self._total_redeems = 0
+        self._redeem_lock: set[str] = set()  # condition_ids currently being redeemed
+
         # Heartbeat
         self._heartbeat_active = False
         self._heartbeat_count = 0
@@ -1120,6 +1126,10 @@ class LiquidityProvider:
             skew=round(pos.inventory_skew, 3),
         )
 
+        # Check for matched pairs to redeem (live mode only)
+        if not self.should_simulate and pos.fills_yes > 0 and pos.fills_no > 0:
+            asyncio.create_task(self._try_redeem_matched(condition_id))
+
     def record_rewards(self, condition_id: str, amount: float):
         """Record rewards earned for a position."""
         pos = self._positions.get(condition_id)
@@ -1127,6 +1137,71 @@ class LiquidityProvider:
             pos.total_rewards_earned += amount
         if self._metrics:
             self._metrics.record_rewards(amount)
+
+    # ── Auto-redeem matched pairs ────────────────────────────────────
+
+    def set_redeem_callback(self, callback):
+        """Set async callback for redeeming matched pairs.
+
+        The callback receives a condition_id and should return True on success.
+        Typically wired to executor.redeem_position().
+        """
+        self._on_redeem = callback
+
+    async def _try_redeem_matched(self, condition_id: str):
+        """Check if a position has matched YES+NO fills and trigger redeem.
+
+        When both sides are filled, the matched amount (min of YES, NO fills)
+        can be redeemed for $1 per pair, capturing the spread as profit and
+        freeing up capital for more quoting.
+        """
+        pos = self._positions.get(condition_id)
+        if not pos:
+            return
+
+        matched = min(pos.fills_yes, pos.fills_no)
+        if matched <= 0:
+            return
+
+        # Avoid duplicate redeems
+        if condition_id in self._redeem_lock:
+            return
+
+        if not self._on_redeem:
+            return
+
+        self._redeem_lock.add(condition_id)
+        logger.info(
+            "matched_pair_redeem",
+            condition_id=condition_id[:16],
+            matched_shares=round(matched, 2),
+            fills_yes=round(pos.fills_yes, 2),
+            fills_no=round(pos.fills_no, 2),
+        )
+
+        try:
+            success = await self._on_redeem(condition_id)
+            if success:
+                # Clear the matched portion from fills — remaining is unmatched inventory
+                pos.fills_yes -= matched
+                pos.fills_no -= matched
+                self._total_redeems += 1
+                logger.info(
+                    "matched_pair_redeemed",
+                    condition_id=condition_id[:16],
+                    redeemed_shares=round(matched, 2),
+                    remaining_yes=round(pos.fills_yes, 2),
+                    remaining_no=round(pos.fills_no, 2),
+                )
+            else:
+                logger.warning(
+                    "matched_pair_redeem_failed",
+                    condition_id=condition_id[:16],
+                )
+        except Exception as e:
+            logger.error("matched_pair_redeem_error", error=str(e))
+        finally:
+            self._redeem_lock.discard(condition_id)
 
     # ── Order cancellation ────────────────────────────────────────────
 
@@ -1191,6 +1266,7 @@ class LiquidityProvider:
             "adverse_ratio": round(total_adverse / total_rewards, 3) if total_rewards > 0 else 0,
             "emergency_cancels": self._emergency_cancels,
             "markets_abandoned": self._markets_abandoned,
+            "total_redeems": self._total_redeems,
             # Heartbeat
             "heartbeat_active": self._heartbeat_active,
             "heartbeat_count": self._heartbeat_count,

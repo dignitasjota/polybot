@@ -441,18 +441,18 @@ class AccountRunner:
         if old_mode == new_mode:
             return
 
-        # If switching ANY strategy to live or dry_run, ensure executor is initialized
-        needs_clob = new_mode in ("live", "dry_run") and self.exec_mode == ExecutionMode.PAPER
-        if needs_clob:
+        # Sync executor mode: use the highest mode across all strategies
+        # (live > dry_run > paper). Never downgrade if another strategy is higher.
+        if new_mode == "live" and self.exec_mode != ExecutionMode.LIVE:
             self.executor._credentials = self.account.credentials
-            if new_mode == "live":
-                self.exec_mode = ExecutionMode.LIVE
-                self.account.execution_mode = "live"
-                await self.executor.set_mode(ExecutionMode.LIVE)
-            else:  # dry_run
-                self.exec_mode = ExecutionMode.DRY_RUN
-                self.account.execution_mode = "dry_run"
-                await self.executor.set_mode(ExecutionMode.DRY_RUN)
+            self.exec_mode = ExecutionMode.LIVE
+            self.account.execution_mode = "live"
+            await self.executor.set_mode(ExecutionMode.LIVE)
+        elif new_mode == "dry_run" and self.exec_mode == ExecutionMode.PAPER:
+            self.executor._credentials = self.account.credentials
+            self.exec_mode = ExecutionMode.DRY_RUN
+            self.account.execution_mode = "dry_run"
+            await self.executor.set_mode(ExecutionMode.DRY_RUN)
 
         await strat.set_mode(new_mode)
 
