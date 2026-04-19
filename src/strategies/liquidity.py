@@ -56,7 +56,7 @@ class LiquidityConfig(StrategyConfig):
     use_heartbeat: bool = False          # POST /heartbeat every 5s (miss 10s → all cancelled)
     heartbeat_interval: float = 5.0     # Seconds between heartbeats
     scoring_check_interval: float = 60.0  # Seconds between order-scoring checks
-    quote_refresh_s: float = 30.0       # Seconds between quote refresh cycles
+    quote_refresh_s: float = 120.0      # Seconds between quote refresh cycles
 
     @classmethod
     def from_dict(cls, raw: dict, mode: str = "disabled") -> LiquidityConfig:
@@ -79,7 +79,7 @@ class LiquidityConfig(StrategyConfig):
             use_heartbeat=raw.get("use_heartbeat", False),
             heartbeat_interval=float(raw.get("heartbeat_interval", 5.0)),
             scoring_check_interval=float(raw.get("scoring_check_interval", 60.0)),
-            quote_refresh_s=float(raw.get("quote_refresh_s", 30.0)),
+            quote_refresh_s=float(raw.get("quote_refresh_s", 120.0)),
             auto_exit_enabled=raw.get("auto_exit_enabled", True),
             auto_exit_timeout_s=float(raw.get("auto_exit_timeout_s", 300.0)),
             auto_exit_max_loss_pct=float(raw.get("auto_exit_max_loss_pct", 0.10)),
