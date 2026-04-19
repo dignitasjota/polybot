@@ -187,6 +187,10 @@ class LiquidityStrategy(Strategy):
                 await self._provider._init_clob_client()
                 logger.info("provider_clob_initialized", mode=new_mode)
 
+        # Start scoring loop when transitioning to live (if not already running)
+        if new_mode == "live" and self._provider._initialized:
+            self._provider.ensure_scoring_loop()
+
     async def restore_open_positions(self, positions: list[Any]) -> None:
         # Phase 1: no positions to restore (scanner only)
         pass

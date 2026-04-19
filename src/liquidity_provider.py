@@ -275,6 +275,15 @@ class LiquidityProvider:
             heartbeat=self._heartbeat_active,
         )
 
+    def ensure_scoring_loop(self):
+        """Start the scoring loop if not already running. Called on mode transitions."""
+        if self._scoring_task and not self._scoring_task.done():
+            return  # Already running
+        if not self._initialized:
+            return
+        self._scoring_task = asyncio.create_task(self._scoring_loop())
+        logger.info("scoring_loop_started_on_mode_change")
+
     async def stop(self):
         """Cancel all orders, stop heartbeat, and shut down."""
         self._running = False
