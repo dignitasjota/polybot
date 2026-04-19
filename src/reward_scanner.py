@@ -278,70 +278,51 @@ class RewardScanner:
         )
 
     def _rank_markets(self, markets: list[RewardMarket]) -> list[RewardMarket]:
-        """Score and sort markets by profitability potential.
+        """Score and sort markets by reward capture potential.
+
+        Conservative strategy: we quote at ~85% of max_spread, so fills are
+        very unlikely. The goal is to maximize rewards, not fills. Therefore:
+        - Low competition = GOOD (we capture more of the reward pool)
+        - High competition = BAD (rewards are shared)
+        - Wide natural spread is irrelevant (we won't get filled anyway)
 
         Score formula:
             reward_per_dollar = daily_rate / max(competitiveness, 1)
-            spread_factor = based on natural spread vs max_spread
+            competition_bonus = bonus for low competition (we get more rewards)
             risk_factor = penalty for extreme midpoints
-            adverse_factor = penalty for zero/low competition (adverse selection trap)
-            score = reward_per_dollar * spread_factor * volume_factor * adverse_factor / risk_factor
-
-        competitiveness is in dollars (from CLOB API), not a 0-1 ratio.
-        0 = no competition, 100+ = heavily competitive.
-        Higher score = more attractive market to quote.
+            score = reward_per_dollar * competition_bonus * volume_factor / risk_factor
         """
         for m in markets:
             # competitiveness is in USD — 0 means nobody is quoting
             m.reward_per_dollar = m.daily_rate / max(m.competitiveness, 1.0)
 
-            # Spread factor: based on how the natural spread compares to max_spread
-            # A spread much wider than max_spread means high adverse selection risk
-            # (nobody else wants to quote tight there)
-            max_spread_price = m.max_spread / 100.0  # centavos → price
-            if max_spread_price > 0 and m.spread > 0:
-                spread_ratio = m.spread / max_spread_price
-                if spread_ratio > 3.0:
-                    # Natural spread 3x+ wider than max_spread = very dangerous
-                    spread_factor = 0.3
-                elif spread_ratio > 2.0:
-                    spread_factor = 0.5
-                elif spread_ratio > 1.0:
-                    # Natural spread wider than max_spread = some risk
-                    spread_factor = 0.7
-                else:
-                    # Natural spread within max_spread = healthy market
-                    spread_factor = 1.0 + (1.0 - spread_ratio) * 0.5
-            elif m.spread > 0.05:
-                spread_factor = 0.3  # Very wide = dangerous
-            elif m.spread > 0:
-                spread_factor = m.spread / 0.05
+            # Competition bonus: LESS competition = MORE rewards for us
+            # With wide spreads, adverse selection is not a concern
+            if m.competitiveness <= 0:
+                competition_bonus = 1.5  # Nobody else → 100% of rewards
+            elif m.competitiveness < 1.0:
+                competition_bonus = 1.3  # Very little competition
+            elif m.competitiveness < 5.0:
+                competition_bonus = 1.0  # Moderate
+            elif m.competitiveness < 20.0:
+                competition_bonus = 0.7  # Competitive, we get less
             else:
-                spread_factor = 0.5  # Unknown spread
+                competition_bonus = 0.4  # Heavily competed, little reward share
 
-            # Risk factor: extreme midpoints (near 0 or 1) need two-sided quoting
+            # Risk factor: extreme midpoints (near 0 or 1)
+            # With wide spreads on extreme markets, one side may fall outside
+            # valid price range [0.01, 0.99] → can only quote one side
             mid_distance = abs(m.midpoint - 0.5)
             risk_factor = 1.0 + mid_distance
 
-            # Adverse selection factor: zero competition is a RED FLAG
-            # If nobody else is quoting, there's likely high adverse selection
-            if m.competitiveness <= 0:
-                adverse_factor = 0.4  # Heavy penalty
-            elif m.competitiveness < 1.0:
-                adverse_factor = 0.6  # Moderate penalty
-            elif m.competitiveness < 5.0:
-                adverse_factor = 0.8  # Slight penalty
-            else:
-                adverse_factor = 1.0  # Healthy competition
-
-            # Volume bonus: more volume = more fill opportunities
+            # Volume factor: slight bonus for active markets (more reward pool activity)
             volume_factor = 1.0
             if m.volume_24h > 10000:
-                volume_factor = 1.3
+                volume_factor = 1.2
             elif m.volume_24h > 1000:
                 volume_factor = 1.1
 
-            m.score = (m.reward_per_dollar * spread_factor * volume_factor * adverse_factor) / risk_factor
+            m.score = (m.reward_per_dollar * competition_bonus * volume_factor) / risk_factor
 
         # Filter by minimum reward_per_dollar and max_min_size
         scored = [m for m in markets if m.reward_per_dollar >= self._min_reward_per_dollar]
