@@ -47,6 +47,11 @@ class LiquidityConfig(StrategyConfig):
     max_adverse_ratio: float = 0.70
     emergency_move_pct: float = 0.05
 
+    # Auto-exit unmatched positions
+    auto_exit_enabled: bool = True
+    auto_exit_timeout_s: float = 300.0    # Sell after 5 min unmatched
+    auto_exit_max_loss_pct: float = 0.10  # Max 10% loss to accept on exit
+
     # Heartbeat & scoring
     use_heartbeat: bool = False          # POST /heartbeat every 5s (miss 10s → all cancelled)
     heartbeat_interval: float = 5.0     # Seconds between heartbeats
@@ -75,6 +80,9 @@ class LiquidityConfig(StrategyConfig):
             heartbeat_interval=float(raw.get("heartbeat_interval", 5.0)),
             scoring_check_interval=float(raw.get("scoring_check_interval", 60.0)),
             quote_refresh_s=float(raw.get("quote_refresh_s", 30.0)),
+            auto_exit_enabled=raw.get("auto_exit_enabled", True),
+            auto_exit_timeout_s=float(raw.get("auto_exit_timeout_s", 300.0)),
+            auto_exit_max_loss_pct=float(raw.get("auto_exit_max_loss_pct", 0.10)),
             max_concurrent_bets=int(raw.get("max_concurrent_bets", 5)),
             max_bet_per_trade=float(raw.get("max_bet_per_trade", 50.0)),
         )

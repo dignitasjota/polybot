@@ -86,6 +86,9 @@ class MarketPosition:
     last_midpoint_value: float = 0.0
     abandoned: bool = False  # Marked for removal due to high adverse ratio
 
+    # Unmatched inventory tracking (for auto-exit)
+    unmatched_since: float = 0.0  # timestamp when unmatched inventory first detected
+
     @property
     def inventory_skew(self) -> float:
         """Positive = long YES, negative = long NO. Range [-1, 1]."""
@@ -176,6 +179,7 @@ class LiquidityProvider:
         # signature: async callback(condition_id: str) -> bool
         self._on_redeem: asyncio.coroutine | None = None
         self._total_redeems = 0
+        self._total_auto_exits = 0
         self._redeem_lock: set[str] = set()  # condition_ids currently being redeemed
 
         # Heartbeat
@@ -546,6 +550,9 @@ class LiquidityProvider:
         # Update active markets count in metrics
         if self._metrics:
             self._metrics.update_active_markets(len(self._positions))
+
+        # Auto-exit unmatched inventory (live mode only)
+        await self._check_auto_exits()
 
         # Paper/dry_run mode: simulate fills for testing
         if self.should_simulate:
@@ -1126,6 +1133,14 @@ class LiquidityProvider:
             skew=round(pos.inventory_skew, 3),
         )
 
+        # Track when unmatched inventory started
+        unmatched_yes = pos.fills_yes - min(pos.fills_yes, pos.fills_no)
+        unmatched_no = pos.fills_no - min(pos.fills_yes, pos.fills_no)
+        if (unmatched_yes > 0 or unmatched_no > 0) and pos.unmatched_since == 0:
+            pos.unmatched_since = time.time()
+        elif unmatched_yes == 0 and unmatched_no == 0:
+            pos.unmatched_since = 0.0
+
         # Check for matched pairs to redeem (live mode only)
         if not self.should_simulate and pos.fills_yes > 0 and pos.fills_no > 0:
             asyncio.create_task(self._try_redeem_matched(condition_id))
@@ -1203,6 +1218,106 @@ class LiquidityProvider:
         finally:
             self._redeem_lock.discard(condition_id)
 
+    # ── Auto-exit unmatched inventory ─────────────────────────────────
+
+    async def _check_auto_exits(self):
+        """Sell unmatched inventory that's been sitting too long.
+
+        When only one side fills (e.g., YES but not NO), the capital is locked
+        in a directional position earning zero rewards. Better to sell at a
+        small loss and free up capital for more quoting.
+        """
+        if self.should_simulate:
+            return
+        if not getattr(self._config, 'auto_exit_enabled', True):
+            return
+        if not self._client:
+            return
+
+        timeout = getattr(self._config, 'auto_exit_timeout_s', 300.0)
+        max_loss_pct = getattr(self._config, 'auto_exit_max_loss_pct', 0.10)
+        now = time.time()
+
+        for cid, pos in list(self._positions.items()):
+            if pos.unmatched_since <= 0:
+                continue
+            if cid in self._redeem_lock:
+                continue
+
+            elapsed = now - pos.unmatched_since
+            if elapsed < timeout:
+                continue
+
+            # Determine which side is unmatched
+            unmatched_yes = pos.fills_yes - min(pos.fills_yes, pos.fills_no)
+            unmatched_no = pos.fills_no - min(pos.fills_yes, pos.fills_no)
+
+            if unmatched_yes > 0.5:
+                # We have excess YES tokens — sell them
+                # Sell YES = place SELL order on YES token at current midpoint
+                sell_price = round(pos.midpoint * (1 - max_loss_pct), 2)
+                sell_price = max(0.01, sell_price)
+                await self._sell_tokens(
+                    pos, token_id=pos.yes_token_id, size=round(unmatched_yes, 2),
+                    price=sell_price, side_label="YES",
+                )
+
+            elif unmatched_no > 0.5:
+                # We have excess NO tokens — sell them
+                no_price = round(1.0 - pos.midpoint, 2)
+                sell_price = round(no_price * (1 - max_loss_pct), 2)
+                sell_price = max(0.01, sell_price)
+                await self._sell_tokens(
+                    pos, token_id=pos.no_token_id, size=round(unmatched_no, 2),
+                    price=sell_price, side_label="NO",
+                )
+
+    async def _sell_tokens(
+        self, pos: MarketPosition, token_id: str, size: float,
+        price: float, side_label: str,
+    ):
+        """Place a SELL order to exit unmatched inventory."""
+        try:
+            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.order_builder.constants import SELL
+
+            order_args = OrderArgs(
+                price=price,
+                size=size,
+                side=SELL,
+                token_id=token_id,
+            )
+            signed = self._client.create_order(order_args)
+            resp = self._client.post_order(signed, OrderType.GTC)
+
+            order_id = resp.get("orderID", "") if resp else ""
+            if order_id:
+                logger.info(
+                    "auto_exit_sell_placed",
+                    condition_id=pos.condition_id[:16],
+                    side=side_label,
+                    size=size,
+                    price=price,
+                    order_id=order_id[:12],
+                )
+                # Clear unmatched fills — capital will return when order fills
+                if side_label == "YES":
+                    pos.fills_yes -= size
+                else:
+                    pos.fills_no -= size
+                pos.unmatched_since = 0.0
+                self._total_auto_exits += 1
+            else:
+                logger.warning("auto_exit_no_order_id", condition_id=pos.condition_id[:16])
+
+        except Exception as e:
+            logger.error(
+                "auto_exit_sell_failed",
+                condition_id=pos.condition_id[:16],
+                side=side_label,
+                error=str(e),
+            )
+
     # ── Order cancellation ────────────────────────────────────────────
 
     async def _cancel_order(self, order: QuoteOrder):
@@ -1267,6 +1382,7 @@ class LiquidityProvider:
             "emergency_cancels": self._emergency_cancels,
             "markets_abandoned": self._markets_abandoned,
             "total_redeems": self._total_redeems,
+            "total_auto_exits": self._total_auto_exits,
             # Heartbeat
             "heartbeat_active": self._heartbeat_active,
             "heartbeat_count": self._heartbeat_count,
