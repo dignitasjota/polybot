@@ -310,10 +310,19 @@ class RewardScanner:
                 competition_bonus = 0.4  # Heavily competed, little reward share
 
             # Risk factor: extreme midpoints (near 0 or 1)
-            # With wide spreads on extreme markets, one side may fall outside
-            # valid price range [0.01, 0.99] → can only quote one side
+            # Extreme midpoints mean one side has very cheap tokens where
+            # small $ moves cause large % swings, AND one side may not meet
+            # min_size → can only quote one side = pure directional risk.
             mid_distance = abs(m.midpoint - 0.5)
-            risk_factor = 1.0 + mid_distance
+            if mid_distance > 0.35:
+                # Very extreme (>0.85 or <0.15): almost certainly can't
+                # quote both sides with limited capital
+                risk_factor = 5.0
+            elif mid_distance > 0.25:
+                # Moderate extreme (>0.75 or <0.25): risky
+                risk_factor = 2.5
+            else:
+                risk_factor = 1.0 + mid_distance
 
             # Volume factor: slight bonus for active markets (more reward pool activity)
             volume_factor = 1.0

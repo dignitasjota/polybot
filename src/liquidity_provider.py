@@ -219,7 +219,7 @@ class LiquidityProvider:
     @property
     def reprice_threshold(self) -> float:
         """Min midpoint change (in price units) to trigger cancel+replace."""
-        return 0.005  # 0.5¢
+        return 0.01  # 1¢ — less repricing = orders stay longer earning rewards
 
     def set_scanner(self, scanner: RewardScanner):
         self._scanner = scanner
@@ -928,34 +928,24 @@ class LiquidityProvider:
                 ask_size = round(ask_size * 0.5, 2)
 
         # ── Min size check: skip orders that won't earn rewards ──
+        # CRITICAL: if EITHER side fails min_size, skip the ENTIRE market.
+        # One-sided quoting = pure directional risk with no spread capture.
         min_size = pos.min_size
         if min_size > 0:
-            if bid_size < min_size and not skip_bid:
-                logger.warning(
-                    "skip_bid_below_min_size",
-                    condition_id=pos.condition_id[:16],
-                    bid_size=bid_size,
-                    min_size=min_size,
-                )
-                skip_bid = True
-            if ask_size < min_size and not skip_ask:
-                logger.warning(
-                    "skip_ask_below_min_size",
-                    condition_id=pos.condition_id[:16],
-                    ask_size=ask_size,
-                    min_size=min_size,
-                )
-                skip_ask = True
+            bid_fails = bid_size < min_size and not skip_bid
+            ask_fails = ask_size < min_size and not skip_ask
 
-        if skip_bid and skip_ask:
-            logger.warning(
-                "skip_market_all_below_min_size",
-                condition_id=pos.condition_id[:16],
-                bid_size=bid_size,
-                ask_size=ask_size,
-                min_size=min_size,
-            )
-            return
+            if bid_fails or ask_fails:
+                logger.warning(
+                    "skip_market_min_size_one_side",
+                    condition_id=pos.condition_id[:16],
+                    bid_size=round(bid_size, 2),
+                    ask_size=round(ask_size, 2),
+                    min_size=min_size,
+                    bid_fails=bid_fails,
+                    ask_fails=ask_fails,
+                )
+                return
 
         # Check balance before placing orders (live mode only)
         if not self.should_simulate and self._client:
