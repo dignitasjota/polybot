@@ -510,6 +510,10 @@ class LiquidityProvider:
         if not self._scanner:
             return
 
+        # Check fills on all active orders BEFORE making any changes
+        if not self.should_simulate:
+            await self._check_active_fills()
+
         top_markets = self._scanner.get_top_markets(self._config.max_markets)
         if not top_markets:
             return
@@ -663,12 +667,14 @@ class LiquidityProvider:
 
         pos.midpoint = new_midpoint
 
-        # Cancel existing and re-place
-        if pos.bid_order and pos.bid_order.status == "active":
-            await self._cancel_order(pos.bid_order)
+        # Cancel existing and re-place (also clears filled orders for replacement)
+        if pos.bid_order and pos.bid_order.status in ("active", "filled"):
+            if pos.bid_order.status == "active":
+                await self._cancel_order(pos.bid_order)
             pos.bid_order = None
-        if pos.ask_order and pos.ask_order.status == "active":
-            await self._cancel_order(pos.ask_order)
+        if pos.ask_order and pos.ask_order.status in ("active", "filled"):
+            if pos.ask_order.status == "active":
+                await self._cancel_order(pos.ask_order)
             pos.ask_order = None
 
         await self._place_quotes(pos)
@@ -1318,10 +1324,88 @@ class LiquidityProvider:
                 error=str(e),
             )
 
+    # ── Fill detection ─────────────────────────────────────────────────
+
+    async def _check_active_fills(self):
+        """Check all active orders for fills. Called each refresh cycle.
+
+        This is critical: without this, the bot would place orders that get
+        filled but never detect it — losing capital silently.
+        """
+        if not self._client:
+            return
+
+        for pos in list(self._positions.values()):
+            for order in (pos.bid_order, pos.ask_order):
+                if not order or order.status != "active":
+                    continue
+                if order.order_id.startswith("paper-"):
+                    continue
+                status = await self._check_order_status(order)
+                # If order was filled, clear reference so a new one can be placed
+                if order.status == "filled":
+                    if order.is_yes:
+                        pos.bid_order = None
+                    else:
+                        pos.ask_order = None
+
+    # ── Order status & fill detection ────────────────────────────────
+
+    async def _check_order_status(self, order: QuoteOrder) -> str:
+        """Query CLOB API for real order status.
+
+        Returns the order status string (MATCHED, LIVE, CANCELLED, etc.)
+        and records any fills detected.
+        """
+        if not self._client or order.order_id.startswith("paper-"):
+            return order.status
+
+        try:
+            order_data = self._client.get_order(order.order_id)
+            if not order_data:
+                return order.status
+
+            status = (order_data.get("status", "") or "").upper()
+            size_matched = float(order_data.get("size_matched", 0) or 0)
+
+            if size_matched > 0:
+                # Order was (partially) filled! Record the fill
+                logger.info(
+                    "fill_detected_on_check",
+                    order_id=order.order_id[:12],
+                    status=status,
+                    size_matched=round(size_matched, 4),
+                    price=order.price,
+                    side="YES" if order.is_yes else "NO",
+                    condition_id=order.condition_id[:16],
+                )
+                self.record_fill(
+                    condition_id=order.condition_id,
+                    is_yes=order.is_yes,
+                    size=size_matched,
+                    fill_price=order.price,
+                )
+                order.status = "filled"
+                return "MATCHED"
+
+            if status in ("CANCELLED", "EXPIRED"):
+                order.status = "cancelled"
+                return status
+
+            return status
+
+        except Exception as e:
+            logger.warning(
+                "order_status_check_failed",
+                order_id=order.order_id[:12],
+                error=str(e),
+            )
+            return order.status
+
     # ── Order cancellation ────────────────────────────────────────────
 
     async def _cancel_order(self, order: QuoteOrder):
-        """Cancel a single order."""
+        """Cancel a single order, checking for fills first."""
         if order.status != "active":
             return
 
@@ -1335,6 +1419,23 @@ class LiquidityProvider:
         if not self._client:
             return
 
+        # Check if the order was filled before trying to cancel
+        status = await self._check_order_status(order)
+        if status == "MATCHED" or order.status == "filled":
+            # Already filled — don't cancel, fill was recorded in _check_order_status
+            logger.info(
+                "skip_cancel_already_filled",
+                order_id=order.order_id[:12],
+                side="YES" if order.is_yes else "NO",
+            )
+            return
+
+        if status in ("CANCELLED", "EXPIRED"):
+            # Already cancelled/expired by the exchange
+            order.status = "cancelled"
+            self._total_orders_cancelled += 1
+            return
+
         try:
             self._client.cancel(order.order_id)
             order.status = "cancelled"
@@ -1343,8 +1444,13 @@ class LiquidityProvider:
                 self._metrics.record_order_cancelled()
             logger.info("quote_cancelled", order_id=order.order_id[:12])
         except Exception as e:
-            logger.error("cancel_failed", order_id=order.order_id[:12], error=str(e))
-            self._errors += 1
+            # Cancel failed — the order may have been filled between our check
+            # and the cancel attempt. Check status one more time.
+            logger.warning("cancel_failed_checking_fill", order_id=order.order_id[:12], error=str(e))
+            status = await self._check_order_status(order)
+            if status != "MATCHED" and order.status != "filled":
+                logger.error("cancel_failed_not_filled", order_id=order.order_id[:12], error=str(e))
+                self._errors += 1
 
     async def _cancel_all_orders(self):
         """Emergency: cancel every outstanding order."""
