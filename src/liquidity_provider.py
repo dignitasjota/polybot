@@ -464,12 +464,19 @@ class LiquidityProvider:
             return {}
 
     # ── Order Scoring ─────────────────────────────────────────────────
+    # NOTE: el endpoint GET /order-scoring no funciona como esperado.
+    # Siempre devuelve not-scoring aunque las órdenes SÍ acumulan rewards
+    # en Polymarket. Verificar rewards directamente en la UI de Polymarket.
+    # Los campos orders_scoring/orders_not_scoring en get_stats() NO son fiables.
 
     async def _scoring_loop(self):
         """Periodically check if active orders are earning rewards.
 
         Calls GET /order-scoring?order_id=X for each active order.
         Tracks scoring rate (orders earning rewards / total orders).
+
+        WARNING: este check NO es fiable — siempre reporta not-scoring
+        aunque los rewards sí se acumulan. Solo útil para debug.
         """
         interval = getattr(self._config, "scoring_check_interval", 60.0)
         logger.info("scoring_check_started", interval=interval)
