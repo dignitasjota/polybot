@@ -259,6 +259,10 @@ class LiquidityProvider:
         if not self.is_paper:
             await self._init_clob_client()
 
+        # Cancel any orphaned orders from previous runs (live mode only)
+        if self._initialized and self._client:
+            await self._cancel_all_on_startup()
+
         self._running = True
         self._started_at = time.time()
         self._quote_task = asyncio.create_task(self._quote_loop())
@@ -346,6 +350,18 @@ class LiquidityProvider:
             logger.info("cleared_positions_mode_change", old=old_mode, new=new_mode)
 
     # ── ClobClient init (mirrors executor.py pattern) ─────────────────
+
+    async def _cancel_all_on_startup(self):
+        """Cancel ALL open orders on startup to free capital from orphaned orders.
+
+        After a redeploy, old orders remain on the CLOB but the bot loses
+        track of them. This frees the locked capital so we can place fresh quotes.
+        """
+        try:
+            resp = self._client.cancel_all()
+            logger.info("startup_cancel_all", response=str(resp)[:200])
+        except Exception as e:
+            logger.warning("startup_cancel_all_failed", error=str(e))
 
     async def _init_clob_client(self):
         """Initialize ClobClient with credentials — same pattern as Executor."""
