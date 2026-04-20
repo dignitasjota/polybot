@@ -759,8 +759,9 @@ class LiquidityProvider:
 
         Returns (bid_price, ask_price) in [0.01, 0.99].
         """
-        spread = max_spread * self._config.spread_pct_of_max
-        half = spread / 2
+        # max_spread is the max distance FROM MIDPOINT per side (not total spread)
+        # See: "the farthest distance your limit order can be from the midpoint"
+        distance = max_spread * self._config.spread_pct_of_max
 
         # Inventory-aware spread adjustment (Phase 3)
         abs_skew = abs(skew)
@@ -768,29 +769,24 @@ class LiquidityProvider:
 
         if abs_skew > max_skew:
             if abs_skew > 0.8:
-                # Severe: dramatically widen long side
-                long_mult = 3.0
-                short_mult = 0.5
-            elif abs_skew > 0.7:
-                # Moderate: reduce long side size handled in _place_quotes
-                long_mult = 2.0
+                long_mult = 1.5  # Push long side further (less aggressive)
                 short_mult = 0.7
-            else:
-                # Mild: slightly skew spread
-                long_mult = 1.5
+            elif abs_skew > 0.7:
+                long_mult = 1.3
                 short_mult = 0.8
+            else:
+                long_mult = 1.15
+                short_mult = 0.9
 
             if skew > 0:
-                # Long YES → widen bid (buy YES), tighten ask (sell YES)
-                bid = midpoint - half * long_mult
-                ask = midpoint + half * short_mult
+                bid = midpoint - distance * long_mult
+                ask = midpoint + distance * short_mult
             else:
-                # Long NO → tighten bid, widen ask
-                bid = midpoint - half * short_mult
-                ask = midpoint + half * long_mult
+                bid = midpoint - distance * short_mult
+                ask = midpoint + distance * long_mult
         else:
-            bid = midpoint - half
-            ask = midpoint + half
+            bid = midpoint - distance
+            ask = midpoint + distance
 
         # Clamp to valid CLOB price range
         bid = max(0.01, min(0.99, bid))

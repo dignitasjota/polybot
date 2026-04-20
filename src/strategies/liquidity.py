@@ -49,8 +49,8 @@ class LiquidityConfig(StrategyConfig):
 
     # Auto-exit unmatched positions
     auto_exit_enabled: bool = True
-    auto_exit_timeout_s: float = 300.0    # Sell after 5 min unmatched
-    auto_exit_max_loss_pct: float = 0.10  # Max 10% loss to accept on exit
+    auto_exit_timeout_s: float = 60.0     # Sell after 1 min unmatched (minimize loss)
+    auto_exit_max_loss_pct: float = 0.05  # Max 5% loss to accept on exit
 
     # Heartbeat & scoring
     use_heartbeat: bool = False          # POST /heartbeat every 5s (miss 10s → all cancelled)
