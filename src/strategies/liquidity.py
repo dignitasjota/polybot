@@ -106,12 +106,25 @@ class LiquidityStrategy(Strategy):
         tracker=None,
     ):
         super().__init__(config, context)
+
+        # Auto-calculate max_min_size if not set: worst case is half capital
+        # at highest likely price (~$0.70). E.g. $50 → $25/side → 25/0.70 ≈ 35
+        effective_max_min_size = config.max_min_size
+        if effective_max_min_size <= 0:
+            half_capital = config.capital_per_market / 2
+            effective_max_min_size = int(half_capital / 0.70)  # worst-case price
+            logger.info(
+                "auto_max_min_size",
+                capital_per_market=config.capital_per_market,
+                calculated=effective_max_min_size,
+            )
+
         self._scanner = scanner or RewardScanner(
             scan_interval=config.scan_interval,
             min_daily_rate=config.min_daily_rate,
             min_reward_per_dollar=config.min_reward_per_dollar,
             capital_per_market=config.capital_per_market,
-            max_min_size=config.max_min_size,
+            max_min_size=effective_max_min_size,
         )
         self._metrics = LiquidityMetrics(total_capital=config.total_capital)
         self._provider = LiquidityProvider(

@@ -991,6 +991,21 @@ class LiquidityProvider:
                 )
                 return
 
+        logger.info(
+            "placing_quotes",
+            condition_id=pos.condition_id[:16],
+            midpoint=round(pos.midpoint, 4),
+            max_spread=round(pos.max_spread, 4),
+            bid_price=round(bid_price, 4),
+            ask_price=round(ask_price, 4),
+            ask_no_price=round(ask_no_price, 4),
+            bid_size=round(bid_size, 2),
+            ask_size=round(ask_size, 2),
+            skip_bid=skip_bid,
+            skip_ask=skip_ask,
+            mode=self._config.mode,
+        )
+
         # Place bid: BUY YES at bid_price
         if bid_size > 0 and not skip_bid:
             pos.bid_order = await self._place_order(
@@ -1051,7 +1066,17 @@ class LiquidityProvider:
 
             order_id = resp.get("orderID", "") if resp else ""
             if not order_id:
-                logger.warning("order_no_id", token_id=token_id[:16], price=price)
+                # Log full response to diagnose API rejections
+                error_msg = resp.get("errorMsg", "") if resp else "empty response"
+                logger.warning(
+                    "order_no_id",
+                    token_id=token_id[:16],
+                    price=price,
+                    size=size,
+                    side="YES" if is_yes else "NO",
+                    error=error_msg,
+                    full_resp=str(resp)[:200] if resp else "None",
+                )
                 return None
 
             self._total_orders_placed += 1
