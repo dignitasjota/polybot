@@ -197,6 +197,11 @@ class LiquidityProvider:
         self._scoring_checks = 0
         self._last_scoring_check: float = 0.0
 
+        # Real rewards tracking (from Data API)
+        self._rewards_task: asyncio.Task | None = None
+        self._last_reward_check: float = 0.0
+        self._last_reward_timestamp: float = 0.0  # Last seen reward timestamp
+
     # ── Configuration ─────────────────────────────────────────────────
 
     @property
@@ -267,6 +272,10 @@ class LiquidityProvider:
         if not self.should_simulate and self._initialized:
             self._scoring_task = asyncio.create_task(self._scoring_loop())
 
+        # Real rewards tracking: query Data API periodically (live mode only)
+        if not self.should_simulate:
+            self._rewards_task = asyncio.create_task(self._rewards_check_loop())
+
         logger.info(
             "provider_started",
             mode=self._config.mode,
@@ -289,7 +298,7 @@ class LiquidityProvider:
         self._running = False
 
         # Stop background tasks
-        for task in (self._quote_task, self._heartbeat_task, self._scoring_task):
+        for task in (self._quote_task, self._heartbeat_task, self._scoring_task, self._rewards_task):
             if task and not task.done():
                 task.cancel()
                 try:
@@ -299,6 +308,7 @@ class LiquidityProvider:
         self._quote_task = None
         self._heartbeat_task = None
         self._scoring_task = None
+        self._rewards_task = None
         self._heartbeat_active = False
 
         # Cancel all outstanding orders
@@ -567,6 +577,130 @@ class LiquidityProvider:
         except Exception as e:
             logger.debug("scoring_check_exception", order_id=order_id[:12], error=str(e))
             return False
+
+    # ── Real Rewards Tracking ────────────────────────────────────────
+
+    async def _rewards_check_loop(self):
+        """Periodically query the Data API for actual rewards earned.
+
+        Endpoint: GET https://data-api.polymarket.com/activity?user=<address>&type=REWARD
+        No auth required — uses the public proxy/funder address.
+        Runs every 5 minutes (rewards are distributed daily at midnight UTC).
+        """
+        # Wait for initial setup
+        await asyncio.sleep(30)
+
+        while self._running:
+            try:
+                await self._fetch_real_rewards()
+            except Exception as e:
+                logger.debug("rewards_check_error", error=str(e))
+            await asyncio.sleep(300)  # Every 5 minutes
+
+    async def _fetch_real_rewards(self):
+        """Fetch REWARD activities from Data API and update metrics."""
+        if not self._client:
+            return
+
+        # Get our address (funder/proxy)
+        address = getattr(self._client, "funder", None)
+        if not address:
+            return
+
+        import aiohttp
+        from datetime import datetime, timezone
+
+        # Fetch recent reward events
+        url = "https://data-api.polymarket.com/activity"
+        params = {
+            "user": address,
+            "type": "REWARD",
+            "limit": 100,
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, params=params, timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
+                    if resp.status != 200:
+                        return
+                    data = await resp.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return
+
+        if not data:
+            return
+
+        # Parse reward events and sum today's rewards
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_total = 0.0
+        new_rewards = 0.0
+
+        for event in data:
+            # Each reward event has: timestamp, amount, asset, etc.
+            ts = event.get("timestamp") or event.get("created_at") or ""
+            amount_raw = event.get("amount") or event.get("value") or 0
+
+            # Amount might be in USDC (6 decimals) or already in dollars
+            amount = float(amount_raw)
+            if amount > 1000:  # Likely in raw units (1e6 = $1)
+                amount = amount / 1e6
+
+            # Check if this reward is from today
+            event_date = ""
+            if isinstance(ts, str) and len(ts) >= 10:
+                event_date = ts[:10]
+            elif isinstance(ts, (int, float)) and ts > 1e9:
+                event_date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+
+            if event_date == today:
+                today_total += amount
+
+            # Track new rewards since last check
+            event_ts = 0.0
+            if isinstance(ts, (int, float)):
+                event_ts = ts
+            elif isinstance(ts, str):
+                try:
+                    event_ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                except (ValueError, TypeError):
+                    pass
+
+            if event_ts > self._last_reward_timestamp:
+                new_rewards += amount
+
+        # Update metrics with real rewards
+        if today_total > 0 and self._metrics:
+            # Replace the simulated rewards with real data
+            current = self._metrics.get_today()
+            if today_total > current.rewards_earned:
+                diff = today_total - current.rewards_earned
+                self._metrics.record_rewards(diff)
+                logger.info(
+                    "real_rewards_updated",
+                    today_total=round(today_total, 4),
+                    new_since_last=round(new_rewards, 4),
+                    address=address[:10],
+                )
+
+        # Update last check timestamp
+        if data:
+            # Use the newest event timestamp as marker
+            newest_ts = 0.0
+            for event in data:
+                ts = event.get("timestamp") or event.get("created_at") or 0
+                if isinstance(ts, str):
+                    try:
+                        ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                    except (ValueError, TypeError):
+                        ts = 0
+                if isinstance(ts, (int, float)) and ts > newest_ts:
+                    newest_ts = ts
+            if newest_ts > self._last_reward_timestamp:
+                self._last_reward_timestamp = newest_ts
+
+        self._last_reward_check = time.time()
 
     async def _refresh_all(self):
         """Sync active positions with scanner's top markets.
