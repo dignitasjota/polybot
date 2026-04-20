@@ -278,60 +278,78 @@ class RewardScanner:
         )
 
     def _rank_markets(self, markets: list[RewardMarket]) -> list[RewardMarket]:
-        """Score and sort markets by reward capture potential.
+        """Score and sort markets by reward capture potential WITH fill safety.
 
-        Conservative strategy: we quote at ~85% of max_spread, so fills are
-        very unlikely. The goal is to maximize rewards, not fills. Therefore:
-        - Low competition = GOOD (we capture more of the reward pool)
-        - High competition = BAD (rewards are shared)
-        - Wide natural spread is irrelevant (we won't get filled anyway)
+        Key insight: we want rewards WITHOUT fills. This means:
+        - Moderate competition = GOOD (others absorb flow, we hide behind them)
+        - Zero competition = BAD (we ARE the book, all fills come to us)
+        - Wide natural spread = BAD (our orders are top-of-book → certain fills)
+        - Tight natural spread = GOOD (others quote tighter, we're protected)
 
         Score formula:
             reward_per_dollar = daily_rate / max(competitiveness, 1)
-            competition_bonus = bonus for low competition (we get more rewards)
+            comp_factor = bonus for moderate competition (shields from fills)
+            spread_penalty = penalty for wide natural spread (top-of-book risk)
             risk_factor = penalty for extreme midpoints
-            score = reward_per_dollar * competition_bonus * volume_factor / risk_factor
+            score = reward_per_dollar * comp_factor / (risk_factor * spread_penalty)
         """
         for m in markets:
             # competitiveness is in USD — 0 means nobody is quoting
             m.reward_per_dollar = m.daily_rate / max(m.competitiveness, 1.0)
 
-            # Competition bonus: LESS competition = MORE rewards for us
-            # With wide spreads, adverse selection is not a concern
+            # Competition factor: moderate competition = SHIELDS from fills
+            # With 0 competition, ALL adverse flow hits our orders
+            # With moderate competition, others absorb flow before us
             if m.competitiveness <= 0:
-                competition_bonus = 1.5  # Nobody else → 100% of rewards
+                comp_factor = 0.3  # NOBODY else → we ARE the book → fills certain
             elif m.competitiveness < 1.0:
-                competition_bonus = 1.3  # Very little competition
+                comp_factor = 0.5  # Almost no shield
             elif m.competitiveness < 5.0:
-                competition_bonus = 1.0  # Moderate
+                comp_factor = 1.0  # Good: others absorb some flow
             elif m.competitiveness < 20.0:
-                competition_bonus = 0.7  # Competitive, we get less
+                comp_factor = 1.3  # Better: more shields, still decent reward share
+            elif m.competitiveness < 100.0:
+                comp_factor = 1.0  # Good shields but lower reward share
             else:
-                competition_bonus = 0.4  # Heavily competed, little reward share
+                comp_factor = 0.5  # Too much competition → negligible rewards
+
+            # Spread penalty: wide natural spread → our orders are top-of-book
+            # If market spread > our quoting distance, we're the best price → fills
+            # Our distance from mid ≈ max_spread * 0.85 (in centavos)
+            our_distance = (m.max_spread / 100.0) * 0.85  # Convert centavos to price
+            if m.spread > 0 and m.spread > our_distance * 2:
+                # Natural spread MUCH wider than our quotes → certain fills
+                spread_penalty = 5.0
+            elif m.spread > 0 and m.spread > our_distance:
+                # Wider than us → likely fills
+                spread_penalty = 2.5
+            elif m.spread > 0.05:
+                # 5¢+ spread → somewhat risky
+                spread_penalty = 1.5
+            else:
+                # Tight spread → others quote tighter, we're safe
+                spread_penalty = 1.0
 
             # Risk factor: extreme midpoints (near 0 or 1)
-            # Extreme midpoints mean one side has very cheap tokens where
-            # small $ moves cause large % swings, AND one side may not meet
-            # min_size → can only quote one side = pure directional risk.
             mid_distance = abs(m.midpoint - 0.5)
             if mid_distance > 0.35:
-                # Very extreme (>0.85 or <0.15): almost certainly can't
-                # quote both sides with limited capital
                 risk_factor = 5.0
             elif mid_distance > 0.25:
-                # Moderate extreme (>0.75 or <0.25): risky
                 risk_factor = 2.5
             else:
                 risk_factor = 1.0 + mid_distance
 
-            # Volume factor: slight bonus for active markets (more reward pool activity)
+            # Volume factor: HIGH volume = more flow = more fills risk
+            # LOW volume = less flow = safer (opposite of before)
             volume_factor = 1.0
-            if m.volume_24h > 10000:
-                volume_factor = 1.2
-            elif m.volume_24h > 1000:
-                volume_factor = 1.1
+            if m.volume_24h > 50000:
+                volume_factor = 0.5  # Very high volume → lots of aggressive orders
+            elif m.volume_24h > 10000:
+                volume_factor = 0.7  # High volume → risky
+            elif m.volume_24h < 500:
+                volume_factor = 1.2  # Low volume → less fill risk
 
-            m.score = (m.reward_per_dollar * competition_bonus * volume_factor) / risk_factor
+            m.score = (m.reward_per_dollar * comp_factor * volume_factor) / (risk_factor * spread_penalty)
 
         # Filter by minimum reward_per_dollar and max_min_size
         scored = [m for m in markets if m.reward_per_dollar >= self._min_reward_per_dollar]
