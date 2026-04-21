@@ -1749,9 +1749,11 @@ class LiquidityProvider:
         for pos in self._positions.values():
             if pos.bid_order and pos.bid_order.status == "active":
                 await self._cancel_order(pos.bid_order)
+                pos.bid_order = None  # Clear reference so new order can be placed
                 cancelled += 1
             if pos.ask_order and pos.ask_order.status == "active":
                 await self._cancel_order(pos.ask_order)
+                pos.ask_order = None  # Clear reference so new order can be placed
                 cancelled += 1
         logger.info("all_orders_cancelled", count=cancelled)
 
