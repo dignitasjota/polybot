@@ -421,6 +421,15 @@ class LiquidityProvider:
             logger.error("no_credentials_for_live_mode")
             return
 
+        # Validate credentials object
+        if not hasattr(self._credentials, 'get_private_key'):
+            logger.error(
+                "invalid_credentials_type",
+                type=type(self._credentials).__name__,
+                expected="CredentialsConfig",
+            )
+            return
+
         try:
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import ApiCreds
@@ -806,8 +815,10 @@ class LiquidityProvider:
         if self._metrics:
             current = self._metrics.get_today()
             # Always sync with Polymarket's ground truth (ignore our internal estimate)
-            if today_total > current.rewards_earned:
-                diff = today_total - current.rewards_earned
+            # get_today() returns a dict, access via dict notation
+            current_rewards = current.get('rewards_earned', 0) if isinstance(current, dict) else getattr(current, 'rewards_earned', 0)
+            if today_total > current_rewards:
+                diff = today_total - current_rewards
                 self._metrics.record_rewards(diff)
                 logger.info(
                     "real_rewards_synced",
@@ -821,7 +832,7 @@ class LiquidityProvider:
                 logger.debug(
                     "real_rewards_no_change",
                     today_total=round(today_total, 4),
-                    current=round(current.rewards_earned, 4),
+                    current=round(current_rewards, 4),
                     address=address[:10],
                 )
         else:

@@ -353,12 +353,13 @@ class RewardScanner:
 
             m.score = (m.reward_per_dollar * comp_factor * volume_factor) / (risk_factor * spread_penalty)
 
-        # Filter by minimum reward_per_dollar, competitiveness, and max_min_size
-        # MIN COMPETITIVENESS = $1.0: avoid being sole provider (generates fills)
-        # Volume penalización en scoring (no hard reject): mercados de alto volumen
-        # quedan con scoring bajo y el bot naturalmente selecciona top 3 (baja vol)
+        # Filter by minimum reward_per_dollar and max_min_size
+        # NOTE: competitiveness filtering removed (2026-04-21)
+        # Reason: with dynamic capital allocation, markets with low/zero competition are OK
+        # The scoring formula already penalizes them (comp_factor=0.3 for zero competition)
+        # so they naturally rank lower. Better to let the bot pick from a larger pool.
         scored = [m for m in markets if m.reward_per_dollar >= self._min_reward_per_dollar]
-        scored = [m for m in scored if m.competitiveness >= 1.0]  # Hard filter: need rivals
+        # scored = [m for m in scored if m.competitiveness >= 1.0]  # REMOVED: too restrictive
         if self._max_min_size > 0:
             scored = [m for m in scored if m.min_size <= self._max_min_size]
 
