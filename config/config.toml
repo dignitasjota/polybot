@@ -238,6 +238,11 @@ max_inventory_skew = 0.6            # |skew| antes de rebalanceo automático
 emergency_cancel_midpoint_move_pct = 0.05  # 5% — cancela todo en ese mercado
 adverse_abandonment_ratio = 0.7     # Mercado abandonado si ratio > 0.7
 
+# Auto-exit de posiciones unmatched (libera capital bloqueado)
+auto_exit_enabled = true            # Activar salida automática de posiciones no-matched
+auto_exit_timeout_s = 60            # Vender posición unmatched tras 60s (libera capital rápido)
+auto_exit_max_loss_pct = 0.02       # Aceptar máximo 2% pérdida al exitarse (minimizar daño)
+
 # Fase 3.5: Heartbeat & Scoring
 use_heartbeat = true                # Activar heartbeat loop
 heartbeat_interval = 5              # Segundos entre heartbeats

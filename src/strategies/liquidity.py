@@ -81,8 +81,8 @@ class LiquidityConfig(StrategyConfig):
             scoring_check_interval=float(raw.get("scoring_check_interval", 60.0)),
             quote_refresh_s=float(raw.get("quote_refresh_s", 120.0)),
             auto_exit_enabled=raw.get("auto_exit_enabled", True),
-            auto_exit_timeout_s=float(raw.get("auto_exit_timeout_s", 300.0)),
-            auto_exit_max_loss_pct=float(raw.get("auto_exit_max_loss_pct", 0.10)),
+            auto_exit_timeout_s=float(raw.get("auto_exit_timeout_s", 60.0)),
+            auto_exit_max_loss_pct=float(raw.get("auto_exit_max_loss_pct", 0.05)),
             max_concurrent_bets=int(raw.get("max_concurrent_bets", 5)),
             max_bet_per_trade=float(raw.get("max_bet_per_trade", 50.0)),
         )
