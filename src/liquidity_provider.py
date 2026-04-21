@@ -433,7 +433,7 @@ class LiquidityProvider:
                     key=private_key,
                     chain_id=137,
                     signature_type=sig_type,
-                    funder=proxy_address,
+                    funder=funder,  # Use calculated funder for derivation too
                 )
                 creds = tmp.derive_api_key()
                 api_key = creds.api_key
@@ -445,7 +445,7 @@ class LiquidityProvider:
                 key=private_key,
                 chain_id=137,
                 signature_type=sig_type,
-                funder=proxy_address,
+                funder=funder,  # Use calculated funder (proxy_address or account.address fallback)
                 creds=ApiCreds(
                     api_key=api_key,
                     api_secret=api_secret,
@@ -453,7 +453,7 @@ class LiquidityProvider:
                 ),
             )
             self._initialized = True
-            logger.info("provider_clob_initialized", sig_type=sig_type)
+            logger.info("provider_clob_initialized", sig_type=sig_type, funder=funder[:10])
 
         except Exception as e:
             logger.error("provider_clob_init_failed", error=str(e))
