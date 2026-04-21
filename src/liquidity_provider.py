@@ -90,6 +90,12 @@ class MarketPosition:
     # Unmatched inventory tracking (for auto-exit)
     unmatched_since: float = 0.0  # timestamp when unmatched inventory first detected
 
+    # Dynamic spread tracking (Phase 3.5: adaptive quoting)
+    consecutive_no_moves: int = 0  # Counts how many refresh cycles midpoint didn't move >0.5¢
+    current_spread_pct: float = 0.65  # Dynamic spread % (default 0.65=3¢, can reduce to 0.50=2¢ if stable)
+    last_checked_midpoint: float = 0.5  # Previous midpoint to detect movement
+    market_volume_24h: float = 0.0  # Cache volume for low-volume detection
+
     @property
     def inventory_skew(self) -> float:
         """Positive = long YES, negative = long NO. Range [-1, 1]."""
@@ -876,6 +882,9 @@ class LiquidityProvider:
             midpoint=midpoint,
             capital_allocated=self._config.capital_per_market,
         )
+        # Cache market volume for stability-based spread adjustment
+        pos.market_volume_24h = market.volume_24h
+        pos.last_checked_midpoint = midpoint
         self._positions[market.condition_id] = pos
 
         # Place initial quotes
@@ -938,8 +947,38 @@ class LiquidityProvider:
         pos.last_midpoint_time = now
         pos.last_midpoint_value = new_midpoint
 
+        # Adaptive spread: check market stability and volume (Phase 3.5)
+        midpoint_moved = abs(new_midpoint - pos.last_checked_midpoint) >= self.reprice_threshold
+        pos.last_checked_midpoint = new_midpoint
+
+        # Detect low-volume markets: wide natural spread OR low 24h volume
+        low_volume = (market.spread > 0.03 or market.volume_24h < 5000)
+        pos.market_volume_24h = market.volume_24h
+
+        if not midpoint_moved:
+            # Midpoint stable: increment counter
+            pos.consecutive_no_moves += 1
+
+            # After 3 checks without movement (90s) AND low volume → get closer
+            if pos.consecutive_no_moves >= 3 and low_volume:
+                pos.current_spread_pct = 0.50  # 2¢ instead of 3¢ → 2× more rewards
+                logger.info(
+                    "adaptive_spread_tightened",
+                    condition_id=market.condition_id[:16],
+                    consecutive_no_moves=pos.consecutive_no_moves,
+                    new_spread_pct=0.50,
+                    volume_24h=round(market.volume_24h, 0),
+                )
+            elif pos.consecutive_no_moves >= 3 and not low_volume:
+                # Market stable but HIGH volume → stay defensive
+                pos.current_spread_pct = 0.65
+        else:
+            # Midpoint moved or volume is high → stay at default 3¢
+            pos.consecutive_no_moves = 0
+            pos.current_spread_pct = 0.65
+
         # Check if midpoint moved enough to reprice
-        if abs(new_midpoint - pos.midpoint) < self.reprice_threshold:
+        if not midpoint_moved:
             return  # No significant change
 
         pos.midpoint = new_midpoint
@@ -960,6 +999,7 @@ class LiquidityProvider:
 
     def _calculate_prices(
         self, midpoint: float, max_spread: float, skew: float = 0.0,
+        spread_pct_of_max: float | None = None,
     ) -> tuple[float, float]:
         """Calculate bid and ask prices with inventory-aware adjustment.
 
@@ -967,11 +1007,17 @@ class LiquidityProvider:
         is widened on the long side and tightened on the short side to
         encourage rebalancing fills.
 
+        Phase 3.5: spread_pct_of_max can be dynamic based on market stability.
+
         Returns (bid_price, ask_price) in [0.01, 0.99].
         """
+        # Use dynamic spread if provided, otherwise use config default
+        if spread_pct_of_max is None:
+            spread_pct_of_max = self._config.spread_pct_of_max
+
         # max_spread is the max distance FROM MIDPOINT per side (not total spread)
         # See: "the farthest distance your limit order can be from the midpoint"
-        distance = max_spread * self._config.spread_pct_of_max
+        distance = max_spread * spread_pct_of_max
 
         # Inventory-aware spread adjustment (Phase 3)
         abs_skew = abs(skew)
@@ -1126,7 +1172,10 @@ class LiquidityProvider:
         """
         skew = pos.inventory_skew
         abs_skew = abs(skew)
-        bid_price, ask_price = self._calculate_prices(pos.midpoint, pos.max_spread, skew)
+        bid_price, ask_price = self._calculate_prices(
+            pos.midpoint, pos.max_spread, skew,
+            spread_pct_of_max=pos.current_spread_pct  # Use dynamic spread if market is stable + low-volume
+        )
 
         # Order block hiding: adjust prices to hide behind large orders
         bid_price = self._get_block_protected_price(pos, is_bid=True, fallback_price=bid_price)
