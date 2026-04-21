@@ -299,6 +299,15 @@ class LiquidityProvider:
         self._scoring_task = asyncio.create_task(self._scoring_loop())
         logger.info("scoring_loop_started_on_mode_change")
 
+    def ensure_rewards_loop(self):
+        """Start the rewards check loop if not already running. Called on mode transitions to live."""
+        if self._rewards_task and not self._rewards_task.done():
+            return  # Already running
+        if not self._initialized:
+            return
+        self._rewards_task = asyncio.create_task(self._rewards_check_loop())
+        logger.info("rewards_check_loop_started_on_mode_change")
+
     async def stop(self):
         """Cancel all orders, stop heartbeat, and shut down."""
         self._running = False
