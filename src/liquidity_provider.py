@@ -269,6 +269,8 @@ class LiquidityProvider:
 
         if not self.is_paper:
             await self._init_clob_client()
+            # Sync available capital from Polymarket on startup (live mode)
+            await self._update_available_capital(force=True)
 
         # Cancel any orphaned orders from previous runs (live mode only)
         if self._initialized and self._client:
@@ -666,16 +668,25 @@ class LiquidityProvider:
                 logger.warning("rewards_check_error", error=str(e))
             await asyncio.sleep(300)  # Every 5 minutes
 
-    async def _update_available_capital(self):
+    async def _update_available_capital(self, force: bool = False):
         """Update cached available capital from Polymarket (live mode) or config (paper mode).
 
-        In live mode: queries balance_allowance from CLOB API (cached every 5 minutes to avoid saturation)
-        In paper mode: uses simulated balance from config
-        Also accounts for capital already allocated to open positions.
+        Args:
+            force: If True, skip the 300-second interval check (for urgent updates like fills/orders)
+                   If False, only update if 300+ seconds since last check (prevents API saturation)
+
+        In live mode: queries balance_allowance from CLOB API when:
+          - Bot starts in live mode (force=True)
+          - Order is placed (force=True)
+          - Position is closed/fills detected (force=True)
+          - Periodic refresh in _refresh_all() (force=False, only if 300s passed)
+        In paper mode: uses simulated balance from config.
+
+        This avoids unnecessary API calls while keeping balance accurate.
         """
         now = time.time()
-        # Only check every 5 minutes (300 seconds)
-        if now - self._last_capital_check < 300:
+        # If not forced and recently checked, skip
+        if not force and (now - self._last_capital_check) < 300:
             return
 
         if not self.should_simulate and self._client:
@@ -683,7 +694,7 @@ class LiquidityProvider:
             try:
                 balance = self._client.get_balance_allowance("USDC")
                 self._cached_available_capital = balance
-                logger.info(
+                logger.debug(
                     "available_capital_updated",
                     balance_usdc=round(balance, 2),
                     source="polymarket_live",
@@ -1019,6 +1030,9 @@ class LiquidityProvider:
             await self._cancel_order(pos.bid_order)
         if pos.ask_order and pos.ask_order.status == "active":
             await self._cancel_order(pos.ask_order)
+
+        # Update available capital after closing position (frees up capital)
+        await self._update_available_capital(force=True)
 
         logger.info(
             "position_closed",
@@ -1454,6 +1468,10 @@ class LiquidityProvider:
             self._total_orders_placed += 1
             if self._metrics:
                 self._metrics.record_order_placed()
+
+            # Update available capital after order is placed (changes balance)
+            await self._update_available_capital(force=True)
+
             order = QuoteOrder(
                 order_id=order_id,
                 token_id=token_id,
@@ -1811,10 +1829,13 @@ class LiquidityProvider:
 
         This is critical: without this, the bot would place orders that get
         filled but never detect it — losing capital silently.
+
+        Updates available capital if any fills are detected (capital is freed when fills close positions).
         """
         if not self._client:
             return
 
+        fills_detected = False
         for pos in list(self._positions.values()):
             for order in (pos.bid_order, pos.ask_order):
                 if not order or order.status != "active":
@@ -1824,10 +1845,15 @@ class LiquidityProvider:
                 status = await self._check_order_status(order)
                 # If order was filled, clear reference so a new one can be placed
                 if order.status == "filled":
+                    fills_detected = True
                     if order.is_yes:
                         pos.bid_order = None
                     else:
                         pos.ask_order = None
+
+        # If any fills were detected, update capital (balance likely changed)
+        if fills_detected:
+            await self._update_available_capital(force=True)
 
     # ── Order status & fill detection ────────────────────────────────
 
