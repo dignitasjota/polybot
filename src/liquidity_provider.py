@@ -1082,27 +1082,32 @@ class LiquidityProvider:
         low_volume = (market.spread > 0.03 or market.volume_24h < 5000)
         pos.market_volume_24h = market.volume_24h
 
-        if not midpoint_moved:
-            # Midpoint stable: increment counter
-            pos.consecutive_no_moves += 1
+        # FEATURE DISABLED (2026-04-21): Adaptive spread tightening
+        # TODO: Re-enable after testing to see if rewards improve with tighter spreads
+        # if not midpoint_moved:
+        #     # Midpoint stable: increment counter
+        #     pos.consecutive_no_moves += 1
+        #
+        #     # After 3 checks without movement (90s) AND low volume → get closer
+        #     if pos.consecutive_no_moves >= 3 and low_volume:
+        #         pos.current_spread_pct = 0.50  # 2¢ instead of 3¢ → 2× more rewards
+        #         logger.info(
+        #             "adaptive_spread_tightened",
+        #             condition_id=market.condition_id[:16],
+        #             consecutive_no_moves=pos.consecutive_no_moves,
+        #             new_spread_pct=0.50,
+        #             volume_24h=round(market.volume_24h, 0),
+        #         )
+        #     elif pos.consecutive_no_moves >= 3 and not low_volume:
+        #         # Market stable but HIGH volume → stay defensive
+        #         pos.current_spread_pct = 0.65
+        # else:
+        #     # Midpoint moved or volume is high → stay at default 3¢
+        #     pos.consecutive_no_moves = 0
+        #     pos.current_spread_pct = 0.65
 
-            # After 3 checks without movement (90s) AND low volume → get closer
-            if pos.consecutive_no_moves >= 3 and low_volume:
-                pos.current_spread_pct = 0.50  # 2¢ instead of 3¢ → 2× more rewards
-                logger.info(
-                    "adaptive_spread_tightened",
-                    condition_id=market.condition_id[:16],
-                    consecutive_no_moves=pos.consecutive_no_moves,
-                    new_spread_pct=0.50,
-                    volume_24h=round(market.volume_24h, 0),
-                )
-            elif pos.consecutive_no_moves >= 3 and not low_volume:
-                # Market stable but HIGH volume → stay defensive
-                pos.current_spread_pct = 0.65
-        else:
-            # Midpoint moved or volume is high → stay at default 3¢
-            pos.consecutive_no_moves = 0
-            pos.current_spread_pct = 0.65
+        # For now, always use default spread from config (0.65 = 3¢)
+        pos.current_spread_pct = 0.65
 
         # Check if midpoint moved enough to reprice
         if not midpoint_moved:
@@ -1299,9 +1304,11 @@ class LiquidityProvider:
         """
         skew = pos.inventory_skew
         abs_skew = abs(skew)
+        # FEATURE DISABLED (2026-04-21): Adaptive spread tightening
+        # TODO: Re-enable if adaptive spread improves rewards
         bid_price, ask_price = self._calculate_prices(
             pos.midpoint, pos.max_spread, skew,
-            spread_pct_of_max=pos.current_spread_pct  # Use dynamic spread if market is stable + low-volume
+            # spread_pct_of_max=pos.current_spread_pct  # DISABLED: Use dynamic spread if market is stable + low-volume
         )
 
         # Order block hiding: adjust prices to hide behind large orders
