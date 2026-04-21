@@ -634,22 +634,25 @@ class LiquidityProvider:
         """
         # Wait for initial setup
         await asyncio.sleep(30)
+        logger.info("rewards_check_loop_started")
 
         while self._running:
             try:
                 await self._fetch_real_rewards()
             except Exception as e:
-                logger.debug("rewards_check_error", error=str(e))
+                logger.warning("rewards_check_error", error=str(e))
             await asyncio.sleep(300)  # Every 5 minutes
 
     async def _fetch_real_rewards(self):
         """Fetch REWARD activities from Data API and update metrics."""
         if not self._client:
+            logger.debug("fetch_real_rewards_skipped_no_client")
             return
 
         # Get our address (funder/proxy)
         address = getattr(self._client, "funder", None)
         if not address:
+            logger.warning("fetch_real_rewards_skipped_no_funder")
             return
 
         import aiohttp
@@ -669,12 +672,15 @@ class LiquidityProvider:
                     url, params=params, timeout=aiohttp.ClientTimeout(total=15)
                 ) as resp:
                     if resp.status != 200:
+                        logger.warning("fetch_real_rewards_api_error", status=resp.status)
                         return
                     data = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError):
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning("fetch_real_rewards_network_error", error=str(e))
             return
 
         if not data:
+            logger.debug("fetch_real_rewards_empty_response", address=address[:10])
             return
 
         # Parse reward events and sum today's rewards
@@ -722,16 +728,23 @@ class LiquidityProvider:
             if today_total > current.rewards_earned:
                 diff = today_total - current.rewards_earned
                 self._metrics.record_rewards(diff)
-
-            # Only log if we received data to avoid spam
-            if today_total > 0:
                 logger.info(
-                    "real_rewards_updated",
+                    "real_rewards_synced",
                     today_total=round(today_total, 4),
-                    new_since_last=round(new_rewards, 4),
+                    diff=round(diff, 4),
                     address=address[:10],
-                    status="synced",
                 )
+            elif today_total == 0:
+                logger.debug("real_rewards_zero", address=address[:10])
+            else:
+                logger.debug(
+                    "real_rewards_no_change",
+                    today_total=round(today_total, 4),
+                    current=round(current.rewards_earned, 4),
+                    address=address[:10],
+                )
+        else:
+            logger.warning("real_rewards_no_metrics_object")
 
         # Update last check timestamp
         if data:
@@ -750,6 +763,7 @@ class LiquidityProvider:
                 self._last_reward_timestamp = newest_ts
 
         self._last_reward_check = time.time()
+        logger.debug("fetch_real_rewards_complete", address=address[:10])
 
     async def _refresh_all(self):
         """Sync active positions with scanner's top markets.
