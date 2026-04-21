@@ -229,8 +229,8 @@ min_reward_per_dollar = 0.001       # Ratio mínimo reward/competencia
 # Fase 2: Provider
 capital_per_market = 34.0           # $34 × 3 mercados ≈ $100 total
 max_markets = 3                     # 3 mercados para diversificar fuentes de rewards
-quote_refresh_s = 120               # Segundos entre refresh de quotes
-spread_pct_of_max = 0.85            # 85% de max_spread (lejos del midpoint, minimiza fills)
+quote_refresh_s = 30                # Refresh cada 30s para reaccionar rápido a movimientos
+spread_pct_of_max = 0.65            # 65% de max_spread (3¢ del midpoint, ~3x más rewards que 85%)
 # max_min_size se auto-calcula: 34/2/0.70 = 24 → mercados con min_size <= 24 (376 disponibles)
 
 # Fase 3: Risk & Inventory

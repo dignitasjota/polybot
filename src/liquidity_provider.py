@@ -224,7 +224,7 @@ class LiquidityProvider:
     @property
     def reprice_threshold(self) -> float:
         """Min midpoint change (in price units) to trigger cancel+replace."""
-        return 0.01  # 1¢ — less repricing = orders stay longer earning rewards
+        return 0.005  # 0.5¢ — react fast to small moves, flee before fills
 
     def set_scanner(self, scanner: RewardScanner):
         self._scanner = scanner

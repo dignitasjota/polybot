@@ -38,7 +38,7 @@ class LiquidityConfig(StrategyConfig):
     max_min_size: float = 0.0             # Only markets with min_size <= this (0 = no filter)
 
     # Quoting (Phase 2+)
-    spread_pct_of_max: float = 0.85       # Quote at 85% of max_spread — $8/day verified, don't change
+    spread_pct_of_max: float = 0.65       # 65% of max_spread → 3¢ from midpoint (~3x more rewards)
     use_order_block_hiding: bool = True
     min_block_usd: float = 500.0
 
@@ -56,7 +56,7 @@ class LiquidityConfig(StrategyConfig):
     use_heartbeat: bool = False          # POST /heartbeat every 5s (miss 10s → all cancelled)
     heartbeat_interval: float = 5.0     # Seconds between heartbeats
     scoring_check_interval: float = 60.0  # Seconds between order-scoring checks
-    quote_refresh_s: float = 120.0      # Seconds between quote refresh cycles
+    quote_refresh_s: float = 30.0       # Refresh cada 30s para reaccionar rápido
 
     @classmethod
     def from_dict(cls, raw: dict, mode: str = "disabled") -> LiquidityConfig:
