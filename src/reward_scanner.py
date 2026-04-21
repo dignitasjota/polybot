@@ -351,8 +351,10 @@ class RewardScanner:
 
             m.score = (m.reward_per_dollar * comp_factor * volume_factor) / (risk_factor * spread_penalty)
 
-        # Filter by minimum reward_per_dollar and max_min_size
+        # Filter by minimum reward_per_dollar, competitiveness, and max_min_size
+        # MIN COMPETITIVENESS = $1.0: avoid being sole provider (generates fills)
         scored = [m for m in markets if m.reward_per_dollar >= self._min_reward_per_dollar]
+        scored = [m for m in scored if m.competitiveness >= 1.0]  # Hard filter: need rivals
         if self._max_min_size > 0:
             scored = [m for m in scored if m.min_size <= self._max_min_size]
 
