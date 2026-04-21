@@ -209,6 +209,10 @@ class LiquidityProvider:
         self._last_reward_check: float = 0.0
         self._last_reward_timestamp: float = 0.0  # Last seen reward timestamp
 
+        # Dynamic capital tracking (updated every 5 min from Polymarket)
+        self._cached_available_capital: float | None = None
+        self._last_capital_check: float = 0.0
+
     # ── Configuration ─────────────────────────────────────────────────
 
     @property
@@ -662,6 +666,53 @@ class LiquidityProvider:
                 logger.warning("rewards_check_error", error=str(e))
             await asyncio.sleep(300)  # Every 5 minutes
 
+    async def _update_available_capital(self):
+        """Update cached available capital from Polymarket (live mode) or config (paper mode).
+
+        In live mode: queries balance_allowance from CLOB API (cached every 5 minutes to avoid saturation)
+        In paper mode: uses simulated balance from config
+        Also accounts for capital already allocated to open positions.
+        """
+        now = time.time()
+        # Only check every 5 minutes (300 seconds)
+        if now - self._last_capital_check < 300:
+            return
+
+        if not self.should_simulate and self._client:
+            # Live mode: get real balance from Polymarket
+            try:
+                balance = self._client.get_balance_allowance("USDC")
+                self._cached_available_capital = balance
+                logger.info(
+                    "available_capital_updated",
+                    balance_usdc=round(balance, 2),
+                    source="polymarket_live",
+                )
+            except Exception as e:
+                logger.warning(
+                    "available_capital_fetch_failed",
+                    error=str(e),
+                    fallback="using_config",
+                )
+                self._cached_available_capital = self._config.total_capital
+        else:
+            # Paper mode: use simulated balance from config
+            self._cached_available_capital = self._config.total_capital
+            logger.debug(
+                "available_capital_updated",
+                balance_usdc=round(self._cached_available_capital, 2),
+                source="paper_mode",
+            )
+
+        self._last_capital_check = now
+
+    def get_available_capital(self) -> float:
+        """Get the currently available capital (cached or from config)."""
+        if self._cached_available_capital is not None:
+            return self._cached_available_capital
+        # Fallback to config if cache is empty
+        return self._config.total_capital
+
     async def _fetch_real_rewards(self):
         """Fetch REWARD activities from Data API and update metrics."""
         if not self._client:
@@ -790,6 +841,8 @@ class LiquidityProvider:
         Phase 3: also checks adverse selection and emergency conditions.
         Dynamic capital allocation: each market gets capital_needed = min_size * midpoint * 2 * 1.2
         This allows opening more markets with remaining capital instead of fixed per-market allocation.
+
+        Capital is fetched from Polymarket every 5 minutes (caching to avoid saturation).
         """
         if not self._scanner:
             return
@@ -798,13 +851,19 @@ class LiquidityProvider:
         if not self.should_simulate:
             await self._check_active_fills()
 
+        # Update available capital from Polymarket (cached every 5 minutes)
+        await self._update_available_capital()
+
         # Get all markets and allocate capital dynamically
         all_markets = self._scanner.get_all_markets()
         if not all_markets:
             return
 
-        # Dynamic capital allocation: calculate how much capital each market needs
-        remaining_capital = self._config.total_capital
+        # Start with available balance, subtract capital already in open positions
+        total_available = self.get_available_capital()
+        capital_in_use = sum(pos.capital_allocated for pos in self._positions.values())
+        remaining_capital = total_available - capital_in_use
+
         allocated_markets = []  # List of (market, capital_needed)
 
         for market in all_markets:
@@ -840,9 +899,11 @@ class LiquidityProvider:
 
         logger.debug(
             "dynamic_capital_allocation",
+            total_available=round(total_available, 2),
+            in_use=round(capital_in_use, 2),
             markets_allocated=len(allocated_markets),
             capital_remaining=round(remaining_capital, 2),
-            total_allocated=round(self._config.total_capital - remaining_capital, 2),
+            total_allocated=round(capital_in_use + (total_available - remaining_capital), 2),
         )
 
         # Check adverse selection — abandon markets with high loss ratio

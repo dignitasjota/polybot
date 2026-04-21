@@ -229,12 +229,17 @@ min_reward_per_dollar = 0.001       # Ratio mínimo reward/competencia
 # Fase 2: Provider (con asignación dinámica de capital)
 # En lugar de capital fijo por mercado, cada mercado obtiene:
 # capital_needed = min_size * midpoint * 2 * 1.2
-# Esto permite abrir más mercados diversificados en lugar de 3 fijos.
+# Esto permite abrir más mercados diversificados en lugar de N fijos.
+#
+# En LIVE mode: se obtiene el balance USDC de Polymarket cada 5 minutos (cacheado para no saturar)
+# En PAPER mode: se usa total_capital como simulado
+# El bot abre mercados en orden de preferencia hasta agotar el capital disponible.
 capital_per_market = 34.0           # Fallback si no se usa asignación dinámica (legacy)
-max_markets = 10                    # Máximo mercados con asignación dinámica (será limitado por capital_total)
+max_markets = 10                    # Máximo mercados (el límite real es el capital disponible)
+total_capital = 500.0               # Fallback/inicial. En live se obtiene dinámicamente de Polymarket
 quote_refresh_s = 30                # Refresh cada 30s para reaccionar rápido a movimientos
 spread_pct_of_max = 0.65            # 65% de max_spread (3¢ del midpoint, ~3x más rewards que 85%)
-# max_min_size se auto-calcula: 34/2/0.70 = 24 → mercados con min_size <= 24 (376 disponibles)
+# max_min_size se auto-calcula: min_size * midpoint * 2 * 1.2
 
 # Fase 3: Risk & Inventory
 max_inventory_skew = 0.6            # |skew| antes de rebalanceo automático
