@@ -262,6 +262,8 @@ class LiquidityProvider:
         # Cancel any orphaned orders from previous runs (live mode only)
         if self._initialized and self._client:
             await self._cancel_all_on_startup()
+            # Mark any unmatched positions for immediate auto-exit
+            await self._handle_orphan_unmatched_positions()
 
         self._running = True
         self._started_at = time.time()
@@ -362,6 +364,33 @@ class LiquidityProvider:
             logger.info("startup_cancel_all", response=str(resp)[:200])
         except Exception as e:
             logger.warning("startup_cancel_all_failed", error=str(e))
+
+    async def _handle_orphan_unmatched_positions(self):
+        """Mark any unmatched positions from previous runs for immediate exit.
+
+        If a position has fills on only one side from a previous run,
+        mark it as "unmatched since 120+ seconds ago" so auto-exit
+        will liquidate it in the next check cycle (60s timeout).
+        """
+        now = time.time()
+        orphan_threshold = 120  # Mark positions as if they've been unmatched 120s
+
+        for cid, pos in list(self._positions.items()):
+            # Check if position has unmatched fills (only one side filled)
+            unmatched_yes = pos.fills_yes - min(pos.fills_yes, pos.fills_no)
+            unmatched_no = pos.fills_no - min(pos.fills_yes, pos.fills_no)
+
+            if (unmatched_yes > 0.5 or unmatched_no > 0.5) and pos.unmatched_since == 0:
+                # Mark as orphan: pretend it's been unmatched for 120s
+                # so auto-exit will liquidate it immediately
+                pos.unmatched_since = now - orphan_threshold
+                logger.info(
+                    "orphan_unmatched_detected",
+                    condition_id=cid[:16],
+                    fills_yes=round(pos.fills_yes, 2),
+                    fills_no=round(pos.fills_no, 2),
+                    action="marked_for_immediate_exit",
+                )
 
     async def _init_clob_client(self):
         """Initialize ClobClient with credentials — same pattern as Executor."""
