@@ -158,6 +158,7 @@ class LiquidityProvider:
 
         # ClobClient — initialized in start() for live/dry_run
         self._client = None
+        self._funder = None  # Store funder address for Data API queries
         self._initialized = False
 
         # Scanner reference (set externally)
@@ -350,9 +351,10 @@ class LiquidityProvider:
             logger.info("cleared_paper_positions_for_live", count=count)
 
         elif old_mode == "live" and new_mode in paper_modes:
-            # Live → paper: cancel real orders first, then clear
+            # Live → paper: cancel real orders first, then clear and reset funder
             await self._cancel_all_orders()
             self._positions.clear()
+            self._funder = None  # Reset funder when leaving live mode
             logger.info("cancelled_live_positions_for_paper")
 
         elif old_mode in paper_modes and new_mode in paper_modes:
@@ -452,6 +454,8 @@ class LiquidityProvider:
                     api_passphrase=passphrase,
                 ),
             )
+            # Store funder address for Data API queries (ClobClient doesn't expose it publicly)
+            self._funder = funder
             self._initialized = True
             logger.info("provider_clob_initialized", sig_type=sig_type, funder=funder[:10])
 
@@ -658,8 +662,8 @@ class LiquidityProvider:
             logger.debug("fetch_real_rewards_skipped_no_client")
             return
 
-        # Get our address (funder/proxy)
-        address = getattr(self._client, "funder", None)
+        # Get our address (funder/proxy) — stored during ClobClient init
+        address = self._funder
         if not address:
             logger.warning("fetch_real_rewards_skipped_no_funder")
             return
