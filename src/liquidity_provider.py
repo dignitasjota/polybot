@@ -785,9 +785,11 @@ class LiquidityProvider:
         logger.debug("fetch_real_rewards_complete", address=address[:10])
 
     async def _refresh_all(self):
-        """Sync active positions with scanner's top markets.
+        """Sync active positions with scanner's top markets using dynamic capital allocation.
 
         Phase 3: also checks adverse selection and emergency conditions.
+        Dynamic capital allocation: each market gets capital_needed = min_size * midpoint * 2 * 1.2
+        This allows opening more markets with remaining capital instead of fixed per-market allocation.
         """
         if not self._scanner:
             return
@@ -796,12 +798,52 @@ class LiquidityProvider:
         if not self.should_simulate:
             await self._check_active_fills()
 
-        top_markets = self._scanner.get_top_markets(self._config.max_markets)
-        if not top_markets:
+        # Get all markets and allocate capital dynamically
+        all_markets = self._scanner.get_all_markets()
+        if not all_markets:
             return
 
-        # Determine which markets should be active
-        desired_ids = {m.condition_id for m in top_markets}
+        # Dynamic capital allocation: calculate how much capital each market needs
+        remaining_capital = self._config.total_capital
+        allocated_markets = []  # List of (market, capital_needed)
+
+        for market in all_markets:
+            # Calculate midpoint for this market
+            # Need token_id to query tracker, use first YES token or fallback to market.midpoint
+            yes_token_id = ""
+            for tok in market.tokens:
+                if tok.get("outcome", "").lower() == "yes":
+                    yes_token_id = tok.get("token_id", "")
+                    break
+            if not yes_token_id and len(market.tokens) > 0:
+                yes_token_id = market.tokens[0].get("token_id", "")
+
+            midpoint = market.midpoint  # Use scanner data as default
+            if yes_token_id and self._tracker:
+                tracked_mid = self._tracker.get_midpoint(yes_token_id)
+                if tracked_mid is not None:
+                    midpoint = tracked_mid
+
+            # Capital needed: min_size * midpoint * 2 * 1.2
+            # (covers both sides of the quote with 20% safety margin)
+            capital_needed = market.min_size * midpoint * 2 * 1.2
+
+            if capital_needed > 0 and remaining_capital >= capital_needed:
+                allocated_markets.append((market, capital_needed))
+                remaining_capital -= capital_needed
+
+            # Cap at max_markets to avoid opening too many even if capital allows
+            if len(allocated_markets) >= self._config.max_markets:
+                break
+
+        desired_ids = {m[0].condition_id for m in allocated_markets}
+
+        logger.debug(
+            "dynamic_capital_allocation",
+            markets_allocated=len(allocated_markets),
+            capital_remaining=round(remaining_capital, 2),
+            total_allocated=round(self._config.total_capital - remaining_capital, 2),
+        )
 
         # Check adverse selection — abandon markets with high loss ratio
         to_abandon = []
@@ -819,19 +861,19 @@ class LiquidityProvider:
                 if self._metrics:
                     self._metrics.record_market_abandoned()
 
-        # Remove abandoned + no longer in top N
+        # Remove abandoned + no longer in allocated set
         to_remove = set(to_abandon) | {cid for cid in self._positions if cid not in desired_ids}
         for cid in to_remove:
             await self._close_position(cid)
 
-        # Add/refresh positions
-        for market in top_markets:
+        # Add/refresh positions with calculated capital
+        for market, capital_needed in allocated_markets:
             if market.condition_id in to_remove:
                 continue  # Just abandoned, don't re-open immediately
             if market.condition_id in self._positions:
                 await self._refresh_quotes(market)
             else:
-                await self._open_position(market)
+                await self._open_position(market, capital_allocated=capital_needed)
 
         # Update active markets count in metrics
         if self._metrics:
@@ -844,8 +886,13 @@ class LiquidityProvider:
         if self.should_simulate:
             await self._simulate_paper_fills()
 
-    async def _open_position(self, market: RewardMarket):
-        """Start quoting a new market."""
+    async def _open_position(self, market: RewardMarket, capital_allocated: float | None = None):
+        """Start quoting a new market with optional dynamic capital allocation.
+
+        Args:
+            market: RewardMarket from scanner
+            capital_allocated: Capital to use for this market. If None, uses config.capital_per_market (legacy)
+        """
         # Need token IDs from the market
         tokens = market.tokens
         if len(tokens) < 2:
@@ -872,6 +919,10 @@ class LiquidityProvider:
 
         midpoint = self._get_midpoint(market, yes_token_id)
 
+        # Use provided capital or fallback to config default
+        if capital_allocated is None:
+            capital_allocated = self._config.capital_per_market
+
         pos = MarketPosition(
             condition_id=market.condition_id,
             question=market.question,
@@ -880,7 +931,7 @@ class LiquidityProvider:
             max_spread=market.max_spread / 100.0,  # centavos → price units
             min_size=market.min_size,
             midpoint=midpoint,
-            capital_allocated=self._config.capital_per_market,
+            capital_allocated=capital_allocated,
         )
         # Cache market volume for stability-based spread adjustment
         pos.market_volume_24h = market.volume_24h
@@ -894,6 +945,7 @@ class LiquidityProvider:
             condition_id=market.condition_id[:16],
             question=market.question[:50],
             midpoint=round(midpoint, 4),
+            capital_allocated=round(capital_allocated, 2),
         )
 
     async def _close_position(self, condition_id: str):

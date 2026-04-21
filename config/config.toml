@@ -226,9 +226,12 @@ scan_interval = 300                 # Segundos entre scans de mercados con rewar
 min_daily_rate = 1.0                # Mínimo $/día para considerar un mercado
 min_reward_per_dollar = 0.001       # Ratio mínimo reward/competencia
 
-# Fase 2: Provider
-capital_per_market = 34.0           # $34 × 3 mercados ≈ $100 total
-max_markets = 3                     # 3 mercados para diversificar fuentes de rewards
+# Fase 2: Provider (con asignación dinámica de capital)
+# En lugar de capital fijo por mercado, cada mercado obtiene:
+# capital_needed = min_size * midpoint * 2 * 1.2
+# Esto permite abrir más mercados diversificados en lugar de 3 fijos.
+capital_per_market = 34.0           # Fallback si no se usa asignación dinámica (legacy)
+max_markets = 10                    # Máximo mercados con asignación dinámica (será limitado por capital_total)
 quote_refresh_s = 30                # Refresh cada 30s para reaccionar rápido a movimientos
 spread_pct_of_max = 0.65            # 65% de max_spread (3¢ del midpoint, ~3x más rewards que 85%)
 # max_min_size se auto-calcula: 34/2/0.70 = 24 → mercados con min_size <= 24 (376 disponibles)
