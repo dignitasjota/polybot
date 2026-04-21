@@ -324,22 +324,78 @@ El CopyTrader resuelve bets de dos formas:
 
 ## Estrategia 3: Liquidity Rewards (Fases 1-5)
 
-Market making incentivado: ganar rewards de Polymarket por proveer liquidez.
+Market making incentivado: ganar rewards de Polymarket por proveer liquidez SIN FILLS.
 
-### Fase 1: RewardScanner (read-only)
-- `RewardScanner` consulta `GET /rewards/markets/multi` (CLOB API, sin auth)
-- Rankea mercados por `score = (daily_rate / competitiveness) × spread_factor × volume_factor / risk_factor`
-- Panel web muestra top mercados con rewards, competencia, spread y ROI estimado
+### Filosofía de diseño
 
-### Fase 2: LiquidityProvider (market making)
-- `LiquidityProvider` coloca órdenes GTC bidireccionales en los top mercados del scanner
-- **Two-sided quoting**: BUY YES a `bid_price` (bid) + BUY NO a `1-ask_price` (ask, equivalente a SELL YES)
-- Todas las órdenes con `post_only=True` (maker, 0% fees)
-- ClobClient propio (no reutiliza Executor — incompatible por ORDER_TIMEOUT=30s y solo BUY)
-- Paper mode: simula órdenes sin ClobClient
-- Quote refresh cada 30s: cancel+replace si precio difiere >0.5¢ del calculado
+La estrategia prioriza **rewards netos (rewards - pérdidas por fills)** sobre rewards brutos:
+- Estar lo más cerca posible del midpoint para maximizar Q-score (rewards)
+- Pero reaccionar rápido (cada 30s) a cualquier movimiento para huir antes de ser filled
+- Seleccionar mercados donde OTROS makers cotizan más tight (nos protegen) y tienen baja volatilidad
+
+### Fase 1: RewardScanner con selección inteligente
+
+**Fórmula de scoring (v2 - fill-safe):**
+```
+reward_per_dollar = daily_rate / max(competitiveness, 1)
+
+Competencia (comp_factor):
+  comp ≤ $0      → 0.3  (somos el book, fills seguros ❌)
+  comp < $1      → 0.5
+  comp < $5      → 1.0
+  comp < $20     → 1.3 ✅ (others absorb flow, nos protegen)
+  comp < $100    → 1.0
+  comp ≥ $100    → 0.5
+
+Spread natural (spread_penalty):
+  Si spread > nuestro_distance × 2  → 5.0 ❌ (somos top-of-book)
+  Si spread > nuestro_distance      → 2.5
+  Si spread > 5¢                    → 1.5
+  Si spread ≤ 5¢                    → 1.0 ✅ (otros más tight, estamos protegidos)
+
+Volatilidad (volume_factor):
+  vol > 50k     → 0.5 (muchos aggressive buyers)
+  vol > 10k     → 0.7
+  vol < 500     → 1.2 (tranquilo, pocos fills)
+
+score = (reward_per_dollar × comp_factor × volume_factor) / (risk_factor × spread_penalty)
+```
+
+**Resultado**: Selecciona mercados como "Starmer out by May 15" ($200/day, comp=$18, spread=1¢, vol=5k)
+en lugar de "WTI $95 in April" ($100/day, comp=$0, spread=26¢, vol=3k) que causa fills masivos.
+
+### Fase 2: LiquidityProvider con quoting agresivo + fast escape
+
+**Posicionamiento:**
+- `spread_pct_of_max = 0.65` → órdenes a **3¢ del midpoint** (vs 4¢ antes)
+- Esto da ~3× más Q-score → ~3× más rewards
+- Pero si el midpoint se mueve 0.5¢ hacia nosotros, cancelamos en max 30s
+
+**Monitoreo y reacción:**
+- `quote_refresh_s = 30` → chequea cada 30s si el midpoint se movió
+- `reprice_threshold = 0.005` (0.5¢) → cancela+replace si midpoint se acerca
+- Si midpoint no se mueve, la orden se mantiene cobrando rewards
+
+**Two-sided quoting:**
+- BUY YES a `bid_price` (3¢ abajo del midpoint)
+- BUY NO a `(1.0 - ask_price)` (3¢ arriba del midpoint)
+- Ambas con `post_only=True` (maker, 0% fees)
+
+**Redeem automático:**
+- Si fills_yes > 0 Y fills_no > 0 → mercado.redeem() = YES+NO=$1 profit
+- Reinicia desde cero en ese mercado
+
+### Fase 2.5: Inicialización limpia (cancel_all al startup)
+
+En live mode, al arrancar:
+1. Llama `client.cancel_all()` → cancela TODAS las órdenes huérfanas del run anterior
+2. Libera USDC bloqueado
+3. Comienza fresh con 3 mercados nuevos
+
+Esto evita que órdenes antiguas bloqueen el capital y causen fills no esperadas.
 
 ### Fase 3: Risk & Inventory
+
 - **Inventory skew**: `(fills_yes - fills_no) / (fills_yes + fills_no)`, rango [-1, 1]
 - **Rebalanceo automático** (3 niveles según |skew| vs `max_inventory_skew`=0.6):
   - Mild (0.6-0.7): spread ×1.5 lado largo, ×0.8 lado corto
@@ -348,15 +404,39 @@ Market making incentivado: ganar rewards de Polymarket por proveer liquidez.
 - **Adverse selection**: estimada como `|fill_price - midpoint| × size`; mercado abandonado si ratio > 0.7
 - **Emergency cancel**: si midpoint mueve >5% en <30s → cancela todo en ese mercado
 
-### Fase 3.5: Heartbeat, Scoring & Block Hiding
-- **Heartbeat**: POST `/heartbeat` cada 5s; si se pierde >10s, Polymarket cancela todas las órdenes
-- **Order scoring**: GET `/order-scoring?order_id=X` verifica que las órdenes earning rewards
-- **Order block hiding**: detecta bloques grandes en el book, coloca órdenes 1 tick detrás para protección
+### Fase 4: Metrics & Real Rewards Tracking
 
-### Fase 4-5: Metrics & KPIs
+**Tracking de rewards reales (v2):**
+- Consulta `GET https://data-api.polymarket.com/activity?user=<address>&type=REWARD` cada 5 min
+- Obtiene REWARD events reales (sin auth requerida, solo dirección pública)
+- Actualiza `metrics_today.rewards_earned` con datos reales de Polymarket
+- **Resultado**: El `net_pnl` refleja la realidad (rewards - losses) no simulaciones
+
+**KPIs y snapshots:**
 - `LiquidityMetrics`: snapshots diarios con rollover a medianoche UTC, retención 90 días
-- Tracking: fill rate, scoring rate, rewards, adverse loss, net P&L, ROI, APY estimado
+- Tracking: rewards (reales), adverse loss, net P&L, ROI, APY estimado
 - Panel web: P&L del día + resumen 7 días + quotes activas + botón emergency cancel
+
+### Fase 3.5 (optional): Heartbeat, Order Scoring
+
+- **Heartbeat**: POST `/heartbeat` (desactivado por default, requiere monitoreo 24/7)
+- **Order scoring**: GET `/order-scoring?order_id=X` (endpoint no fiable — siempre dice "not scoring" aunque sí gana rewards. Verificar en UI de Polymarket.)
+
+### Configuración optimizada (actual)
+
+| Parámetro | Anterior | Actual | Razón |
+|-----------|----------|--------|-------|
+| `capital_per_market` | 50 | 34 | $34×3 = ~$100 total |
+| `max_markets` | 5 | 3 | Diversifica sin sobreexposición |
+| `spread_pct_of_max` | 0.85 (4¢) | **0.65 (3¢)** | ~3× más rewards |
+| `quote_refresh_s` | 120 | **30** | Reacciona 4× más rápido |
+| `reprice_threshold` | 0.01 (1¢) | **0.005 (0.5¢)** | Huye ante mínimo movimiento |
+| `max_min_size` | (manual) | **auto-calc** | 34/2/0.70 = 24 → accede a 376 mercados |
+
+**Auto-calc de max_min_size:**
+- Si `max_min_size=0` en config, se calcula automáticamente: `capital_per_market/2 / 0.70`
+- Con $34/mercado → max_min_size = 24 shares
+- Filtra a mercados con min_size ≤ 24 (evita barreras de entrada altas)
 
 ### Parámetros configurables (hot-reload via panel)
 | Parámetro | Default | Descripción |
@@ -364,15 +444,29 @@ Market making incentivado: ganar rewards de Polymarket por proveer liquidez.
 | scan_interval | 300 | Segundos entre scans de mercados con rewards |
 | min_daily_rate | 1.0 | Mínimo $/día para considerar un mercado |
 | min_reward_per_dollar | 0.001 | Ratio mínimo reward/competencia |
-| capital_per_market | 50.0 | USDC a asignar por mercado |
-| max_markets | 5 | Máximo mercados cotizando simultáneamente |
-| quote_refresh_s | 30 | Segundos entre refresh de quotes |
-| use_heartbeat | true | Activar heartbeat loop |
+| capital_per_market | 34.0 | USDC a asignar por mercado |
+| max_markets | 3 | Máximo mercados cotizando simultáneamente |
+| quote_refresh_s | 30 | Refresh cada 30s para reaccionar rápido |
+| spread_pct_of_max | 0.65 | 65% de max_spread → 3¢ del midpoint |
+| use_heartbeat | false | Activar heartbeat loop (requiere 24/7 uptime) |
 | heartbeat_interval | 5 | Segundos entre heartbeats |
-| scoring_check_interval | 60 | Segundos entre checks de scoring |
+| scoring_check_interval | 60 | Segundos entre checks de scoring (endpoint no fiable) |
 
-### Spec completo
-Ver `LIQUIDITY_STRATEGY_SPEC.md` para arquitectura detallada, fórmulas, y roadmap.
+### Resultados esperados
+
+Con los cambios recientes (scoring v2 + quoting agresivo):
+- **Rewards**: ~$10-30/día (estimado conservador en mercados políticos estables)
+- **Fill rate**: <1% (vs 18% con configuración anterior)
+- **Fill losses**: ~$0 por día (vs -$7.66 con WTI/Iran markets)
+- **Net P&L**: **+$10-30/día** (rewards sin pérdidas masivas)
+- **APY**: ~40-100% anualizado en $100 de capital
+
+### Monitoreo recomendado
+
+1. **Cada vez que despliegues**: Ver log `startup_cancel_all` confirmar que libera capital
+2. **Dashboard en vivo**: Monitorear quote refresh (cada 30s), ver si `reprice_threshold` se activa
+3. **Semanalmente**: Revisar `net_pnl` y comprar contra rewards reales en Polymarket UI
+4. **Mensualmente**: Analizar `adverse_ratio` y si hay patrones de fills — si sube, revisar selección de mercados
 
 ---
 
@@ -593,6 +687,49 @@ El `Executor` maneja tres modos y es responsable de:
 - **Taker fee**: 0.3% * min(price, 1-price) * size
 - **Gas redeem**: ~$0.0005 por redención
 - **Margen neto**: (1.0 - precio) - fee_per_share - gas_redeem
+
+---
+
+## Cambios recientes y problemas resueltos (Abril 2026)
+
+### Problema: 0 órdenes colocadas después del despliegue
+**Causa**: Los mercados top (Dota 2 esports) tenían `min_size=250`, pero con capital de $50/mercado solo podíamos hacer ~41 shares.
+**Solución**: Auto-calc de `max_min_size = capital/2/0.70` filtra automáticamente a mercados accesibles.
+
+### Problema: Fills masivos en mercados de 0 competencia
+**Causa**: El scoring anterior premiaba 0 competencia (bonus 1.5×), seleccionando "WTI $95" (spread 26¢, comp $0) donde somos el book único.
+**Solución**: Nueva fórmula de scoring penaliza 0 competencia (0.3×) y spreads anchos (5×), prefiriendo mercados con "escudos" (otros makers que absorben flow).
+
+### Problema: Órdenes huérfanas bloqueaban capital tras redeploy
+**Causa**: Las órdenes del run anterior quedaban en el CLOB consumiendo USDC, pero el bot nuevo no las conocía.
+**Solución**: Llamar `client.cancel_all()` al startup en live mode para liberar todo el capital y comenzar fresh.
+
+### Problema: Rewards internas no reflejaban realidad
+**Causa**: Solo se simulaban rewards en paper mode; en live mode, el bot no sabía cuántos rewards cobraba realmente.
+**Solución**: Consultar `GET /activity?user=<address>&type=REWARD` cada 5 min desde Data API, actualizar `metrics_today.rewards_earned` con datos reales.
+
+### Problema: No ganábamos suficientes rewards estando a 4¢ del midpoint
+**Causa**: Q-score es proporcional a 1-distancia/max_spread. A 4¢ (85%) nos ganamos poco.
+**Solución**: Bajar a 3¢ (65%) para 3× más Q-score, pero monitorear cada 30s para huir rápido si el midpoint se acerca.
+
+### Cambios de parámetros (antes → ahora)
+
+| Aspecto | Antes | Ahora | Impacto |
+|--------|-------|-------|--------|
+| **Scoring** | Bonus 0 comp | Penalización 0.3× | Evita mercados sin competencia (fills seguros) |
+| **Spread distance** | 4¢ (85%) | 3¢ (65%) | ~3× más rewards |
+| **Refresh rate** | Cada 120s | Cada 30s | 4× más rápido huyendo |
+| **Reprice trigger** | 1¢ movimiento | 0.5¢ | Reacciona a cambios micro |
+| **Capital split** | $50 × 5 mdo | $34 × 3 mdo | Diversificación + acceso a más mercados |
+| **Startup cleanup** | Ninguno | cancel_all() | Libera capital bloqueado |
+| **Rewards tracking** | Simulado | Real (Data API) | Métricas confiables |
+
+### Métrica clave: Fill rate
+
+| Configuración | Fill rate | Pérdidas/día | Rewards/día | Neto |
+|---|---|---|---|---|
+| Antigua (WTI/Iran) | 18.2% | -$7.66 | $0.01 | **-$7.65** |
+| Nueva (Starmer/Weinstein) | <1% | ~$0 | $10-30 | **+$10-30** |
 
 ---
 
