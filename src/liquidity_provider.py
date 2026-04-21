@@ -686,18 +686,22 @@ class LiquidityProvider:
             if event_ts > self._last_reward_timestamp:
                 new_rewards += amount
 
-        # Update metrics with real rewards
-        if today_total > 0 and self._metrics:
-            # Replace the simulated rewards with real data
+        # Update metrics with real rewards from Polymarket
+        if self._metrics:
             current = self._metrics.get_today()
+            # Always sync with Polymarket's ground truth (ignore our internal estimate)
             if today_total > current.rewards_earned:
                 diff = today_total - current.rewards_earned
                 self._metrics.record_rewards(diff)
+
+            # Only log if we received data to avoid spam
+            if today_total > 0:
                 logger.info(
                     "real_rewards_updated",
                     today_total=round(today_total, 4),
                     new_since_last=round(new_rewards, 4),
                     address=address[:10],
+                    status="synced",
                 )
 
         # Update last check timestamp
