@@ -1120,9 +1120,23 @@ class LiquidityProvider:
         # For now, always use default spread from config (0.65 = 3¢)
         pos.current_spread_pct = 0.65
 
+        # Check if orders are missing (cancelled externally, filled, or lost)
+        # If so, re-place them even if midpoint hasn't moved
+        orders_missing = pos.bid_order is None or pos.ask_order is None
+        if orders_missing:
+            logger.info(
+                "replacing_missing_orders",
+                condition_id=market.condition_id[:16],
+                bid_missing=pos.bid_order is None,
+                ask_missing=pos.ask_order is None,
+            )
+            pos.midpoint = new_midpoint
+            await self._place_quotes(pos)
+            return
+
         # Check if midpoint moved enough to reprice
         if not midpoint_moved:
-            return  # No significant change
+            return  # No significant change, orders are active
 
         pos.midpoint = new_midpoint
 
