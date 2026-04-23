@@ -344,22 +344,23 @@ class RewardScanner:
             # Penaliza agresivamente el volumen alto para que el bot
             # naturalmente seleccione mercados tranquilos sin filtro hard
             volume_factor = 1.0
-            if m.volume_24h > 10000:
-                volume_factor = 0.3  # Very high volume (10k+) → lots of aggressive orders, risky
+            if m.volume_24h > 50000:
+                volume_factor = 0.05  # Extreme volume (50k+) → almost certain fills, avoid
+            elif m.volume_24h > 10000:
+                volume_factor = 0.15  # Very high volume (10k+) → lots of aggressive orders
             elif m.volume_24h > 5000:
-                volume_factor = 0.5  # High volume (5-10k) → risky, penaliza
+                volume_factor = 0.4   # High volume (5-10k) → risky
             elif m.volume_24h < 500:
-                volume_factor = 1.2  # Low volume → less fill risk, bonus
+                volume_factor = 1.2   # Low volume → less fill risk, bonus
 
             m.score = (m.reward_per_dollar * comp_factor * volume_factor) / (risk_factor * spread_penalty)
 
-        # Filter by minimum reward_per_dollar and max_min_size
-        # NOTE: competitiveness filtering removed (2026-04-21)
-        # Reason: with dynamic capital allocation, markets with low/zero competition are OK
-        # The scoring formula already penalizes them (comp_factor=0.3 for zero competition)
-        # so they naturally rank lower. Better to let the bot pick from a larger pool.
+        # Filter by minimum reward_per_dollar, competitiveness, and max_min_size
+        # Competitiveness >= 0.5: need SOME other makers to shield us from fills
+        # (was >= 1.0 which was too strict, then removed which let in terrible markets
+        # like "Weed rescheduled" with comp=$0.22 and vol=$89k → fills guaranteed)
         scored = [m for m in markets if m.reward_per_dollar >= self._min_reward_per_dollar]
-        # scored = [m for m in scored if m.competitiveness >= 1.0]  # REMOVED: too restrictive
+        scored = [m for m in scored if m.competitiveness >= 0.5]
         if self._max_min_size > 0:
             scored = [m for m in scored if m.min_size <= self._max_min_size]
 
