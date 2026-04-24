@@ -699,15 +699,25 @@ class LiquidityProvider:
             return
 
         if not self.should_simulate and self._client:
-            # Live mode: get real balance from Polymarket
+            # Live mode: get real balance from Polymarket (same pattern as executor.py)
             try:
-                balance = self._client.get_balance_allowance("USDC")
-                self._cached_available_capital = balance
-                logger.debug(
-                    "available_capital_updated",
-                    balance_usdc=round(balance, 2),
-                    source="polymarket_live",
+                from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+                resp = self._client.get_balance_allowance(
+                    BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
                 )
+                if resp and "balance" in resp:
+                    raw = float(resp["balance"])
+                    # Auto-detect format: if raw > 1000, it's in smallest units (6 decimals)
+                    balance = raw / 1e6 if raw > 1000 else raw
+                    self._cached_available_capital = balance
+                    logger.debug(
+                        "available_capital_updated",
+                        balance_usdc=round(balance, 2),
+                        source="polymarket_live",
+                    )
+                else:
+                    logger.warning("available_capital_empty_response", response=str(resp))
+                    self._cached_available_capital = self._config.total_capital
             except Exception as e:
                 logger.warning(
                     "available_capital_fetch_failed",
