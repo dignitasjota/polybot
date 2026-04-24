@@ -355,12 +355,13 @@ class RewardScanner:
 
             m.score = (m.reward_per_dollar * comp_factor * volume_factor) / (risk_factor * spread_penalty)
 
-        # Filter by minimum reward_per_dollar, competitiveness, and max_min_size
-        # Competitiveness >= 0.5: need SOME other makers to shield us from fills
-        # (was >= 1.0 which was too strict, then removed which let in terrible markets
-        # like "Weed rescheduled" with comp=$0.22 and vol=$89k → fills guaranteed)
+        # Filter by minimum reward_per_dollar and max_min_size
+        # No hard competitiveness filter: the scoring formula already penalizes
+        # low competition (comp_factor=0.3 for zero, 0.5 for <$1).
+        # Combined with aggressive volume penalty (0.05 for >50k vol), bad markets
+        # like "Weed rescheduled" (comp=$0.22, vol=$89k) get score ~2 vs good
+        # markets scoring 30-50. Hard filters caused 0 markets found.
         scored = [m for m in markets if m.reward_per_dollar >= self._min_reward_per_dollar]
-        scored = [m for m in scored if m.competitiveness >= 0.5]
         if self._max_min_size > 0:
             scored = [m for m in scored if m.min_size <= self._max_min_size]
 

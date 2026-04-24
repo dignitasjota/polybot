@@ -878,6 +878,22 @@ class LiquidityProvider:
 
         # Get all markets and allocate capital dynamically
         all_markets = self._scanner.get_all_markets()
+
+        # Even if scanner finds 0 new markets, still refresh existing positions
+        # (replace missing orders, check fills, etc.)
+        if not all_markets and self._positions:
+            for pos in list(self._positions.values()):
+                if pos.bid_order is None or pos.ask_order is None:
+                    logger.info(
+                        "replacing_missing_orders_no_scanner",
+                        condition_id=pos.condition_id[:16],
+                        bid_missing=pos.bid_order is None,
+                        ask_missing=pos.ask_order is None,
+                    )
+                    await self._place_quotes(pos)
+            await self._check_auto_exits()
+            return
+
         if not all_markets:
             return
 
@@ -905,9 +921,11 @@ class LiquidityProvider:
                 if tracked_mid is not None:
                     midpoint = tracked_mid
 
-            # Capital needed: min_size * midpoint * 2 * 1.2
-            # (covers both sides of the quote with 20% safety margin)
-            capital_needed = market.min_size * midpoint * 2 * 1.2
+            # Capital needed: min_size * max(midpoint, 1-midpoint) * 2 * 1.2
+            # Uses the MORE EXPENSIVE side: if midpoint=0.05, NO costs $0.95/share
+            # Both sides need to meet min_size, so capital must cover the expensive side
+            expensive_side = max(midpoint, 1.0 - midpoint)
+            capital_needed = market.min_size * expensive_side * 2 * 1.2
 
             if capital_needed > 0 and remaining_capital >= capital_needed:
                 allocated_markets.append((market, capital_needed))
