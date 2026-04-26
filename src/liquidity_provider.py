@@ -912,11 +912,23 @@ class LiquidityProvider:
         capital_in_use = sum(pos.capital_allocated for pos in self._positions.values())
         remaining_capital = total_available - capital_in_use
 
+        # Existing positions keep their spot — capital is already committed.
+        # Only use remaining capital for NEW markets.
+        existing_ids = set(self._positions.keys())
         allocated_markets = []  # List of (market, capital_needed)
+        new_count = 0  # Count of NEW markets added
 
         for market in all_markets:
-            # Calculate midpoint for this market
-            # Need token_id to query tracker, use first YES token or fallback to market.midpoint
+            # Existing position: keep it, no capital re-check needed
+            if market.condition_id in existing_ids:
+                allocated_markets.append((market, 0))  # 0 = no new capital needed
+                continue
+
+            # Cap at max_markets (existing + new)
+            if len(existing_ids) + new_count >= self._config.max_markets:
+                break
+
+            # Calculate capital needed for NEW market
             yes_token_id = ""
             for tok in market.tokens:
                 if tok.get("outcome", "").lower() == "yes":
@@ -932,28 +944,24 @@ class LiquidityProvider:
                     midpoint = tracked_mid
 
             # Capital needed: min_size * max(midpoint, 1-midpoint) * 2 * 1.2
-            # Uses the MORE EXPENSIVE side: if midpoint=0.05, NO costs $0.95/share
-            # Both sides need to meet min_size, so capital must cover the expensive side
             expensive_side = max(midpoint, 1.0 - midpoint)
             capital_needed = market.min_size * expensive_side * 2 * 1.2
 
             if capital_needed > 0 and remaining_capital >= capital_needed:
                 allocated_markets.append((market, capital_needed))
                 remaining_capital -= capital_needed
-
-            # Cap at max_markets to avoid opening too many even if capital allows
-            if len(allocated_markets) >= self._config.max_markets:
-                break
+                new_count += 1
 
         desired_ids = {m[0].condition_id for m in allocated_markets}
 
-        logger.debug(
+        logger.info(
             "dynamic_capital_allocation",
             total_available=round(total_available, 2),
             in_use=round(capital_in_use, 2),
-            markets_allocated=len(allocated_markets),
+            existing_positions=len(existing_ids),
+            new_markets=new_count,
+            total_allocated=len(allocated_markets),
             capital_remaining=round(remaining_capital, 2),
-            total_allocated=round(capital_in_use + (total_available - remaining_capital), 2),
         )
 
         # Check adverse selection — abandon markets with high loss ratio
