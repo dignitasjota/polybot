@@ -1156,7 +1156,14 @@ class LiquidityProvider:
         # For now, always use default spread from config (0.65 = 3¢)
         pos.current_spread_pct = 0.65
 
-        # Check if orders are missing (cancelled externally, filled, or lost)
+        # Clear dead orders: cancelled/expired orders are zombie references
+        # that block replacement. Clear them so they're treated as missing.
+        if pos.bid_order and pos.bid_order.status not in ("active", "pending"):
+            pos.bid_order = None
+        if pos.ask_order and pos.ask_order.status not in ("active", "pending"):
+            pos.ask_order = None
+
+        # Check if orders are missing (None, cancelled, filled, or lost)
         # If so, re-place them even if midpoint hasn't moved
         orders_missing = pos.bid_order is None or pos.ask_order is None
         if orders_missing:
@@ -1166,6 +1173,13 @@ class LiquidityProvider:
                 bid_missing=pos.bid_order is None,
                 ask_missing=pos.ask_order is None,
             )
+            # Cancel any surviving order before re-placing both sides
+            if pos.bid_order and pos.bid_order.status == "active":
+                await self._cancel_order(pos.bid_order)
+            if pos.ask_order and pos.ask_order.status == "active":
+                await self._cancel_order(pos.ask_order)
+            pos.bid_order = None
+            pos.ask_order = None
             pos.midpoint = new_midpoint
             await self._place_quotes(pos)
             return
@@ -1176,15 +1190,13 @@ class LiquidityProvider:
 
         pos.midpoint = new_midpoint
 
-        # Cancel existing and re-place (also clears filled orders for replacement)
-        if pos.bid_order and pos.bid_order.status in ("active", "filled"):
-            if pos.bid_order.status == "active":
-                await self._cancel_order(pos.bid_order)
-            pos.bid_order = None
-        if pos.ask_order and pos.ask_order.status in ("active", "filled"):
-            if pos.ask_order.status == "active":
-                await self._cancel_order(pos.ask_order)
-            pos.ask_order = None
+        # Cancel existing active orders and re-place
+        if pos.bid_order and pos.bid_order.status == "active":
+            await self._cancel_order(pos.bid_order)
+        if pos.ask_order and pos.ask_order.status == "active":
+            await self._cancel_order(pos.ask_order)
+        pos.bid_order = None
+        pos.ask_order = None
 
         await self._place_quotes(pos)
 
@@ -1911,6 +1923,15 @@ class LiquidityProvider:
                 if order.order_id.startswith("paper-"):
                     continue
                 status = await self._check_order_status(order)
+                if order.status != "active":
+                    logger.info(
+                        "order_status_changed",
+                        order_id=order.order_id[:12],
+                        new_status=order.status,
+                        clob_status=status,
+                        side="YES" if order.is_yes else "NO",
+                        condition_id=order.condition_id[:16],
+                    )
                 # If order was filled, clear reference so a new one can be placed
                 if order.status == "filled":
                     fills_detected = True
