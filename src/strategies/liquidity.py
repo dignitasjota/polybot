@@ -107,15 +107,20 @@ class LiquidityStrategy(Strategy):
     ):
         super().__init__(config, context)
 
-        # Auto-calculate max_min_size if not set: worst case is half capital
-        # at highest likely price (~$0.70). E.g. $50 → $25/side → 25/0.70 ≈ 35
+        # Auto-calculate max_min_size if not set.
+        # With dynamic capital allocation, the provider checks actual capital
+        # before opening each market. The scanner filter just needs to be
+        # permissive enough to not block affordable markets.
+        # Capital needed per market: min_size * max(mid, 1-mid) * 2 * 1.2
+        # Worst case (mid=0.5): min_size * 1.2
+        # We allow any market we could afford with ~1/3 of total capital
+        # (the provider handles the real capital check).
         effective_max_min_size = config.max_min_size
         if effective_max_min_size <= 0:
-            half_capital = config.capital_per_market / 2
-            effective_max_min_size = int(half_capital / 0.70)  # worst-case price
+            effective_max_min_size = int(config.total_capital / 3 / 1.2)
             logger.info(
                 "auto_max_min_size",
-                capital_per_market=config.capital_per_market,
+                total_capital=config.total_capital,
                 calculated=effective_max_min_size,
             )
 
