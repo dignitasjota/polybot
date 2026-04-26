@@ -357,9 +357,15 @@ class LiquidityProvider:
         paper_modes = ("paper", "dry_run")
 
         if old_mode in paper_modes and new_mode == "live":
-            # Paper → live: just discard paper positions (they don't exist in CLOB)
+            # Paper → live: discard paper positions + cancel any orphaned CLOB orders
             count = len(self._positions)
             self._positions.clear()
+            if self._client and self._initialized:
+                try:
+                    self._client.cancel_all()
+                    logger.info("cancel_all_on_mode_transition", old=old_mode, new=new_mode)
+                except Exception as e:
+                    logger.warning("cancel_all_mode_transition_failed", error=str(e))
             logger.info("cleared_paper_positions_for_live", count=count)
 
         elif old_mode == "live" and new_mode in paper_modes:
@@ -882,6 +888,32 @@ class LiquidityProvider:
         # Check fills on all active orders BEFORE making any changes
         if not self.should_simulate:
             await self._check_active_fills()
+
+        # Orphan recovery: if we have positions but ALL orders are None,
+        # our USDC is likely locked in orphaned CLOB orders we lost track of.
+        # Cancel everything and start fresh.
+        if self._positions and not self.should_simulate and self._client:
+            all_orders_lost = all(
+                pos.bid_order is None and pos.ask_order is None
+                for pos in self._positions.values()
+            )
+            if all_orders_lost:
+                available = self._get_available_balance()
+                capital_needed = sum(pos.capital_allocated for pos in self._positions.values())
+                if available is not None and available < capital_needed * 0.5:
+                    logger.warning(
+                        "orphan_recovery_cancel_all",
+                        positions=len(self._positions),
+                        available=round(available, 2),
+                        capital_needed=round(capital_needed, 2),
+                    )
+                    try:
+                        self._client.cancel_all()
+                        # Clear all positions so they're re-opened fresh
+                        self._positions.clear()
+                        await asyncio.sleep(2)  # Give CLOB time to process
+                    except Exception as e:
+                        logger.error("orphan_recovery_failed", error=str(e))
 
         # Update available capital from Polymarket (cached every 5 minutes)
         await self._update_available_capital()
