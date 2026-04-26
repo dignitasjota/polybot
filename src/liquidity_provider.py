@@ -1100,6 +1100,16 @@ class LiquidityProvider:
         new_midpoint = self._get_midpoint(market, pos.yes_token_id)
         now = time.time()
 
+        # DEBUG: log order state at start of refresh
+        logger.info(
+            "refresh_quotes_entry",
+            condition_id=pos.condition_id[:16],
+            bid_status=pos.bid_order.status if pos.bid_order else "NONE",
+            ask_status=pos.ask_order.status if pos.ask_order else "NONE",
+            bid_id=(pos.bid_order.order_id[:12] if pos.bid_order else "NONE"),
+            ask_id=(pos.ask_order.order_id[:12] if pos.ask_order else "NONE"),
+        )
+
         # Emergency cancel: price moved >5% in <30s
         if pos.last_midpoint_time > 0 and pos.last_midpoint_value > 0:
             elapsed = now - pos.last_midpoint_time
@@ -1159,8 +1169,20 @@ class LiquidityProvider:
         # Clear dead orders: cancelled/expired orders are zombie references
         # that block replacement. Clear them so they're treated as missing.
         if pos.bid_order and pos.bid_order.status not in ("active", "pending"):
+            logger.info(
+                "clearing_zombie_bid",
+                condition_id=pos.condition_id[:16],
+                status=pos.bid_order.status,
+                order_id=pos.bid_order.order_id[:12],
+            )
             pos.bid_order = None
         if pos.ask_order and pos.ask_order.status not in ("active", "pending"):
+            logger.info(
+                "clearing_zombie_ask",
+                condition_id=pos.condition_id[:16],
+                status=pos.ask_order.status,
+                order_id=pos.ask_order.order_id[:12],
+            )
             pos.ask_order = None
 
         # Check if orders are missing (None, cancelled, filled, or lost)
@@ -1474,22 +1496,36 @@ class LiquidityProvider:
 
         # Place bid: BUY YES at bid_price
         if bid_size > 0 and not skip_bid:
-            pos.bid_order = await self._place_order(
+            bid_result = await self._place_order(
                 token_id=pos.yes_token_id,
                 price=bid_price,
                 size=bid_size,
                 is_yes=True,
                 condition_id=pos.condition_id,
             )
+            pos.bid_order = bid_result
+            logger.info(
+                "bid_order_assigned",
+                condition_id=pos.condition_id[:16],
+                order_id=bid_result.order_id[:12] if bid_result else "NONE",
+                status=bid_result.status if bid_result else "NONE",
+            )
 
         # Place ask: BUY NO at (1 - ask_price)
         if ask_size > 0 and not skip_ask:
-            pos.ask_order = await self._place_order(
+            ask_result = await self._place_order(
                 token_id=pos.no_token_id,
                 price=ask_no_price,
                 size=ask_size,
                 is_yes=False,
                 condition_id=pos.condition_id,
+            )
+            pos.ask_order = ask_result
+            logger.info(
+                "ask_order_assigned",
+                condition_id=pos.condition_id[:16],
+                order_id=ask_result.order_id[:12] if ask_result else "NONE",
+                status=ask_result.status if ask_result else "NONE",
             )
 
     async def _place_order(
