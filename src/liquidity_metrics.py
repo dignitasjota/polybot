@@ -46,6 +46,7 @@ class DailySnapshot:
     # Revenue (USDC)
     rewards_earned: float = 0.0
     spread_income: float = 0.0
+    maker_rebate: float = 0.0
 
     # Losses (USDC)
     adverse_loss: float = 0.0
@@ -63,7 +64,7 @@ class DailySnapshot:
 
     @property
     def total_gross(self) -> float:
-        return self.rewards_earned + self.spread_income
+        return self.rewards_earned + self.spread_income + self.maker_rebate
 
     @property
     def total_loss(self) -> float:
@@ -99,6 +100,7 @@ class DailySnapshot:
             "scoring_rate": round(self.scoring_rate, 3),
             "rewards_earned": round(self.rewards_earned, 2),
             "spread_income": round(self.spread_income, 2),
+            "maker_rebate": round(self.maker_rebate, 2),
             "total_gross": round(self.total_gross, 2),
             "adverse_loss": round(self.adverse_loss, 2),
             "total_loss": round(self.total_loss, 2),
@@ -154,10 +156,11 @@ class LiquidityMetrics:
     def record_order_cancelled(self):
         self._get_today().orders_cancelled += 1
 
-    def record_fill(self, adverse_amount: float = 0.0):
+    def record_fill(self, adverse_amount: float = 0.0, rebate_amount: float = 0.0):
         day = self._get_today()
         day.orders_filled += 1
         day.adverse_loss += adverse_amount
+        day.maker_rebate += rebate_amount
 
     def record_rewards(self, amount: float):
         self._get_today().rewards_earned += amount
@@ -203,6 +206,7 @@ class LiquidityMetrics:
                 "days": 0,
                 "total_rewards": 0,
                 "total_spread_income": 0,
+                "total_maker_rebate": 0,
                 "total_gross": 0,
                 "total_adverse": 0,
                 "adverse_ratio": 0,
@@ -216,7 +220,8 @@ class LiquidityMetrics:
         snaps = [self._days[d] for d in dates]
         total_rewards = sum(s.rewards_earned for s in snaps)
         total_spread = sum(s.spread_income for s in snaps)
-        total_gross = total_rewards + total_spread
+        total_rebate = sum(s.maker_rebate for s in snaps)
+        total_gross = total_rewards + total_spread + total_rebate
         total_adverse = sum(s.adverse_loss for s in snaps)
         cumulative_pnl = total_gross - total_adverse
         n_days = len(snaps)
@@ -234,6 +239,7 @@ class LiquidityMetrics:
             "days": n_days,
             "total_rewards": round(total_rewards, 2),
             "total_spread_income": round(total_spread, 2),
+            "total_maker_rebate": round(total_rebate, 2),
             "total_gross": round(total_gross, 2),
             "total_adverse": round(total_adverse, 2),
             "adverse_ratio": round(total_adverse / total_gross, 3) if total_gross > 0 else 0,

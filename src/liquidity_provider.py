@@ -83,6 +83,7 @@ class MarketPosition:
     # Inventory tracking (Phase 3)
     total_rewards_earned: float = 0.0
     total_adverse_loss: float = 0.0
+    total_maker_rebate: float = 0.0
     last_midpoint_time: float = 0.0  # For emergency cancel detection
     last_midpoint_value: float = 0.0
     abandoned: bool = False  # Marked for removal due to high adverse ratio
@@ -131,6 +132,7 @@ class MarketPosition:
             "adverse_ratio": round(self.adverse_ratio, 4),
             "total_rewards": round(self.total_rewards_earned, 2),
             "total_adverse": round(self.total_adverse_loss, 2),
+            "total_maker_rebate": round(self.total_maker_rebate, 2),
             "capital_allocated": round(self.capital_allocated, 2),
             "abandoned": self.abandoned,
         }
@@ -248,7 +250,7 @@ class LiquidityProvider:
         if not self._client:
             return None
         try:
-            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
             resp = self._client.get_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             )
@@ -437,8 +439,8 @@ class LiquidityProvider:
             return
 
         try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds
+            from py_clob_client_v2 import ClobClient
+            from py_clob_client_v2 import ApiCreds
 
             private_key = self._credentials.get_private_key()
             sig_type = self._credentials.signature_type
@@ -464,7 +466,7 @@ class LiquidityProvider:
                     signature_type=sig_type,
                     funder=funder,  # Use calculated funder for derivation too
                 )
-                creds = tmp.derive_api_key()
+                creds = tmp.create_or_derive_api_key()
                 api_key = creds.api_key
                 api_secret = creds.api_secret
                 passphrase = creds.api_passphrase
@@ -707,7 +709,7 @@ class LiquidityProvider:
         if not self.should_simulate and self._client:
             # Live mode: get real balance from Polymarket (same pattern as executor.py)
             try:
-                from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+                from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
                 resp = self._client.get_balance_allowance(
                     BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
                 )
@@ -1585,8 +1587,8 @@ class LiquidityProvider:
             return None
 
         try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
-            from py_clob_client.order_builder.constants import BUY
+            from py_clob_client_v2 import OrderArgs, OrderType
+            from py_clob_client_v2.order_builder.constants import BUY
 
             order_args = OrderArgs(
                 price=price,
@@ -1749,11 +1751,15 @@ class LiquidityProvider:
         pos.abandoned = True
 
     def record_fill(self, condition_id: str, is_yes: bool, size: float, fill_price: float):
-        """Record a fill and estimate adverse selection loss.
+        """Record a fill, estimate adverse selection loss, and calculate maker rebate.
 
         Adverse selection = price moved against us after fill.
         Estimated as: |fill_price - current_midpoint| * size
+
+        Maker rebate (May 2026): we earn a % of the taker's fee when filled.
         """
+        from src.fees import maker_rebate as calc_maker_rebate
+
         pos = self._positions.get(condition_id)
         if not pos:
             return
@@ -1772,8 +1778,13 @@ class LiquidityProvider:
         else:
             adverse = max(0, (1 - fill_price) - midpoint) * size
         pos.total_adverse_loss += adverse
+
+        # Maker rebate: we earn a % of the taker fee on each fill
+        rebate = calc_maker_rebate(fill_price, size)
+        pos.total_maker_rebate += rebate
+
         if self._metrics:
-            self._metrics.record_fill(adverse_amount=adverse)
+            self._metrics.record_fill(adverse_amount=adverse, rebate_amount=rebate)
 
         logger.info(
             "fill_recorded",
@@ -1782,6 +1793,7 @@ class LiquidityProvider:
             size=size,
             fill_price=round(fill_price, 4),
             adverse=round(adverse, 4),
+            rebate=round(rebate, 4),
             skew=round(pos.inventory_skew, 3),
         )
 
@@ -1930,8 +1942,8 @@ class LiquidityProvider:
     ):
         """Place a SELL order to exit unmatched inventory."""
         try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
-            from py_clob_client.order_builder.constants import SELL
+            from py_clob_client_v2 import OrderArgs, OrderType
+            from py_clob_client_v2.order_builder.constants import SELL
 
             order_args = OrderArgs(
                 price=price,
@@ -2100,7 +2112,8 @@ class LiquidityProvider:
             return
 
         try:
-            self._client.cancel(order.order_id)
+            from py_clob_client_v2.clob_types import OrderPayload
+            self._client.cancel_order(OrderPayload(orderID=order.order_id))
             order.status = "cancelled"
             self._total_orders_cancelled += 1
             if self._metrics:
@@ -2136,6 +2149,7 @@ class LiquidityProvider:
         active_asks = sum(1 for p in self._positions.values() if p.ask_order and p.ask_order.status == "active")
         total_rewards = sum(p.total_rewards_earned for p in self._positions.values())
         total_adverse = sum(p.total_adverse_loss for p in self._positions.values())
+        total_rebate = sum(p.total_maker_rebate for p in self._positions.values())
         total_scoring = self._orders_scoring + self._orders_not_scoring
         scoring_rate = self._orders_scoring / total_scoring if total_scoring > 0 else 0
         return {
@@ -2149,6 +2163,7 @@ class LiquidityProvider:
             "total_fills": self._total_fills,
             "total_rewards": round(total_rewards, 2),
             "total_adverse": round(total_adverse, 2),
+            "total_maker_rebate": round(total_rebate, 2),
             "adverse_ratio": round(total_adverse / total_rewards, 3) if total_rewards > 0 else 0,
             "emergency_cancels": self._emergency_cancels,
             "markets_abandoned": self._markets_abandoned,

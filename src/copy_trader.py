@@ -16,9 +16,8 @@ ACTIVITY_API = "https://data-api.polymarket.com/activity"
 GAMMA_MARKETS_API = "https://gamma-api.polymarket.com/markets"
 CLOB_MARKETS_API = "https://clob.polymarket.com/markets"
 
-# Taker fee formula: 0.003 * min(price, 1-price) * size
-FEE_RATE = 0.003
-GAS_REDEEM_USD = 0.0005
+# Polymarket fees (May 2026): category-based, formula = feeRate × p × (1-p) × shares
+from src.fees import taker_fee, taker_fee_per_share, GAS_REDEEM_USD
 
 
 @dataclass
@@ -498,8 +497,9 @@ class CopyTrader:
         if bet_size < 0.10:
             return
 
-        fee = FEE_RATE * min(trade.price, 1 - trade.price) * (bet_size / trade.price)
-        margin_net = (1.0 - trade.price) - fee / (bet_size / trade.price) - GAS_REDEEM_USD
+        shares = bet_size / trade.price if trade.price > 0 else 0
+        fee = taker_fee(trade.price, shares)
+        margin_net = (1.0 - trade.price) - taker_fee_per_share(trade.price) - GAS_REDEEM_USD
         potential_profit = bet_size * margin_net / trade.price if trade.price > 0 else 0
 
         # Build opportunity for executor
@@ -724,7 +724,7 @@ class CopyTrader:
             # Payout: shares * $1.00 = bet_size / price
             shares = bet.bet_size / bet.price if bet.price > 0 else 0
             payout = shares * 1.0
-            fee = FEE_RATE * min(bet.price, 1 - bet.price) * shares
+            fee = taker_fee(bet.price, shares)
             bet.actual_pnl = round(payout - bet.bet_size - fee - GAS_REDEEM_USD, 4)
             self._balance += bet.bet_size + bet.actual_pnl  # Return cost + profit
             self._stats["settled_wins"] += 1

@@ -17,9 +17,8 @@ _CRYPTO_NAMES = set(CRYPTO_SYMBOLS.keys()) | {
 
 logger = structlog.get_logger("polymarket.detector")
 
-# Polymarket fee: 0.003 * min(price, 1-price) * size (taker, 30bps)
-TAKER_FEE_RATE = 0.003
-GAS_REDEEM_USD = 0.004
+# Polymarket fees (May 2026): category-based, formula = feeRate × p × (1-p) × shares
+from src.fees import taker_fee, taker_fee_per_share, net_margin, GAS_REDEEM_USD
 
 
 @dataclass
@@ -278,7 +277,7 @@ class ClosingArbitrageDetector:
             cost_usd = getattr(t, "cost_usd", 0.0) or 0.0
             price = getattr(t, "price", 0.0) or 0.0
             size = getattr(t, "size", 0.0) or 0.0
-            margin_net = (1.0 - price) - (TAKER_FEE_RATE * min(price, 1.0 - price)) - GAS_REDEEM_USD if price > 0 else 0.0
+            margin_net = net_margin(price, "crypto") if price > 0 else 0.0
             opp = Opportunity(
                 timestamp=getattr(t, "created_at", 0.0) or 0.0,
                 condition_id=condition_id,
@@ -288,7 +287,7 @@ class ClosingArbitrageDetector:
                 token_price=price,
                 implied_probability=price,
                 margin_gross=1.0 - price if price > 0 else 0.0,
-                fee_estimated=TAKER_FEE_RATE * min(price, 1.0 - price) if price > 0 else 0.0,
+                fee_estimated=taker_fee_per_share(price, "crypto") if price > 0 else 0.0,
                 margin_net=margin_net,
                 depth_at_price=size,
                 resolved=False,
@@ -917,8 +916,8 @@ class ClosingArbitrageDetector:
         return round(ev, 4)
 
     def _calculate_fee(self, price: float, size: float) -> float:
-        """Calculate taker fee: 0.003 * min(price, 1-price) * size."""
-        return TAKER_FEE_RATE * min(price, 1.0 - price) * size
+        """Calculate taker fee: feeRate × p × (1-p) × shares."""
+        return taker_fee(price, size, "crypto")
 
     def _get_depth_at_best_ask(self, market: MarketState, is_yes: bool) -> float:
         """Get available size at the best ask level."""

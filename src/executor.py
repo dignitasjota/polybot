@@ -12,11 +12,11 @@ from src.detector import Opportunity
 
 logger = structlog.get_logger("polymarket.executor")
 
-# Polymarket CLOB contracts on Polygon
-CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-NEG_RISK_CTF_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+# Polymarket CLOB V2 contracts on Polygon (updated April 28, 2026)
+CTF_EXCHANGE = "0xE111180000d2663C0091e4f400237545B87B996B"
+NEG_RISK_CTF_EXCHANGE = "0xe2222d279d744050d28e00520010520000310F59"
 CONDITIONAL_TOKENS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"  # pUSD (replaces USDC.e in V2)
 
 # Order monitoring
 ORDER_CHECK_INTERVAL = 5       # seconds between order status polls
@@ -229,8 +229,8 @@ class Executor:
             return
 
         try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds
+            from py_clob_client_v2 import ClobClient
+            from py_clob_client_v2 import ApiCreds
 
             private_key = self._credentials.get_private_key()
             sig_type = self._credentials.signature_type  # 0=EOA, 1=POLY_PROXY
@@ -264,7 +264,7 @@ class Executor:
                     signature_type=sig_type,
                     funder=proxy_address,
                 )
-                creds = client_tmp.derive_api_key()
+                creds = client_tmp.create_or_derive_api_key()
                 api_key = creds.api_key
                 api_secret = creds.api_secret
                 passphrase = creds.api_passphrase
@@ -477,7 +477,7 @@ class Executor:
             # the Builder Relayer wraps and submits it from the proxy.
             # Pass chainId explicitly to avoid an extra RPC roundtrip.
             func = ctf.functions.redeemPositions(
-                Web3.to_checksum_address(USDC_ADDRESS),
+                Web3.to_checksum_address(PUSD_ADDRESS),
                 bytes.fromhex(ZERO_BYTES32[2:]),
                 bytes.fromhex(cid_hex[2:]),
                 [1, 2],
@@ -562,7 +562,7 @@ class Executor:
 
             # Build the transaction
             tx_data = ctf.functions.redeemPositions(
-                Web3.to_checksum_address(USDC_ADDRESS),
+                Web3.to_checksum_address(PUSD_ADDRESS),
                 bytes.fromhex(ZERO_BYTES32[2:]),
                 bytes.fromhex(cid_hex[2:]),
                 [1, 2],
@@ -827,7 +827,7 @@ class Executor:
         if not self._client:
             return
         try:
-            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
             resp = self._client.get_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             )
@@ -859,7 +859,7 @@ class Executor:
         if not self._client:
             return
         try:
-            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
             resp = self._client.get_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             )
@@ -1225,8 +1225,8 @@ class Executor:
         )
 
         try:
-            from py_clob_client.clob_types import OrderArgs
-            from py_clob_client.order_builder.constants import BUY
+            from py_clob_client_v2 import OrderArgs
+            from py_clob_client_v2.order_builder.constants import BUY
 
             order_args = OrderArgs(
                 price=opp.token_price,
@@ -1381,7 +1381,8 @@ class Executor:
     async def _cancel_order(self, order_id: str, trade: TradeRecord):
         """Cancel a single order and update trade record."""
         try:
-            self._client.cancel(order_id)
+            from py_clob_client_v2.clob_types import OrderPayload
+            self._client.cancel_order(OrderPayload(orderID=order_id))
             trade.status = OrderStatus.CANCELLED
             trade.error = f"Timed out after {ORDER_TIMEOUT}s"
             # Refresh real balance instead of optimistic refund

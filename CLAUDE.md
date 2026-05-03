@@ -23,6 +23,7 @@ src/
   reward_scanner.py    # RewardScanner: escanea CLOB API por mercados con rewards
   liquidity_provider.py # LiquidityProvider: market making engine (quotes, inventory, risk)
   liquidity_metrics.py  # LiquidityMetrics: daily P&L tracking y KPIs
+  fees.py              # Fees centralizadas V2: taker_fee(), maker_rebate(), por categoría
   executor.py          # Executor: ejecuta trades (paper/dry_run/live)
   market_tracker.py    # MarketTracker: estado in-memory de mercados via WebSocket
   websocket_client.py  # WebSocket a Polymarket para precios en tiempo real
@@ -67,20 +68,20 @@ Cada cuenta tiene un `execution_mode` independiente:
 |------|-------------|
 | `paper` | Simulado. No interactúa con Polymarket. Balance y trades son ficticios. |
 | `dry_run` | Inicializa el cliente CLOB, valida órdenes, pero no las envía. |
-| `live` | Trading real contra Polymarket CLOB. Usa balance USDC real. |
+| `live` | Trading real contra Polymarket CLOB V2. Usa balance pUSD real. |
 
 ### Cambio de modo (paper ↔ live)
 
 Se cambia desde el panel web (Settings). Al cambiar de modo:
 
-1. **Paper → Live**: Se inicializa el cliente CLOB con credenciales, se refresca el balance USDC real, se **resetean todas las stats y apuestas del período paper** (bets, wins, losses, P&L), y se establece el balance real como nuevo `starting_balance`. Esto garantiza una vista limpia de la operativa live.
+1. **Paper → Live**: Se inicializa el cliente CLOB V2 con credenciales, se ejecuta `cancel_all()` para liberar órdenes huérfanas, se refresca el balance pUSD real, se **resetean todas las stats y apuestas del período paper** (bets, wins, losses, P&L), y se establece el balance real como nuevo `starting_balance`. Esto garantiza una vista limpia de la operativa live.
 2. **Live → Paper**: Se resetean stats y se vuelve al `simulated_balance` del config.
 3. **Métodos de reset**: `CopyTrader.reset_stats()`, `ClosingArbitrageDetector.reset_stats()`, `Executor.reset_trades()` — limpian todo el historial y reinician contadores. Mantienen `polls`/`total_scans` para diagnóstico.
 
 ### Balance en modo live
 
-- El executor consulta `get_balance_allowance(COLLATERAL)` de la API CLOB para obtener USDC libre.
-- **USDC libre ≠ portfolio total**: solo devuelve USDC disponible para apostar, no el valor de posiciones abiertas.
+- El executor consulta `get_balance_allowance(COLLATERAL)` de la API CLOB para obtener pUSD libre (antes USDC.e, cambiado en CLOB V2).
+- **pUSD libre ≠ portfolio total**: solo devuelve pUSD disponible para apostar, no el valor de posiciones abiertas.
 - Se refresca automáticamente cada hora (`BALANCE_REFRESH_INTERVAL = 3600s`).
 - Se refresca forzosamente al cambiar a modo live.
 - Si el balance real es $0, el bot no puede colocar órdenes (el copy_trader lo bloquea con `bet_size < 0.10`).
@@ -166,7 +167,7 @@ builder_secret_env = "BUILDER_SECRET"
 builder_passphrase_env = "BUILDER_PASSPHRASE"
 ```
 
-> **IMPORTANTE**: Con MetaMask, los fondos están en el proxy de Polymarket, NO en tu wallet de MetaMask. Si en MetaMask ves $0 USDC pero en Polymarket ves saldo, es correcto — el USDC está en el proxy.
+> **IMPORTANTE**: Con MetaMask, los fondos están en el proxy de Polymarket, NO en tu wallet de MetaMask. Si en MetaMask ves $0 pero en Polymarket ves saldo, es correcto — el pUSD (antes USDC.e) está en el proxy.
 
 ---
 
@@ -208,7 +209,7 @@ builder_passphrase_env = "BUILDER_PASSPHRASE"
 
 1. El executor lee la private key desde env var (`PRIVATE_KEY` o `COPY_PRIVATE_KEY`)
 2. Intenta leer API key/secret/passphrase de env vars
-3. Si no están definidas → **auto-deriva** las API keys desde la private key usando `ClobClient.derive_api_key()`
+3. Si no están definidas → **auto-deriva** las API keys desde la private key usando `ClobClient.create_or_derive_api_key()`
 4. El `signature_type` se determina desde env var `WALLET_TYPE` (o `COPY_WALLET_TYPE` para la cuenta copy)
 
 ### Configuración en `CredentialsConfig`
@@ -414,7 +415,8 @@ Esto evita que órdenes antiguas bloqueen el capital y causen fills no esperadas
 
 **KPIs y snapshots:**
 - `LiquidityMetrics`: snapshots diarios con rollover a medianoche UTC, retención 90 días
-- Tracking: rewards (reales), adverse loss, net P&L, ROI, APY estimado
+- Tracking: rewards (reales), adverse loss, **maker rebate** (V2), net P&L, ROI, APY estimado
+- `total_gross = rewards + spread_income + maker_rebate` — el rebate se suma como ingreso
 - Panel web: P&L del día + resumen 7 días + quotes activas + botón emergency cancel
 
 ### Fase 3.5 (optional): Heartbeat, Order Scoring
@@ -444,7 +446,7 @@ Esto evita que órdenes antiguas bloqueen el capital y causen fills no esperadas
 | scan_interval | 300 | Segundos entre scans de mercados con rewards |
 | min_daily_rate | 1.0 | Mínimo $/día para considerar un mercado |
 | min_reward_per_dollar | 0.001 | Ratio mínimo reward/competencia |
-| capital_per_market | 34.0 | USDC a asignar por mercado |
+| capital_per_market | 34.0 | pUSD a asignar por mercado |
 | max_markets | 3 | Máximo mercados cotizando simultáneamente |
 | quote_refresh_s | 30 | Refresh cada 30s para reaccionar rápido |
 | spread_pct_of_max | 0.65 | 65% de max_spread → 3¢ del midpoint |
@@ -654,19 +656,32 @@ environment:
 
 El `Executor` maneja tres modos y es responsable de:
 - **Paper**: Registra trades ficticios sin interactuar con Polymarket
-- **Dry Run**: Inicializa cliente CLOB, valida órdenes, no las envía
-- **Live**: Coloca órdenes reales contra Polymarket CLOB
+- **Dry Run**: Inicializa cliente CLOB V2, valida órdenes, no las envía
+- **Live**: Coloca órdenes reales contra Polymarket CLOB V2
+
+### CLOB V2 (desde 28 abril 2026)
+
+El bot usa `py-clob-client-v2` (paquete V2). Cambios clave respecto a V1:
+- **SDK**: `from py_clob_client_v2 import ClobClient, OrderArgs, OrderType`
+- **API keys**: `client.create_or_derive_api_key()` (antes `derive_api_key()`)
+- **Cancelar orden**: `client.cancel_order(OrderPayload(orderID=id))` (antes `client.cancel(id)`)
+- **Cancelar todo**: `client.cancel_all()` (sin cambios)
+- **Collateral**: pUSD reemplaza USDC.e como colateral
+- **Contratos V2**: CTF Exchange `0xE111...`, Neg Risk `0xe222...`
+- **Orden struct V2**: elimina `nonce`/`feeRateBps`/`taker`, añade `timestamp`/`metadata`/`builder` (opcionales)
+- `create_order(OrderArgs(...))` sigue funcionando sin `PartialCreateOrderOptions` (es opcional)
+- `post_order(signed, OrderType.GTC, post_only=True)` — misma firma
 
 ### Flujo de una orden live
 1. Risk checks: kill_switch, daily loss, max concurrent, balance suficiente
 2. Resuelve `token_id` (YES/NO) del mercado
-3. Crea y firma la orden con `ClobClient.create_order()`
-4. Envía con `ClobClient.post_order()`
+3. Crea y firma la orden con `ClobClient.create_order(OrderArgs(...))`
+4. Envía con `ClobClient.post_order(signed)`
 5. Monitorea estado (polling cada 5s) y cancela si no se llena en 30s
 6. Resta coste del balance optimistamente al colocar
 
 ### Balance
-- `_live_balance`: USDC libre consultado via API (None en paper)
+- `_live_balance`: pUSD libre consultado via `get_balance_allowance(COLLATERAL)` (None en paper)
 - Se refresca cada hora automáticamente y al cambiar a modo live
 - En live, si `suggested_bet > _live_balance` → trade rechazado (`insufficient_balance`)
 - El dashboard muestra el balance real en live, o el simulado en paper
@@ -682,15 +697,58 @@ El `Executor` maneja tres modos y es responsable de:
 
 ---
 
-## Fees de Polymarket
+## Fees de Polymarket (V2 — Mayo 2026)
 
-- **Taker fee**: 0.3% * min(price, 1-price) * size
-- **Gas redeem**: ~$0.0005 por redención
-- **Margen neto**: (1.0 - precio) - fee_per_share - gas_redeem
+Fees por categoría. Makers nunca pagan fees. Takers pagan: `feeRate × shares × p × (1-p)`.
+
+| Categoría | Taker feeRate | Maker Rebate |
+|-----------|--------------|-------------|
+| Crypto | 0.072 | 20% |
+| Sports | 0.03 | 25% |
+| Finance/Politics/Tech/Mentions | 0.04 | 25% |
+| Economics/Culture/Weather/Other | 0.05 | 25% |
+| Geopolitics | 0.0 (gratis) | — |
+
+- **Fórmula taker**: `feeRate × shares × price × (1 - price)` — máximo a p=0.50, decrece hacia extremos
+- **Maker rebate**: % del fee del taker devuelto al maker cuando es filled
+- **Gas redeem**: ~$0.004 por redención
+- **Módulo centralizado**: `src/fees.py` contiene `taker_fee()`, `taker_fee_per_share()`, `maker_rebate()`, `net_margin()`
+
+Ejemplos (crypto, 100 shares):
+| Precio | Fee/share | Fee total | Maker rebate |
+|--------|----------|-----------|-------------|
+| 0.97 | $0.0021 | $0.21 | $0.04 |
+| 0.50 | $0.0180 | $1.80 | $0.36 |
+| 0.30 | $0.0151 | $1.51 | $0.30 |
 
 ---
 
-## Cambios recientes y problemas resueltos (Abril 2026)
+## Cambios recientes y problemas resueltos (Abril-Mayo 2026)
+
+### Migración a CLOB V2 (Mayo 2026)
+
+Polymarket lanzó CLOB V2 el 28 de abril de 2026. Cambios aplicados:
+
+| Aspecto | V1 (antes) | V2 (ahora) |
+|---------|-----------|-----------|
+| **SDK pip** | `py-clob-client>=0.15` | `py-clob-client-v2>=1.0.0` |
+| **Import** | `from py_clob_client.client import ClobClient` | `from py_clob_client_v2 import ClobClient` |
+| **Derivar keys** | `derive_api_key()` | `create_or_derive_api_key()` |
+| **Cancel orden** | `cancel(order_id)` | `cancel_order(OrderPayload(orderID=id))` |
+| **Collateral** | USDC.e `0x2791Bca1f...` | pUSD `0xC011a7E1...` |
+| **CTF Exchange** | `0x4bFb41d5B...` | `0xE11118000...` |
+| **Fees** | `0.003 × min(p, 1-p)` uniforme | `feeRate × p × (1-p)` por categoría |
+
+**Sin cambios**: `ClobClient()` init params, `post_order()` con `OrderType.GTC` y `post_only`, `cancel_all()`, `get_balance_allowance()`, `OrderArgs`, WebSocket, Gamma API.
+
+### Actualización de fees (Mayo 2026)
+
+Nuevo sistema de fees por categoría + maker rebates. Implementado en `src/fees.py`:
+- Crypto: feeRate=0.072, rebate=20%
+- Finance/Politics: feeRate=0.04, rebate=25%
+- Geopolitics: 0% fees
+- `LiquidityMetrics` ahora trackea `maker_rebate` como ingreso adicional
+- Impacto: directional a p=0.97 sigue rentable ($0.002/share vs margen $0.024); Up/Down a p=0.50 necesita WR>55%
 
 ### Problema: 0 órdenes colocadas después del despliegue
 **Causa**: Los mercados top (Dota 2 esports) tenían `min_size=250`, pero con capital de $50/mercado solo podíamos hacer ~41 shares.
