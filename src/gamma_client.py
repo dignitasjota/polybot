@@ -78,21 +78,21 @@ class GammaClient:
     ) -> list[Market]:
         """Fetch active markets closing within max_time_to_resolution.
 
-        Uses end_date_min + ascending order to get soonest-closing markets first,
-        avoiding pagination through thousands of irrelevant markets.
+        Uses keyset pagination (GET /markets/keyset) with cursor-based paging.
+        Orders by endDate ascending to get soonest-closing markets first.
         Filters: enableOrderBook=true, has liquidity (price > 0).
         """
         session = await self._get_session()
         markets: list[Market] = []
         skipped_no_book = 0
         skipped_no_liquidity = 0
-        offset = 0
-        page_size = 100
+        page_size = min(100, max_results)
         now = datetime.now(timezone.utc)
         end_max = now + max_time_to_resolution
+        after_cursor: str | None = None
 
         while len(markets) < max_results:
-            params = {
+            params: dict[str, str] = {
                 "active": "true",
                 "closed": "false",
                 "end_date_min": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -100,14 +100,15 @@ class GammaClient:
                 "order": "endDate",
                 "ascending": "true",
                 "limit": str(page_size),
-                "offset": str(offset),
             }
             if tag:
                 params["tag"] = tag
+            if after_cursor:
+                params["after_cursor"] = after_cursor
 
             try:
                 async with session.get(
-                    f"{GAMMA_API_URL}/markets", params=params
+                    f"{GAMMA_API_URL}/markets/keyset", params=params
                 ) as resp:
                     if resp.status != 200:
                         logger.warning(
@@ -119,10 +120,11 @@ class GammaClient:
 
                     data = await resp.json()
 
-                    if not data:
+                    items = data.get("markets", []) if isinstance(data, dict) else data
+                    if not items:
                         break
 
-                    for item in data:
+                    for item in items:
                         market = self._parse_market(item)
                         if market is None:
                             continue
@@ -136,9 +138,11 @@ class GammaClient:
                             continue
                         markets.append(market)
 
-                    if len(data) < page_size:
+                    # Keyset pagination: next_cursor absent = last page
+                    next_cursor = data.get("next_cursor") if isinstance(data, dict) else None
+                    if not next_cursor:
                         break
-                    offset += page_size
+                    after_cursor = next_cursor
 
             except aiohttp.ClientError as e:
                 logger.error("gamma_api_connection_error", error=str(e))
