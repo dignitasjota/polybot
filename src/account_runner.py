@@ -766,6 +766,10 @@ class AccountRunner:
             strat = self.strategies["completeness"]
             if hasattr(strat, "export_full_report"):
                 return strat.export_full_report()
+        if "weather" in self.strategies:
+            strat = self.strategies["weather"]
+            if hasattr(strat, "export_full_report"):
+                return strat.export_full_report()
         # Legacy fallback
         if self.detector:
             return self.detector.export_full_report()
