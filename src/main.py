@@ -86,22 +86,42 @@ class Bot:
         from src.db import init_db
         await init_db()
 
-        # Start all account runners
+        has_directional = any(a.strategy_type == "directional" for a in self.accounts)
+
+        # Build task list — web server starts FIRST, before slow HTTP init
+        tasks = [
+            self._run_web_server(),
+            self._run_init_and_loops(has_directional),
+        ]
+
+        await asyncio.gather(*tasks)
+
+    async def _run_init_and_loops(self, has_directional: bool):
+        """Initialize accounts and start background loops.
+
+        Runs after the web server is already listening, so slow HTTP calls
+        (reward scanner, Gamma API) don't block the panel.
+        """
+        # Start all account runners (may do HTTP: reward scanner, etc.)
         for acc in self.accounts:
-            await acc.start()
+            try:
+                await acc.start()
+            except Exception as e:
+                self.log.error("account_start_error", account=acc.name, error=str(e))
 
         # Initial market discovery (for directional accounts)
-        has_directional = any(a.strategy_type == "directional" for a in self.accounts)
         if has_directional:
-            await self._discover_markets()
+            try:
+                await self._discover_markets()
+            except Exception as e:
+                self.log.error("initial_discover_error", error=str(e))
 
             if not self.tracker.all_token_ids:
                 self.log.warning("no_markets_found", msg="No markets match criteria, will retry...")
 
-        # Build task list
+        # Background loops
         tasks = [
             self._run_stats_reporter(),
-            self._run_web_server(),
             self._run_snapshot_loop(),   # Fase 10: periodic stats snapshots
             self._run_cleanup_loop(),    # Fase 10: monthly data cleanup
             self._run_backup_loop(),     # Fase 13: DB backups every 6h
