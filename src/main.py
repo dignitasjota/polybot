@@ -360,6 +360,7 @@ class Bot:
                 yes_token_id=market.yes_token_id,
                 no_token_id=market.no_token_id,
                 end_date=market.end_date,
+                tags=market.tags,
             )
             new_count += 1
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json as json_lib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -30,6 +30,7 @@ class Market:
     no_price: float
     resolved: bool = False
     winning_token_id: str = ""
+    tags: list[str] = field(default_factory=list)
 
     @property
     def best_token_price(self) -> float:
@@ -305,6 +306,16 @@ class GammaClient:
             if isinstance(enable_order_book, str):
                 enable_order_book = enable_order_book.lower() == "true"
 
+            # Parse tags (Gamma returns "tags" as list of dicts with "label" or as strings)
+            raw_tags = data.get("tags", [])
+            tags = []
+            if isinstance(raw_tags, list):
+                for t in raw_tags:
+                    if isinstance(t, str):
+                        tags.append(t.lower())
+                    elif isinstance(t, dict):
+                        tags.append(t.get("label", t.get("slug", "")).lower())
+
             return Market(
                 condition_id=data.get("conditionId", ""),
                 question=data.get("question", ""),
@@ -317,6 +328,7 @@ class GammaClient:
                 enable_order_book=enable_order_book,
                 yes_price=yes_price,
                 no_price=no_price,
+                tags=tags,
             )
         except (KeyError, ValueError, TypeError, json_lib.JSONDecodeError) as e:
             logger.debug("gamma_parse_error", error=str(e), data_keys=list(data.keys()))

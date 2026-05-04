@@ -34,6 +34,7 @@ class MockMarketState:
     asks_no: list = field(default_factory=lambda: [MockPriceLevel(0.50, 100)])
     resolved: bool = False
     is_stale: bool = False
+    tags: list = field(default_factory=list)
 
 
 @dataclass
@@ -355,3 +356,52 @@ def test_large_gap_geopolitics_profit():
     # Total profit for 100 shares (capped by max_cost)
     total = opp.net_profit_per_share * opp.max_shares
     assert total > 10  # Should be very profitable
+
+
+# ── Tests: Auto-detect category from tags ──────────────────────────
+
+
+def test_category_auto_detected_from_tags():
+    """Market with tags should auto-detect fee category instead of using config default."""
+    # Gap of $0.01 — too small for crypto (fee ~$0.036) but enough for geopolitics (0%)
+    market = MockMarketState(
+        best_ask_yes=0.495, best_ask_no=0.495,
+        tags=["geopolitics"],
+    )
+    # Config says crypto, but tags say geopolitics → should use geopolitics fees
+    config = MockConfig(category="crypto")
+    scanner = CompletenessScanner(config, MockTracker([market]))
+    opp = scanner._evaluate_market(market)
+
+    assert opp is not None  # Would be None with crypto fees
+    assert opp.category == "geopolitics"
+    assert opp.net_profit_per_share == pytest.approx(0.01 - GAS_REDEEM_USD, abs=0.001)
+
+
+def test_category_falls_back_to_config():
+    """Market without tags should use config category."""
+    market = MockMarketState(
+        best_ask_yes=0.45, best_ask_no=0.45,
+        tags=[],
+    )
+    config = MockConfig(category="crypto")
+    scanner = CompletenessScanner(config, MockTracker([market]))
+    opp = scanner._evaluate_market(market)
+
+    assert opp is not None
+    assert opp.category == "crypto"
+
+
+def test_sports_tag_detected():
+    """Sports markets should use lower fee rate."""
+    # Gap of $0.02 — not enough for crypto (0.036) but enough for sports (0.015)
+    market = MockMarketState(
+        best_ask_yes=0.49, best_ask_no=0.49,
+        tags=["sports", "nba"],
+    )
+    config = MockConfig(category="crypto")
+    scanner = CompletenessScanner(config, MockTracker([market]))
+    opp = scanner._evaluate_market(market)
+
+    assert opp is not None
+    assert opp.category == "sports"

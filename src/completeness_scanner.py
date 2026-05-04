@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from src.fees import GAS_REDEEM_USD, taker_fee, TAKER_FEE_RATES, DEFAULT_CATEGORY
+from src.fees import GAS_REDEEM_USD, taker_fee, TAKER_FEE_RATES, DEFAULT_CATEGORY, category_from_tags
 
 if TYPE_CHECKING:
     from src.config import CredentialsConfig
@@ -265,6 +265,7 @@ class CompletenessScanner:
                     net_profit=round(opp.net_profit_per_share, 4),
                     max_shares=round(opp.max_shares, 2),
                     total_profit=round(opp.net_profit_per_share * opp.max_shares, 4),
+                    category=opp.category,
                 )
                 await self._execute_arb(opp)
 
@@ -309,7 +310,11 @@ class CompletenessScanner:
             return None  # No arb (sum >= 1.0)
 
         # Fee calculation: we're taker on all buys
-        category = self._config.category
+        # Auto-detect category from market tags, fallback to config default
+        if hasattr(market, 'tags') and market.tags:
+            category = category_from_tags(market.tags)
+        else:
+            category = self._config.category
         total_fees_per_share = sum(
             self._fee_per_share(p, category) for p in prices
         )
@@ -563,6 +568,7 @@ class CompletenessScanner:
                 gap=round(opp.gap, 4),
                 net_profit=round(opp.net_profit_per_share, 4),
                 max_shares=round(opp.max_shares, 2),
+                category=opp.category,
             )
             await self._execute_arb(opp)
 

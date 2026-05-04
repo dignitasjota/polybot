@@ -49,6 +49,9 @@ class MarketState:
     resolved: bool = False
     winning_token_id: str = ""
 
+    # Metadata
+    tags: list[str] = field(default_factory=list)
+
     @property
     def hours_to_resolution(self) -> float | None:
         """Hours remaining until market resolution."""
@@ -94,6 +97,7 @@ class MarketTracker:
         yes_token_id: str,
         no_token_id: str,
         end_date: datetime | None = None,
+        tags: list[str] | None = None,
     ) -> MarketState:
         state = MarketState(
             condition_id=condition_id,
@@ -101,6 +105,7 @@ class MarketTracker:
             yes_token_id=yes_token_id,
             no_token_id=no_token_id,
             end_date=end_date,
+            tags=tags or [],
         )
         self._markets[yes_token_id] = state
         self._markets[no_token_id] = state

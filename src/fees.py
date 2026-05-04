@@ -76,6 +76,33 @@ def maker_rebate(price: float, shares: float, category: str = "crypto") -> float
     return fee * rebate_rate
 
 
+def category_from_tags(tags: list[str]) -> str:
+    """Determine fee category from market tags.
+
+    Polymarket tags map to fee categories. First matching tag wins.
+    """
+    for tag in tags:
+        tag = tag.lower()
+        if tag in TAKER_FEE_RATES:
+            return tag
+        # Common tag aliases
+        if tag in ("geopolitical",):
+            return "geopolitics"
+        if tag in ("political", "elections"):
+            return "politics"
+        if tag in ("technology", "ai"):
+            return "tech"
+        if tag in ("financial", "markets"):
+            return "finance"
+        if tag in ("economic",):
+            return "economics"
+        if tag in ("sport", "nfl", "nba", "mlb", "soccer", "football"):
+            return "sports"
+        if tag in ("cryptocurrency", "bitcoin", "ethereum", "defi"):
+            return "crypto"
+    return DEFAULT_CATEGORY
+
+
 def net_margin(price: float, category: str = "crypto") -> float:
     """Net margin per share after fees and gas: (1-p) - fee_per_share - gas."""
     return (1.0 - price) - taker_fee_per_share(price, category) - GAS_REDEEM_USD
