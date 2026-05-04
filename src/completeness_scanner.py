@@ -243,9 +243,11 @@ class CompletenessScanner:
         total_markets = 0
         skipped_resolved = 0
         skipped_no_data = 0
+        skipped_no_asks = 0
         skipped_cooldown = 0
         evaluated = 0
-        best_gap = -1.0  # Track closest gap for diagnostics
+        best_gap = -99.0  # Track closest to gap (negative = sum > 1.0)
+        best_gap_question = ""
 
         for market in self._tracker.all_markets:
             if market.condition_id in seen_conditions:
@@ -259,11 +261,20 @@ class CompletenessScanner:
                 continue
 
             # Skip markets with no price data (never received WS update)
-            # Use relaxed staleness: any prior update is OK for completeness
-            # (the periodic scan itself catches gaps; ultra-fresh data not required)
             if market.last_update == 0:
                 skipped_no_data += 1
                 continue
+
+            # Skip markets without valid asks on both sides
+            if market.best_ask_yes <= 0 or market.best_ask_no <= 0:
+                skipped_no_asks += 1
+                continue
+
+            # Track raw gap for diagnostics (before cooldown/filters)
+            raw_gap = 1.0 - market.best_ask_yes - market.best_ask_no
+            if raw_gap > best_gap:
+                best_gap = raw_gap
+                best_gap_question = market.question[:50]
 
             # Cooldown check
             last_attempt = self._cooldown.get(market.condition_id, 0)
@@ -273,22 +284,19 @@ class CompletenessScanner:
 
             evaluated += 1
             opp = self._evaluate_market(market)
-            if opp:
-                if opp.gap > best_gap:
-                    best_gap = opp.gap
-                if opp.net_profit_per_share >= self._config.min_profit_per_share:
-                    self._opportunities_found += 1
-                    logger.info(
-                        "arb_opportunity_detected",
-                        condition_id=market.condition_id[:16],
-                        question=market.question[:50],
-                        gap=round(opp.gap, 4),
-                        net_profit=round(opp.net_profit_per_share, 4),
-                        max_shares=round(opp.max_shares, 2),
-                        total_profit=round(opp.net_profit_per_share * opp.max_shares, 4),
-                        category=opp.category,
-                    )
-                    await self._execute_arb(opp)
+            if opp and opp.net_profit_per_share >= self._config.min_profit_per_share:
+                self._opportunities_found += 1
+                logger.info(
+                    "arb_opportunity_detected",
+                    condition_id=market.condition_id[:16],
+                    question=market.question[:50],
+                    gap=round(opp.gap, 4),
+                    net_profit=round(opp.net_profit_per_share, 4),
+                    max_shares=round(opp.max_shares, 2),
+                    total_profit=round(opp.net_profit_per_share * opp.max_shares, 4),
+                    category=opp.category,
+                )
+                await self._execute_arb(opp)
 
         # Periodic diagnostic log (every 20 scans)
         if self._total_scans % 20 == 1:
@@ -296,10 +304,12 @@ class CompletenessScanner:
                 "completeness_scan_diag",
                 total_markets=total_markets,
                 skipped_no_data=skipped_no_data,
+                skipped_no_asks=skipped_no_asks,
                 skipped_resolved=skipped_resolved,
                 skipped_cooldown=skipped_cooldown,
                 evaluated=evaluated,
-                best_gap=round(best_gap, 5) if best_gap >= 0 else "none",
+                best_gap=round(best_gap, 5) if best_gap > -99 else "none",
+                best_gap_question=best_gap_question,
                 opportunities=self._opportunities_found,
             )
 
