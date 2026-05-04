@@ -26,6 +26,7 @@ from src.market_tracker import MarketTracker
 from src.strategies.base import AccountContext, PAPER_DAILY_TRADE_CAP, Strategy
 from src.strategies.copy_trade import CopyTradeConfig, CopyTradeStrategy
 from src.strategies.directional import DirectionalConfig, DirectionalStrategy
+from src.strategies.completeness import CompletenessConfig, CompletenessStrategy
 from src.strategies.liquidity import LiquidityConfig, LiquidityStrategy
 from src.wallet_scanner import WalletScanner
 from src.websocket_client import WebSocketClient
@@ -116,6 +117,11 @@ class AccountRunner:
                 self._init_copy_trade(account, strat_mode, strat_raw)
             elif strat_name == "liquidity":
                 self._init_liquidity(strat_mode, strat_raw)
+            elif strat_name == "completeness":
+                self._init_completeness(
+                    strat_mode, strat_raw,
+                    shared_tracker, shared_ws, shared_gamma, ws_config,
+                )
 
         self._running = False
         self._data_config = data
@@ -168,6 +174,36 @@ class AccountRunner:
             tracker=self.tracker,
         )
         self.strategies["liquidity"] = lstrat
+
+    def _init_completeness(
+        self, mode_str: str, strat_raw: dict,
+        shared_tracker=None, shared_ws=None, shared_gamma=None, ws_config=None,
+    ):
+        """Create completeness arbitrage strategy.
+
+        Shares MarketTracker/WebSocket with directional if available.
+        If running standalone, creates its own infrastructure.
+        """
+        # Use existing tracker or shared one, create if neither exists
+        if not self.tracker:
+            if shared_tracker:
+                self.tracker = shared_tracker
+                self.ws_client = shared_ws
+                self.gamma = shared_gamma
+            else:
+                self.tracker = MarketTracker()
+                self.ws_client = WebSocketClient(ws_config, self.tracker) if ws_config else None
+                self.gamma = GammaClient()
+                self._owns_infra = True
+
+        ccfg = CompletenessConfig.from_dict(strat_raw, mode=mode_str)
+        cstrat = CompletenessStrategy(
+            ccfg,
+            self.context,
+            tracker=self.tracker,
+            credentials=self.account.credentials,
+        )
+        self.strategies["completeness"] = cstrat
 
     def _init_copy_trade(self, account: AccountConfig, mode_str: str, strat_raw: dict):
         """Create copy-trade strategy."""
@@ -295,9 +331,20 @@ class AccountRunner:
         )
         det.on_redeem(self.executor.redeem_position)
 
-        # WebSocket → detector (price updates trigger checks)
+        # WebSocket → detector + completeness (price updates trigger checks)
         if self.ws_client:
-            self.ws_client.on_opportunity(det.check)
+            # Chain completeness scanner if present (same price updates)
+            comp_strat = self.strategies.get("completeness")
+            if comp_strat and isinstance(comp_strat, CompletenessStrategy):
+                comp_check = comp_strat.scanner.check
+
+                async def _ws_dispatch(token_id: str = "", event_type: str = ""):
+                    await det.check(token_id, event_type)
+                    await comp_check(token_id, event_type)
+
+                self.ws_client.on_opportunity(_ws_dispatch)
+            else:
+                self.ws_client.on_opportunity(det.check)
 
         # Executor → detector callbacks (balance sync, order tracking)
         self.executor.on_order_confirmed(det._on_executor_order_confirmed)

@@ -164,7 +164,36 @@ builder_key_env = "BUILDER_API_KEY"
 builder_secret_env = "BUILDER_SECRET"
 builder_passphrase_env = "BUILDER_PASSPHRASE"
 
-# Cuenta 2: Copy-trading (paper trading para evaluar rentabilidad)
+# Cuenta 2: Completeness Arbitrage (compra YES+NO cuando suma < $1.00)
+[[accounts]]
+name = "completeness_arb"
+enabled = true
+strategy_type = "completeness"
+execution_mode = "paper"  # Cambiar a "live" cuando directional esté en live
+
+[accounts.credentials]
+private_key_env = "PRIVATE_KEY"
+api_key_env = "POLYMARKET_API_KEY"
+api_secret_env = "POLYMARKET_SECRET"
+passphrase_env = "POLYMARKET_PASSPHRASE"
+signature_type_env = "WALLET_TYPE"
+proxy_address_env = "POLYMARKET_PROXY_ADDRESS"
+builder_key_env = "BUILDER_API_KEY"
+builder_secret_env = "BUILDER_SECRET"
+builder_passphrase_env = "BUILDER_PASSPHRASE"
+
+[accounts.completeness]
+scan_interval = 5                    # Cada 5 segundos (gaps son fugaces)
+min_profit_per_share = 0.005         # Mínimo $0.005/share neto ($0.50 por 100 shares)
+min_shares = 5                       # Mínimo 5 shares para ejecutar
+max_cost_per_trade = 50.0            # Máximo $50 por trade
+cooldown_s = 30                      # 30s antes de reintentar mismo mercado
+category = "crypto"                  # Categoría de fees (crypto = 0.072)
+
+[accounts.risk]
+simulated_balance = 500.0
+
+# Cuenta 3: Copy-trading (paper trading para evaluar rentabilidad)
 [[accounts]]
 name = "copy_vidarx"
 enabled = true

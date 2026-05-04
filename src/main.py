@@ -51,9 +51,9 @@ class Bot:
                 strategy=self.config.strategy,
                 data=self.config.data,
                 ws_config=self.config.websocket,
-                shared_tracker=self.tracker if acc_cfg.strategy_type == "directional" else None,
-                shared_ws=self.ws_client if acc_cfg.strategy_type == "directional" else None,
-                shared_gamma=self.gamma if acc_cfg.strategy_type == "directional" else None,
+                shared_tracker=self.tracker if acc_cfg.strategy_type in ("directional", "completeness") else None,
+                shared_ws=self.ws_client if acc_cfg.strategy_type in ("directional", "completeness") else None,
+                shared_gamma=self.gamma if acc_cfg.strategy_type in ("directional", "completeness") else None,
             )
             self.accounts.append(runner)
 

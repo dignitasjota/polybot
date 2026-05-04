@@ -187,6 +187,7 @@ class LiquidityProvider:
         self._started_at: float = 0.0
         self._emergency_cancels = 0
         self._markets_abandoned = 0
+        self._ghost_removals = 0  # Orders silently removed from CLOB (ghost fill attack defense)
 
         # Auto-redeem callback: called when matched pairs detected
         # signature: async callback(condition_id: str) -> bool
@@ -2019,6 +2020,13 @@ class LiquidityProvider:
                         pos.bid_order = None
                     else:
                         pos.ask_order = None
+                # Ghost fill defense: if order was silently removed from CLOB,
+                # clear reference immediately so _refresh_quotes replaces it
+                elif order.status == "cancelled":
+                    if order.is_yes:
+                        pos.bid_order = None
+                    else:
+                        pos.ask_order = None
 
         # If any fills were detected, update capital (balance likely changed)
         if fills_detected:
@@ -2031,6 +2039,11 @@ class LiquidityProvider:
 
         Returns the order status string (MATCHED, LIVE, CANCELLED, etc.)
         and records any fills detected.
+
+        Ghost fill defense: if the API returns no data for an order we
+        believe is active, the order was silently removed from the book
+        (e.g. by the ghost fill attack described in the PANews article).
+        We mark it as cancelled so the refresh cycle replaces it.
         """
         if not self._client or order.order_id.startswith("paper-"):
             return order.status
@@ -2038,7 +2051,20 @@ class LiquidityProvider:
         try:
             order_data = self._client.get_order(order.order_id)
             if not order_data:
-                return order.status
+                # Ghost fill defense: order vanished from CLOB without
+                # us cancelling it. Mark as cancelled so it gets replaced.
+                if order.status == "active":
+                    logger.warning(
+                        "ghost_order_detected",
+                        order_id=order.order_id[:12],
+                        side="YES" if order.is_yes else "NO",
+                        condition_id=order.condition_id[:16],
+                        price=order.price,
+                        action="marking_cancelled_for_replacement",
+                    )
+                    order.status = "cancelled"
+                    self._ghost_removals += 1
+                return "CANCELLED"
 
             status = (order_data.get("status", "") or "").upper()
             size_matched = float(order_data.get("size_matched", 0) or 0)
@@ -2064,6 +2090,17 @@ class LiquidityProvider:
                 return "MATCHED"
 
             if status in ("CANCELLED", "EXPIRED"):
+                # Order was removed by exchange (could be ghost attack or normal expiry)
+                if order.status == "active":
+                    logger.warning(
+                        "ghost_order_detected",
+                        order_id=order.order_id[:12],
+                        side="YES" if order.is_yes else "NO",
+                        condition_id=order.condition_id[:16],
+                        clob_status=status,
+                        action="marking_cancelled_for_replacement",
+                    )
+                    self._ghost_removals += 1
                 order.status = "cancelled"
                 return status
 
@@ -2166,6 +2203,7 @@ class LiquidityProvider:
             "total_maker_rebate": round(total_rebate, 2),
             "adverse_ratio": round(total_adverse / total_rewards, 3) if total_rewards > 0 else 0,
             "emergency_cancels": self._emergency_cancels,
+            "ghost_removals": self._ghost_removals,
             "markets_abandoned": self._markets_abandoned,
             "total_redeems": self._total_redeems,
             "total_auto_exits": self._total_auto_exits,

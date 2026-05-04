@@ -2,9 +2,10 @@
 
 ## Resumen
 
-Bot de trading automatizado para Polymarket que ejecuta tres estrategias independientes en paralelo:
+Bot de trading automatizado para Polymarket que ejecuta cuatro estrategias independientes en paralelo:
 - **Directional**: detecta oportunidades de arbitraje en mercados crypto de 5 minutos
 - **Copy Trade**: copia trades de wallets rentables con sistema de roles (primary/confirmation)
+- **Completeness Arbitrage**: compra YES+NO cuando la suma < $1.00 para profit garantizado (sin riesgo)
 - **Liquidity** (Fases 1-5): market making con rewards — scanner, provider, risk management, métricas
 
 Corre en Docker (VPS Alemania), desplegado via Portainer. Soporta **paper trading** (simulado) y **live trading** (real contra Polymarket CLOB).
@@ -23,6 +24,7 @@ src/
   reward_scanner.py    # RewardScanner: escanea CLOB API por mercados con rewards
   liquidity_provider.py # LiquidityProvider: market making engine (quotes, inventory, risk)
   liquidity_metrics.py  # LiquidityMetrics: daily P&L tracking y KPIs
+  completeness_scanner.py # CompletenessScanner: arbitraje YES+NO < $1.00
   fees.py              # Fees centralizadas V2: taker_fee(), maker_rebate(), por categoría
   executor.py          # Executor: ejecuta trades (paper/dry_run/live)
   market_tracker.py    # MarketTracker: estado in-memory de mercados via WebSocket
@@ -323,7 +325,52 @@ El CopyTrader resuelve bets de dos formas:
 
 ---
 
-## Estrategia 3: Liquidity Rewards (Fases 1-5)
+## Estrategia 3: Completeness Arbitrage (YES+NO < $1.00)
+
+Arbitraje sin riesgo direccional: cuando la suma de best asks de todos los outcomes es < $1.00, comprar todos y hacer redeem por $1.00.
+
+### Flujo
+1. `MarketTracker` recibe precios via WebSocket (compartido con directional)
+2. Cada 5s (scan loop) o en cada price update (reactivo via WebSocket callback): evalúa `best_ask_YES + best_ask_NO` de cada mercado
+3. Si `1.00 - sum > fees + gas` → oportunidad detectada
+4. Compra ambos tokens en paralelo (órdenes enviadas simultáneamente)
+5. Si ambas compras exitosas → redeem inmediato = $1.00 garantizado
+6. Si una falla → cancela las demás (partial execution recovery)
+
+### Profit garantizado
+```
+profit = (1.00 × shares) - (price_YES × shares) - (price_NO × shares) - fees - gas
+```
+
+### Umbrales por categoría de fees
+| Categoría | Fee 2 lados (p≈0.50) | Gap mínimo rentable |
+|-----------|---------------------|---------------------|
+| Geopolitics | $0.000 | ~$0.005 (solo gas) |
+| Sports | ~$0.008 | ~$0.012 |
+| Crypto | ~$0.036 | ~$0.040 |
+
+### Parámetros configurables
+| Parámetro | Default | Descripción |
+|-----------|---------|-------------|
+| scan_interval | 5.0 | Segundos entre scans periódicos (gaps son fugaces) |
+| min_profit_per_share | 0.005 | Min $0.005 neto por share para ejecutar |
+| min_shares | 5.0 | Min shares para que valga la pena |
+| max_cost_per_trade | 50.0 | Máximo $ por trade |
+| cooldown_s | 30.0 | Segundos antes de reintentar mismo mercado |
+| category | crypto | Categoría de fees |
+
+### Detección reactiva
+Además del scan periódico, el scanner recibe callbacks del WebSocket cada vez que un precio cambia. Esto permite detectar gaps efímeros que desaparecen en <5 segundos. Se comparte el WebSocket dispatch con el detector directional via `_ws_dispatch`.
+
+### Ejecución atómica
+Las órdenes para ambos tokens se envían en paralelo (`asyncio.gather`). Si una falla, se cancelan las demás para evitar quedar con posición direccional no deseada.
+
+### Paper mode
+Simula todo sin ClobClient. Registra trades con profit simulado para evaluar frecuencia y rentabilidad antes de ir a live.
+
+---
+
+## Estrategia 4: Liquidity Rewards (Fases 1-5)
 
 Market making incentivado: ganar rewards de Polymarket por proveer liquidez SIN FILLS.
 
@@ -404,6 +451,7 @@ Esto evita que órdenes antiguas bloqueen el capital y causen fills no esperadas
   - Severe (>0.8): solo cotiza lado rebalanceador
 - **Adverse selection**: estimada como `|fill_price - midpoint| × size`; mercado abandonado si ratio > 0.7
 - **Emergency cancel**: si midpoint mueve >5% en <30s → cancela todo en ese mercado
+- **Ghost fill defense**: cada ciclo de refresh (30s), `_check_order_status()` verifica que cada orden activa realmente existe en el CLOB. Si `get_order()` devuelve `None` o status `CANCELLED/EXPIRED` sin que nosotros la cancelemos → la orden fue eliminada silenciosamente (ataque ghost fill). Se marca como `cancelled`, se limpia la referencia y `_refresh_quotes` la recoloca inmediatamente. Contador `ghost_removals` en stats para monitoreo.
 
 ### Fase 4: Metrics & Real Rewards Tracking
 
@@ -769,6 +817,10 @@ Nuevo sistema de fees por categoría + maker rebates. Implementado en `src/fees.
 ### Problema: No ganábamos suficientes rewards estando a 4¢ del midpoint
 **Causa**: Q-score es proporcional a 1-distancia/max_spread. A 4¢ (85%) nos ganamos poco.
 **Solución**: Bajar a 3¢ (65%) para 3× más Q-score, pero monitorear cada 30s para huir rápido si el midpoint se acerca.
+
+### Defensa: Ghost fill attack (Mayo 2026)
+**Vulnerabilidad**: Polymarket tiene un gap entre matching off-chain y settlement on-chain. Un atacante puede provocar que el match falle, y Polymarket elimina silenciosamente las órdenes de los market makers del orderbook sin notificar. El bot seguiría creyendo que tiene órdenes activas cuando en realidad fueron eliminadas (0 rewards, capital idle).
+**Solución**: `_check_order_status()` verifica en cada ciclo (30s) que cada orden activa realmente existe en el CLOB via `get_order()`. Si devuelve `None` o `CANCELLED/EXPIRED` sin que nosotros la cancelemos → log `ghost_order_detected` + incrementa `ghost_removals` + limpia referencia → `_refresh_quotes` recoloca inmediatamente. Tiempo máximo sin órdenes: ~30s (1 ciclo).
 
 ### Cambios de parámetros (antes → ahora)
 

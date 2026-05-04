@@ -277,9 +277,10 @@ class Config:
                 acc_risk = RiskConfig(**risk_raw)
 
             # Auto-detect: new multi-strategy format has "strategies" key
-            # Also handle liquidity config which goes into strategies
+            # Also handle liquidity/completeness config which goes into strategies
             strategies_raw = acc_raw.pop("strategies", None)
             liquidity_raw = acc_raw.pop("liquidity", None)
+            completeness_raw = acc_raw.pop("completeness", None)
 
             # If strategy_type is "liquidity" but no strategies dict, build one
             if not strategies_raw and acc_raw.get("strategy_type") == "liquidity" and liquidity_raw:
@@ -287,6 +288,15 @@ class Config:
                     "liquidity": {
                         "mode": acc_raw.get("execution_mode", "paper"),
                         **liquidity_raw,
+                    }
+                }
+
+            # Same for completeness
+            if not strategies_raw and acc_raw.get("strategy_type") == "completeness" and completeness_raw:
+                strategies_raw = {
+                    "completeness": {
+                        "mode": acc_raw.get("execution_mode", "paper"),
+                        **completeness_raw,
                     }
                 }
 
