@@ -87,16 +87,18 @@ class Bot:
         await init_db()
 
         has_directional = any(a.strategy_type == "directional" for a in self.accounts)
+        has_completeness = any(a.strategy_type == "completeness" for a in self.accounts)
+        has_shared_infra = has_directional or has_completeness
 
         # Build task list — web server starts FIRST, before slow HTTP init
         tasks = [
             self._run_web_server(),
-            self._run_init_and_loops(has_directional),
+            self._run_init_and_loops(has_directional, has_completeness, has_shared_infra),
         ]
 
         await asyncio.gather(*tasks)
 
-    async def _run_init_and_loops(self, has_directional: bool):
+    async def _run_init_and_loops(self, has_directional: bool, has_completeness: bool, has_shared_infra: bool):
         """Initialize accounts and start background loops.
 
         Runs after the web server is already listening, so slow HTTP calls
@@ -119,6 +121,13 @@ class Bot:
             if not self.tracker.all_token_ids:
                 self.log.warning("no_markets_found", msg="No markets match criteria, will retry...")
 
+        # Initial broad market discovery (for completeness — all categories)
+        if has_completeness:
+            try:
+                await self._discover_completeness_markets()
+            except Exception as e:
+                self.log.error("initial_completeness_discover_error", error=str(e))
+
         # Background loops
         tasks = [
             self._run_stats_reporter(),
@@ -126,14 +135,17 @@ class Bot:
             self._run_cleanup_loop(),    # Fase 10: monthly data cleanup
             self._run_backup_loop(),     # Fase 13: DB backups every 6h
         ]
-        if has_directional:
+        if has_shared_infra:
             tasks.extend([
                 self._run_websocket(),
-                self._run_gamma_poller(),
                 self._run_resolution_checker(),
                 self._run_market_cleanup(),
                 self._run_data_exporter(),
             ])
+        if has_directional:
+            tasks.append(self._run_gamma_poller())
+        if has_completeness:
+            tasks.append(self._run_completeness_gamma_poller())
 
         await asyncio.gather(*tasks)
 
@@ -384,6 +396,60 @@ class Bot:
             except Exception as e:
                 self.log.warning("ws_resubscribe_failed", error=str(e),
                                 msg="New markets won't receive WS prices until reconnect")
+
+    async def _discover_completeness_markets(self):
+        """Fetch markets from ALL categories for completeness arbitrage.
+
+        Unlike _discover_markets() (crypto-only, short time-to-resolution),
+        this fetches broadly: no tag filter, longer time horizon.
+        Completeness gaps can appear in any category, especially in low-fee
+        categories like geopolitics (0%) and sports (3%).
+        """
+        from datetime import timedelta
+
+        markets = await self.gamma.fetch_active_markets(
+            max_time_to_resolution=timedelta(hours=48),
+            max_results=200,
+            tag="",  # No tag filter — all categories
+        )
+
+        new_count = 0
+        for market in markets[:200]:
+            existing = self.tracker.get_by_condition(market.condition_id)
+            if existing:
+                continue
+
+            self.tracker.add_market(
+                condition_id=market.condition_id,
+                question=market.question,
+                yes_token_id=market.yes_token_id,
+                no_token_id=market.no_token_id,
+                end_date=market.end_date,
+                tags=market.tags,
+            )
+            new_count += 1
+
+        if new_count > 0:
+            self.log.info(
+                "completeness_markets_discovered",
+                new=new_count,
+                total=len(self.tracker.all_markets),
+            )
+            try:
+                await self.ws_client.resubscribe()
+            except Exception as e:
+                self.log.warning("ws_resubscribe_failed", error=str(e))
+
+    async def _run_completeness_gamma_poller(self):
+        """Periodically discover new markets for completeness (all categories)."""
+        while self._running:
+            await asyncio.sleep(120)  # Every 2 minutes (lightweight HTTP)
+            if not self._running:
+                break
+            try:
+                await self._discover_completeness_markets()
+            except Exception as e:
+                self.log.error("completeness_gamma_poll_error", error=str(e))
 
     async def _run_snapshot_loop(self):
         """Record stats snapshots every 5 minutes per account per strategy."""
