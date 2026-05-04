@@ -293,3 +293,38 @@ block_hide_distance_ticks = 1       # Distancia atrás del block (ticks)
 
 [accounts.risk]
 simulated_balance = 500.0           # Capital inicial para paper trading
+
+# Cuenta 5: Weather Prediction (predicción meteorológica con ensemble models)
+[[accounts]]
+name = "weather_forecast"
+enabled = true
+strategy_type = "weather"
+execution_mode = "paper"  # Cambiar a "live" después de validar
+
+[accounts.credentials]
+private_key_env = "PRIVATE_KEY"
+api_key_env = "POLYMARKET_API_KEY"
+api_secret_env = "POLYMARKET_SECRET"
+passphrase_env = "POLYMARKET_PASSPHRASE"
+signature_type_env = "WALLET_TYPE"
+proxy_address_env = "POLYMARKET_PROXY_ADDRESS"
+builder_key_env = "BUILDER_API_KEY"
+builder_secret_env = "BUILDER_SECRET"
+builder_passphrase_env = "BUILDER_PASSPHRASE"
+
+[accounts.weather]
+scan_interval = 900                  # Cada 15 min (pronósticos no cambian rápido)
+forecast_cache_ttl = 3600            # Cache forecasts 1 hora
+max_forecast_days = 3                # Solo mercados a ≤3 días (forecast fiable)
+min_edge = 0.08                      # Mínimo 8% edge para apostar
+min_forecast_prob = 0.15             # No apostar en outcomes con <15% prob (ruido)
+min_agreement = 0.20                 # Al menos 20% de los 51 modelos deben coincidir
+max_price = 0.75                     # No comprar outcomes >75¢ (poco upside)
+max_bet_per_trade = 10.0             # Conservador: $10 max por trade
+bankroll = 200.0                     # Capital total para weather
+kelly_multiplier = 0.25              # Quarter-Kelly (conservador)
+max_bets_per_cycle = 3               # Max 3 trades por ciclo de scan
+resolution_check_interval = 3600     # Verificar resoluciones cada hora
+
+[accounts.risk]
+simulated_balance = 200.0

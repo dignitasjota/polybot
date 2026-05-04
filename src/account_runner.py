@@ -28,6 +28,7 @@ from src.strategies.copy_trade import CopyTradeConfig, CopyTradeStrategy
 from src.strategies.directional import DirectionalConfig, DirectionalStrategy
 from src.strategies.completeness import CompletenessConfig, CompletenessStrategy
 from src.strategies.liquidity import LiquidityConfig, LiquidityStrategy
+from src.strategies.weather import WeatherConfig, WeatherStrategy
 from src.wallet_scanner import WalletScanner
 from src.websocket_client import WebSocketClient
 
@@ -122,6 +123,8 @@ class AccountRunner:
                     strat_mode, strat_raw,
                     shared_tracker, shared_ws, shared_gamma, ws_config,
                 )
+            elif strat_name == "weather":
+                self._init_weather(strat_mode, strat_raw)
 
         self._running = False
         self._data_config = data
@@ -204,6 +207,16 @@ class AccountRunner:
             credentials=self.account.credentials,
         )
         self.strategies["completeness"] = cstrat
+
+    def _init_weather(self, mode_str: str, strat_raw: dict):
+        """Create weather prediction strategy."""
+        wcfg = WeatherConfig.from_dict(strat_raw, mode=mode_str)
+        wstrat = WeatherStrategy(
+            wcfg,
+            self.context,
+            credentials=self.account.credentials,
+        )
+        self.strategies["weather"] = wstrat
 
     def _init_copy_trade(self, account: AccountConfig, mode_str: str, strat_raw: dict):
         """Create copy-trade strategy."""
