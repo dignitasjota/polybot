@@ -46,11 +46,6 @@ def setup_logging(cfg: LoggingConfig) -> structlog.stdlib.BoundLogger:
         structlog.processors.StackInfoRenderer(),
     ]
 
-    if cfg.format == "json":
-        renderer = structlog.processors.JSONRenderer()
-    else:
-        renderer = structlog.dev.ConsoleRenderer()
-
     structlog.configure(
         processors=[
             *shared_processors,
@@ -61,16 +56,26 @@ def setup_logging(cfg: LoggingConfig) -> structlog.stdlib.BoundLogger:
         cache_logger_on_first_use=True,
     )
 
-    # Apply structlog formatter to handlers
-    formatter = structlog.stdlib.ProcessorFormatter(
+    # IMPORTANT: Each handler MUST have its own formatter instance.
+    # Sharing a single ProcessorFormatter between handlers causes recursive
+    # rendering because format() mutates the log record in-place.
+    console_formatter = structlog.stdlib.ProcessorFormatter(
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            renderer,
+            structlog.dev.ConsoleRenderer(),
         ],
         foreign_pre_chain=shared_processors,
     )
+    console_handler.setFormatter(console_formatter)
 
-    for handler in root_logger.handlers:
-        handler.setFormatter(formatter)
+    file_renderer = structlog.processors.JSONRenderer() if cfg.format == "json" else structlog.dev.ConsoleRenderer()
+    file_formatter = structlog.stdlib.ProcessorFormatter(
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            file_renderer,
+        ],
+        foreign_pre_chain=shared_processors,
+    )
+    file_handler.setFormatter(file_formatter)
 
     return structlog.get_logger("polymarket")

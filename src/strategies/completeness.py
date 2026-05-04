@@ -86,6 +86,16 @@ class CompletenessStrategy(Strategy):
     def get_stats(self) -> dict:
         return self._scanner.get_stats()
 
+    def export_full_report(self) -> dict:
+        stats = self._scanner.get_stats()
+        return {
+            "strategy": "completeness",
+            "mode": self.config.mode,
+            "config": self.get_config(),
+            "stats": stats,
+            "recent_trades": stats.get("recent_trades", []),
+        }
+
     def get_config(self) -> dict:
         cfg = self.config
         return {

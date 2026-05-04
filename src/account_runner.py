@@ -735,6 +735,10 @@ class AccountRunner:
             strat = self.strategies["copy_trade"]
             if hasattr(strat, "export_full_report"):
                 return strat.export_full_report()
+        if "completeness" in self.strategies:
+            strat = self.strategies["completeness"]
+            if hasattr(strat, "export_full_report"):
+                return strat.export_full_report()
         # Legacy fallback
         if self.detector:
             return self.detector.export_full_report()
