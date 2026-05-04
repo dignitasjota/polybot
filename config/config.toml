@@ -264,10 +264,10 @@ min_reward_per_dollar = 0.001       # Ratio mínimo reward/competencia
 # En PAPER mode: se usa total_capital como simulado
 # El bot abre mercados en orden de preferencia hasta agotar el capital disponible.
 capital_per_market = 34.0           # Fallback si no se usa asignación dinámica (legacy)
-max_markets = 10                    # Máximo mercados (el límite real es el capital disponible)
+max_markets = 15                    # Máximo mercados (más diversificación, menos riesgo concentrado)
 total_capital = 500.0               # Fallback/inicial. En live se obtiene dinámicamente de Polymarket
-quote_refresh_s = 30                # Refresh cada 30s para reaccionar rápido a movimientos
-spread_pct_of_max = 0.65            # 65% de max_spread (3¢ del midpoint, ~3x más rewards que 85%)
+quote_refresh_s = 15                # Refresh cada 15s — más agresivo en posición, necesita reaccionar rápido
+spread_pct_of_max = 0.50            # 50% de max_spread (~2.3¢ del midpoint, +43% rewards vs 0.65)
 # max_min_size se auto-calcula: min_size * midpoint * 2 * 1.2
 
 # Fase 3: Risk & Inventory

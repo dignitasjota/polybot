@@ -92,6 +92,7 @@ class RewardScanner:
         min_reward_per_dollar: float = 0.5,
         capital_per_market: float = 50.0,
         max_min_size: float = 0.0,
+        spread_pct_of_max: float = 0.65,
     ):
         self._session = session
         self._owns_session = session is None
@@ -100,6 +101,7 @@ class RewardScanner:
         self._min_reward_per_dollar = min_reward_per_dollar
         self._capital_per_market = capital_per_market
         self._max_min_size = max_min_size
+        self._spread_pct_of_max = spread_pct_of_max
 
         self._markets: list[RewardMarket] = []
         self._last_scan: float = 0.0
@@ -315,8 +317,7 @@ class RewardScanner:
 
             # Spread penalty: wide natural spread → our orders are top-of-book
             # If market spread > our quoting distance, we're the best price → fills
-            # Our distance from mid ≈ max_spread * 0.85 (in centavos)
-            our_distance = (m.max_spread / 100.0) * 0.85  # Convert centavos to price
+            our_distance = (m.max_spread / 100.0) * self._spread_pct_of_max
             if m.spread > 0 and m.spread > our_distance * 2:
                 # Natural spread MUCH wider than our quotes → certain fills
                 spread_penalty = 5.0
@@ -340,16 +341,19 @@ class RewardScanner:
                 risk_factor = 1.0 + mid_distance
 
             # Volume factor: HIGH volume = more flow = more fills risk
-            # LOW volume = less flow = safer (opposite of before)
-            # Penaliza agresivamente el volumen alto para que el bot
-            # naturalmente seleccione mercados tranquilos sin filtro hard
+            # Graduated penalty — allows access to high-reward markets
+            # with moderate volume while still avoiding extreme flow
             volume_factor = 1.0
-            if m.volume_24h > 50000:
-                volume_factor = 0.05  # Extreme volume (50k+) → almost certain fills, avoid
+            if m.volume_24h > 100000:
+                volume_factor = 0.05  # Extreme volume (100k+) → avoid
+            elif m.volume_24h > 50000:
+                volume_factor = 0.15  # Very high volume (50k+) → risky
+            elif m.volume_24h > 20000:
+                volume_factor = 0.4   # High volume (20-50k) → moderate risk
             elif m.volume_24h > 10000:
-                volume_factor = 0.15  # Very high volume (10k+) → lots of aggressive orders
+                volume_factor = 0.6   # Moderate volume (10-20k) → acceptable
             elif m.volume_24h > 5000:
-                volume_factor = 0.4   # High volume (5-10k) → risky
+                volume_factor = 0.8   # Normal volume (5-10k) → OK
             elif m.volume_24h < 500:
                 volume_factor = 1.2   # Low volume → less fill risk, bonus
 

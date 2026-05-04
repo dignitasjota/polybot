@@ -130,6 +130,7 @@ class LiquidityStrategy(Strategy):
             min_reward_per_dollar=config.min_reward_per_dollar,
             capital_per_market=config.capital_per_market,
             max_min_size=effective_max_min_size,
+            spread_pct_of_max=config.spread_pct_of_max,
         )
         self._metrics = LiquidityMetrics(total_capital=config.total_capital)
         self._provider = LiquidityProvider(
