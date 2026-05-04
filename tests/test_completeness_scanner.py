@@ -405,3 +405,54 @@ def test_sports_tag_detected():
 
     assert opp is not None
     assert opp.category == "sports"
+
+
+# ── Tests: Per-market fee_rate from API ──────────────────────────────
+
+
+def test_api_fee_rate_used_when_available():
+    """When market has fee_rate from API, use it instead of tag/category lookup."""
+    # Gap of $0.02, fee_rate=0.0 (like geopolitics) → profitable
+    market = MockMarketState(
+        best_ask_yes=0.49, best_ask_no=0.49,
+        tags=["crypto"],  # Would be 0.072 via tags
+    )
+    market.fee_rate = 0.0  # API says 0% fees
+    config = MockConfig(category="crypto")
+    scanner = CompletenessScanner(config, MockTracker([market]))
+    opp = scanner._evaluate_market(market)
+
+    assert opp is not None
+    assert opp.category == "api"  # Indicates fee came from API
+    assert opp.net_profit_per_share == pytest.approx(0.02 - GAS_REDEEM_USD, abs=0.001)
+
+
+def test_api_fee_rate_overrides_tags():
+    """API fee_rate should override tag-based detection."""
+    # Market tagged as geopolitics (0%) but API says rate=0.05
+    # Gap of $0.01 — not enough for 0.05 rate
+    market = MockMarketState(
+        best_ask_yes=0.495, best_ask_no=0.495,
+        tags=["geopolitics"],
+    )
+    market.fee_rate = 0.05  # API overrides to 5%
+    config = MockConfig(category="crypto")
+    scanner = CompletenessScanner(config, MockTracker([market]))
+    opp = scanner._evaluate_market(market)
+
+    assert opp is None  # Fee too high for $0.01 gap
+
+
+def test_negative_fee_rate_falls_back_to_tags():
+    """fee_rate=-1 (unknown) should fall back to tag-based detection."""
+    market = MockMarketState(
+        best_ask_yes=0.495, best_ask_no=0.495,
+        tags=["geopolitics"],
+    )
+    market.fee_rate = -1.0  # Unknown — fall back
+    config = MockConfig(category="crypto")
+    scanner = CompletenessScanner(config, MockTracker([market]))
+    opp = scanner._evaluate_market(market)
+
+    assert opp is not None  # Geopolitics = 0% via tags
+    assert opp.category == "geopolitics"

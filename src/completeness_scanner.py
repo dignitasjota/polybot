@@ -310,13 +310,18 @@ class CompletenessScanner:
             return None  # No arb (sum >= 1.0)
 
         # Fee calculation: we're taker on all buys
-        # Auto-detect category from market tags, fallback to config default
-        if hasattr(market, 'tags') and market.tags:
+        # Use per-market fee_rate from Gamma API if available, else fallback to tag/config
+        if hasattr(market, 'fee_rate') and market.fee_rate >= 0:
+            fee_rate = market.fee_rate
+            category = "api"  # Indicates fee_rate came from API, not category lookup
+        elif hasattr(market, 'tags') and market.tags:
             category = category_from_tags(market.tags)
+            fee_rate = TAKER_FEE_RATES.get(category, TAKER_FEE_RATES[DEFAULT_CATEGORY])
         else:
             category = self._config.category
+            fee_rate = TAKER_FEE_RATES.get(category, TAKER_FEE_RATES[DEFAULT_CATEGORY])
         total_fees_per_share = sum(
-            self._fee_per_share(p, category) for p in prices
+            fee_rate * p * (1.0 - p) for p in prices
         )
 
         net_profit_per_share = gap - total_fees_per_share - GAS_REDEEM_USD

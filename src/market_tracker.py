@@ -51,6 +51,7 @@ class MarketState:
 
     # Metadata
     tags: list[str] = field(default_factory=list)
+    fee_rate: float = -1.0       # Per-market fee rate from Gamma API (-1 = unknown)
 
     @property
     def hours_to_resolution(self) -> float | None:
@@ -98,6 +99,7 @@ class MarketTracker:
         no_token_id: str,
         end_date: datetime | None = None,
         tags: list[str] | None = None,
+        fee_rate: float = -1.0,
     ) -> MarketState:
         state = MarketState(
             condition_id=condition_id,
@@ -106,6 +108,7 @@ class MarketTracker:
             no_token_id=no_token_id,
             end_date=end_date,
             tags=tags or [],
+            fee_rate=fee_rate,
         )
         self._markets[yes_token_id] = state
         self._markets[no_token_id] = state

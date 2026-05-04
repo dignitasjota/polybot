@@ -31,6 +31,8 @@ class Market:
     resolved: bool = False
     winning_token_id: str = ""
     tags: list[str] = field(default_factory=list)
+    fee_rate: float = -1.0       # From feeSchedule.rate (-1 = not available)
+    fee_exponent: int = 1        # From feeSchedule.exponent (always 1 so far)
 
     @property
     def best_token_price(self) -> float:
@@ -316,6 +318,11 @@ class GammaClient:
                     elif isinstance(t, dict):
                         tags.append(t.get("label", t.get("slug", "")).lower())
 
+            # Parse feeSchedule (Gamma API returns per-market fee params)
+            fee_schedule = data.get("feeSchedule") or {}
+            fee_rate = float(fee_schedule.get("rate", -1))
+            fee_exponent = int(fee_schedule.get("exponent", 1))
+
             return Market(
                 condition_id=data.get("conditionId", ""),
                 question=data.get("question", ""),
@@ -329,6 +336,8 @@ class GammaClient:
                 yes_price=yes_price,
                 no_price=no_price,
                 tags=tags,
+                fee_rate=fee_rate,
+                fee_exponent=fee_exponent,
             )
         except (KeyError, ValueError, TypeError, json_lib.JSONDecodeError) as e:
             logger.debug("gamma_parse_error", error=str(e), data_keys=list(data.keys()))

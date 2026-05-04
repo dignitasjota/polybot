@@ -373,6 +373,7 @@ class Bot:
                 no_token_id=market.no_token_id,
                 end_date=market.end_date,
                 tags=market.tags,
+                fee_rate=market.fee_rate,
             )
             new_count += 1
 
@@ -383,6 +384,7 @@ class Bot:
                 yes_price=f"${market.yes_price:.2f}",
                 no_price=f"${market.no_price:.2f}",
                 end_date=str(market.end_date),
+                fee_rate=market.fee_rate,
             )
 
         if new_count > 0:
@@ -426,6 +428,7 @@ class Bot:
                 no_token_id=market.no_token_id,
                 end_date=market.end_date,
                 tags=market.tags,
+                fee_rate=market.fee_rate,
             )
             new_count += 1
 
