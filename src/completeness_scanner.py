@@ -248,6 +248,8 @@ class CompletenessScanner:
         evaluated = 0
         best_gap = -99.0  # Track closest to gap (negative = sum > 1.0)
         best_gap_question = ""
+        best_gap_fee_rate = -1.0
+        positive_gaps = 0  # Markets with gap > 0 (but maybe not enough after fees)
 
         for market in self._tracker.all_markets:
             if market.condition_id in seen_conditions:
@@ -272,9 +274,12 @@ class CompletenessScanner:
 
             # Track raw gap for diagnostics (before cooldown/filters)
             raw_gap = 1.0 - market.best_ask_yes - market.best_ask_no
+            if raw_gap > 0:
+                positive_gaps += 1
             if raw_gap > best_gap:
                 best_gap = raw_gap
                 best_gap_question = market.question[:50]
+                best_gap_fee_rate = getattr(market, 'fee_rate', -1.0)
 
             # Cooldown check
             last_attempt = self._cooldown.get(market.condition_id, 0)
@@ -308,7 +313,9 @@ class CompletenessScanner:
                 skipped_resolved=skipped_resolved,
                 skipped_cooldown=skipped_cooldown,
                 evaluated=evaluated,
+                positive_gaps=positive_gaps,
                 best_gap=round(best_gap, 5) if best_gap > -99 else "none",
+                best_gap_fee_rate=best_gap_fee_rate,
                 best_gap_question=best_gap_question,
                 opportunities=self._opportunities_found,
             )
@@ -604,6 +611,8 @@ class CompletenessScanner:
 
         This enables reactive (event-driven) detection in addition to
         the periodic scan loop — catching fleeting gaps faster.
+        Uses a shorter cooldown (3s) than execution cooldown (30s) to allow
+        rapid re-checking when prices are moving.
         """
         if not self._tracker or not token_id:
             return
@@ -612,10 +621,13 @@ class CompletenessScanner:
         if not market or market.resolved:
             return
 
-        # Cooldown check
+        # Reactive cooldown: shorter than execution cooldown (3s vs 30s)
+        # Only block if we recently EXECUTED on this market (full cooldown)
+        # or recently CHECKED it reactively (short cooldown to avoid spam)
         now = time.time()
         last_attempt = self._cooldown.get(market.condition_id, 0)
-        if now - last_attempt < self._config.cooldown_s:
+        reactive_cooldown = min(self._config.cooldown_s, 3.0)
+        if now - last_attempt < reactive_cooldown:
             return
 
         opp = self._evaluate_market(market)
@@ -636,6 +648,10 @@ class CompletenessScanner:
 
     def get_stats(self) -> dict:
         recent_trades = self._trades[-20:]  # Last 20 trades
+
+        # Quick diagnostic: scan current state
+        diag = self._get_market_diagnostic()
+
         return {
             "running": self._running,
             "mode": self._config.mode,
@@ -646,6 +662,7 @@ class CompletenessScanner:
             "total_profit": round(self._total_profit, 4),
             "pending_redeems": len(self._pending_redeems),
             "uptime_s": round(time.time() - self._started_at, 1) if self._started_at else 0,
+            "diagnostic": diag,
             "recent_trades": [
                 {
                     "trade_id": t.trade_id,
@@ -658,4 +675,41 @@ class CompletenessScanner:
                 }
                 for t in recent_trades
             ],
+        }
+
+    def _get_market_diagnostic(self) -> dict:
+        """Quick snapshot of market state for debugging."""
+        if not self._tracker:
+            return {"markets_tracked": 0}
+
+        total = 0
+        with_prices = 0
+        positive_gaps = 0
+        best_gap = -99.0
+        best_question = ""
+        best_fee_rate = -1.0
+
+        seen = set()
+        for m in self._tracker.all_markets:
+            if m.condition_id in seen:
+                continue
+            seen.add(m.condition_id)
+            total += 1
+            if m.best_ask_yes > 0 and m.best_ask_no > 0 and not m.resolved:
+                with_prices += 1
+                gap = 1.0 - m.best_ask_yes - m.best_ask_no
+                if gap > 0:
+                    positive_gaps += 1
+                if gap > best_gap:
+                    best_gap = gap
+                    best_question = m.question[:50]
+                    best_fee_rate = getattr(m, 'fee_rate', -1.0)
+
+        return {
+            "markets_tracked": total,
+            "markets_with_prices": with_prices,
+            "positive_gaps": positive_gaps,
+            "best_gap": round(best_gap, 5) if best_gap > -99 else None,
+            "best_gap_fee_rate": best_fee_rate,
+            "best_gap_market": best_question,
         }

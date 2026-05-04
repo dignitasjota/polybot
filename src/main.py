@@ -432,8 +432,8 @@ class Bot:
         from datetime import timedelta
 
         markets = await self.gamma.fetch_active_markets(
-            max_time_to_resolution=timedelta(hours=48),
-            max_results=200,
+            max_time_to_resolution=timedelta(hours=168),  # 7 days — more markets to monitor
+            max_results=500,
             tag="",  # No tag filter — all categories
         )
 

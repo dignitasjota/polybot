@@ -216,11 +216,12 @@ class WebSocketClient:
                             await result
                 continue
 
-            # Throttle: skip processing entirely if same token was handled < 2s ago
+            # Throttle: skip processing entirely if same token was handled < 1s ago
             # (doesn't apply to price_change which is handled above)
+            # Reduced from 2.0s to 1.0s to allow faster completeness arb detection
             now = time.time()
             last = self._last_check_time.get(asset_id, 0)
-            if now - last < 2.0:
+            if now - last < 1.0:
                 continue
             self._last_check_time[asset_id] = now
 
@@ -228,6 +229,11 @@ class WebSocketClient:
                 self._handle_book(event)
             elif event_type == "best_bid_ask":
                 self._handle_best_bid_ask(event)
+                # Trigger callback on ask changes (completeness needs this)
+                if self._on_opportunity_callback:
+                    result = self._on_opportunity_callback(asset_id, event_type)
+                    if result is not None and asyncio.iscoroutine(result):
+                        await result
             elif event_type == "last_trade_price":
                 self._handle_last_trade(event)
 
