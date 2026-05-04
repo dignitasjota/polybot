@@ -308,6 +308,20 @@ class AccountRunner:
                 await self._start_directional(strat)
             elif strat_name == "copy_trade":
                 await self._start_copy_trade(strat)
+            elif strat_name == "completeness":
+                if strat.is_active:
+                    strat.on_opportunity(
+                        lambda opp, sn=strat_name: asyncio.ensure_future(
+                            self._handle_opportunity(opp, sn)
+                        )
+                    )
+                    strat.on_redeem(self.executor.redeem_position)
+                    # Wire WS callback for reactive detection (if not already wired by directional)
+                    if self.ws_client and "directional" not in self.strategies:
+                        comp_check = strat.scanner.check if isinstance(strat, CompletenessStrategy) else None
+                        if comp_check:
+                            self.ws_client.on_opportunity(comp_check)
+                    await strat.start()
             else:
                 # Future strategies: generic start
                 if strat.is_active:

@@ -33,7 +33,7 @@ class MockMarketState:
     asks_yes: list = field(default_factory=lambda: [MockPriceLevel(0.48, 100)])
     asks_no: list = field(default_factory=lambda: [MockPriceLevel(0.50, 100)])
     resolved: bool = False
-    is_stale: bool = False
+    last_update: float = 1000.0  # Non-zero = has received WS data
     tags: list = field(default_factory=list)
 
 
@@ -206,10 +206,23 @@ def test_no_asks_available():
     assert opp is None
 
 
-def test_empty_orderbook():
-    """Markets with empty orderbook should be skipped."""
+def test_empty_orderbook_with_best_ask():
+    """Markets with no book depth but valid best_ask prices use fallback sizing."""
     market = MockMarketState(
         best_ask_yes=0.45, best_ask_no=0.45,
+        asks_yes=[], asks_no=[],
+    )
+    scanner = CompletenessScanner(MockConfig(), MockTracker([market]))
+    opp = scanner._evaluate_market(market)
+    # With fallback sizing (max_cost/price), this should detect the gap
+    assert opp is not None
+    assert opp.gap == pytest.approx(0.10, abs=0.001)
+
+
+def test_empty_orderbook_no_best_ask():
+    """Markets with no book depth AND no best_ask should be skipped."""
+    market = MockMarketState(
+        best_ask_yes=0.0, best_ask_no=0.0,
         asks_yes=[], asks_no=[],
     )
     scanner = CompletenessScanner(MockConfig(), MockTracker([market]))

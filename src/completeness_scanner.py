@@ -240,34 +240,68 @@ class CompletenessScanner:
 
         # Check all tracked markets
         seen_conditions: set[str] = set()
+        total_markets = 0
+        skipped_resolved = 0
+        skipped_no_data = 0
+        skipped_cooldown = 0
+        evaluated = 0
+        best_gap = -1.0  # Track closest gap for diagnostics
+
         for market in self._tracker.all_markets:
             if market.condition_id in seen_conditions:
                 continue
             seen_conditions.add(market.condition_id)
+            total_markets += 1
 
-            # Skip resolved/stale markets
-            if market.resolved or market.is_stale:
+            # Skip resolved markets
+            if market.resolved:
+                skipped_resolved += 1
+                continue
+
+            # Skip markets with no price data (never received WS update)
+            # Use relaxed staleness: any prior update is OK for completeness
+            # (the periodic scan itself catches gaps; ultra-fresh data not required)
+            if market.last_update == 0:
+                skipped_no_data += 1
                 continue
 
             # Cooldown check
             last_attempt = self._cooldown.get(market.condition_id, 0)
             if now - last_attempt < self._config.cooldown_s:
+                skipped_cooldown += 1
                 continue
 
+            evaluated += 1
             opp = self._evaluate_market(market)
-            if opp and opp.net_profit_per_share >= self._config.min_profit_per_share:
-                self._opportunities_found += 1
-                logger.info(
-                    "arb_opportunity_detected",
-                    condition_id=market.condition_id[:16],
-                    question=market.question[:50],
-                    gap=round(opp.gap, 4),
-                    net_profit=round(opp.net_profit_per_share, 4),
-                    max_shares=round(opp.max_shares, 2),
-                    total_profit=round(opp.net_profit_per_share * opp.max_shares, 4),
-                    category=opp.category,
-                )
-                await self._execute_arb(opp)
+            if opp:
+                if opp.gap > best_gap:
+                    best_gap = opp.gap
+                if opp.net_profit_per_share >= self._config.min_profit_per_share:
+                    self._opportunities_found += 1
+                    logger.info(
+                        "arb_opportunity_detected",
+                        condition_id=market.condition_id[:16],
+                        question=market.question[:50],
+                        gap=round(opp.gap, 4),
+                        net_profit=round(opp.net_profit_per_share, 4),
+                        max_shares=round(opp.max_shares, 2),
+                        total_profit=round(opp.net_profit_per_share * opp.max_shares, 4),
+                        category=opp.category,
+                    )
+                    await self._execute_arb(opp)
+
+        # Periodic diagnostic log (every 20 scans)
+        if self._total_scans % 20 == 1:
+            logger.info(
+                "completeness_scan_diag",
+                total_markets=total_markets,
+                skipped_no_data=skipped_no_data,
+                skipped_resolved=skipped_resolved,
+                skipped_cooldown=skipped_cooldown,
+                evaluated=evaluated,
+                best_gap=round(best_gap, 5) if best_gap >= 0 else "none",
+                opportunities=self._opportunities_found,
+            )
 
     def _evaluate_market(self, market: MarketState) -> ArbOpportunity | None:
         """Check if a binary market has a completeness gap.
@@ -283,8 +317,19 @@ class CompletenessScanner:
         token_ids = [market.yes_token_id, market.no_token_id]
 
         # Sizes available at best ask
+        # Prefer order book depth, but fall back to a conservative estimate
+        # when only best_bid_ask events have been received (no full book snapshot).
+        # WS sends book snapshots rarely; best_bid_ask events are frequent.
         yes_size = market.asks_yes[0].size if market.asks_yes else 0
         no_size = market.asks_no[0].size if market.asks_no else 0
+
+        # If we have prices but no book depth, assume conservative size
+        # (we'll verify actual liquidity when placing orders)
+        if yes_size == 0 and market.best_ask_yes > 0:
+            yes_size = self._config.max_cost_per_trade / market.best_ask_yes
+        if no_size == 0 and market.best_ask_no > 0:
+            no_size = self._config.max_cost_per_trade / market.best_ask_no
+
         sizes = [yes_size, no_size]
 
         # Min executable shares (limited by smallest side)
@@ -554,7 +599,7 @@ class CompletenessScanner:
             return
 
         market = self._tracker.get_by_token(token_id)
-        if not market or market.resolved or market.is_stale:
+        if not market or market.resolved:
             return
 
         # Cooldown check
