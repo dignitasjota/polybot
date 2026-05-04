@@ -22,6 +22,7 @@ Open-Meteo ensemble API:
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 import time
@@ -137,6 +138,13 @@ CITY_COORDS: dict[str, tuple[float, float, str]] = {
     "osaka": (34.69, 135.50, "Asia/Tokyo"),
     "ho-chi-minh-city": (10.82, 106.63, "Asia/Ho_Chi_Minh"),
     "hanoi": (21.03, 105.85, "Asia/Ho_Chi_Minh"),
+    "wuhan": (30.59, 114.31, "Asia/Shanghai"),
+    "karachi": (24.86, 67.01, "Asia/Karachi"),
+    "lucknow": (26.85, 80.95, "Asia/Kolkata"),
+    "guangzhou": (23.13, 113.26, "Asia/Shanghai"),
+    "shenzhen": (22.54, 114.06, "Asia/Shanghai"),
+    "wellington": (-41.29, 174.78, "Pacific/Auckland"),
+    "tel-aviv": (32.08, 34.78, "Asia/Jerusalem"),
 }
 
 
@@ -522,8 +530,26 @@ class WeatherScanner:
 
             question = mkt.get("question", "")
             cid = mkt.get("conditionId", "")
-            clob_tokens = mkt.get("clobTokenIds", [])
-            prices_raw = mkt.get("outcomePrices", [])
+
+            # Gamma API returns these as JSON strings, not arrays
+            clob_tokens_raw = mkt.get("clobTokenIds", "[]")
+            prices_str = mkt.get("outcomePrices", "[]")
+
+            if isinstance(clob_tokens_raw, str):
+                try:
+                    clob_tokens = json.loads(clob_tokens_raw)
+                except (json.JSONDecodeError, TypeError):
+                    clob_tokens = []
+            else:
+                clob_tokens = clob_tokens_raw or []
+
+            if isinstance(prices_str, str):
+                try:
+                    prices_raw = json.loads(prices_str)
+                except (json.JSONDecodeError, TypeError):
+                    prices_raw = []
+            else:
+                prices_raw = prices_str or []
 
             if not cid or not clob_tokens or not prices_raw:
                 continue
@@ -532,6 +558,9 @@ class WeatherScanner:
             # e.g. "Will the highest temperature in LA be 57°F or below on May 6?"
             # → "57°F or below"
             label = self._extract_outcome_label(question)
+            if not label:
+                # Fallback: use groupItemTitle if available
+                label = mkt.get("groupItemTitle")
             if not label:
                 continue
 
