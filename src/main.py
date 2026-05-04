@@ -144,6 +144,7 @@ class Bot:
             ])
         if has_directional:
             tasks.append(self._run_gamma_poller())
+            tasks.append(self._run_pending_sweep())
         if has_completeness:
             tasks.append(self._run_completeness_gamma_poller())
 
@@ -225,6 +226,27 @@ class Bot:
 
             except Exception as e:
                 self.log.error("resolution_check_error", error=str(e))
+
+    async def _run_pending_sweep(self):
+        """Periodically sweep stale pending bets that the resolution checker missed.
+
+        Runs every 5 minutes. Resolves bets for markets that expired >1h ago
+        via CLOB API. Marks unresolvable bets (>24h) as expired.
+        """
+        sweep_interval = 300  # 5 minutes
+
+        while self._running:
+            await asyncio.sleep(sweep_interval)
+            if not self._running:
+                break
+            try:
+                for acc in self.accounts:
+                    if acc.detector:
+                        await acc.detector.sweep_stale_pending(
+                            gamma_client=self.gamma
+                        )
+            except Exception as e:
+                self.log.error("pending_sweep_error", error=str(e))
 
     async def _run_market_cleanup(self):
         """Periodically remove expired/resolved markets to free memory."""

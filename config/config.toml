@@ -26,6 +26,8 @@ max_time_to_resolution = "15m"    # Busca mercados que resuelven en <15min (capt
 min_margin_net = 0.05             # Margen minimo por share tras fees ($0.05) — aumentado de 0.008, EV positivo
 tag = "crypto"                    # Solo mercados con tag crypto
 max_price = 0.55                  # Precio maximo para bets Up/Down (bajado de 0.70 a 0.55 — con 66% WR, EV positivo solo bajo 0.60)
+min_price_updown = 0.10           # Precio minimo para bets Up/Down (evita tokens a $0.001 sin sentido)
+min_margin_closing = 0.005        # Margen minimo neto para closing arb (separado de min_margin_net)
 min_buffer_pct = 0.001            # Buffer minimo como fraccion decimal (0.001 = 0.1%) para confirmacion Binance
 max_concurrent_bets = 3           # Max bets directionales concurrentes (bajado de 5 a 3, menos correlación)
 

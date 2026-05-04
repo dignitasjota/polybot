@@ -210,6 +210,119 @@ class ClosingArbitrageDetector:
         self._balance = balance
         self._is_live_mode = True  # Signal that we're syncing with executor
 
+    async def sweep_stale_pending(self, gamma_client=None):
+        """Resolve bets stuck in 'pending' for markets that expired long ago.
+
+        Called periodically by main.py. For each pending bet whose market
+        expired >1h ago, try to resolve via CLOB API. If unresolvable after
+        24h, mark as 'expired' (no P&L impact — treat as cancelled).
+        """
+        now = time.time()
+        stale_keys = []
+        condition_ids_to_check: dict[str, list[str]] = {}  # cid -> [keys]
+
+        for key, opp in self._bet_placed.items():
+            if opp.outcome != "pending":
+                continue
+            age_hours = (now - opp.timestamp) / 3600
+            if age_hours < 1.0:
+                continue  # Too recent, give resolution_checker time
+
+            # Already resolved in tracker?
+            market = self.tracker.get_by_condition(opp.condition_id)
+            if market and market.resolved and market.winning_token_id:
+                self._settle_pending(market)
+                continue
+
+            # Group by condition_id for batch resolution check
+            if opp.condition_id not in condition_ids_to_check:
+                condition_ids_to_check[opp.condition_id] = []
+            condition_ids_to_check[opp.condition_id].append(key)
+
+            # If >24h old and still unresolved, mark as expired
+            if age_hours > 24:
+                stale_keys.append(key)
+
+        # Try to resolve via CLOB API
+        if gamma_client and condition_ids_to_check:
+            try:
+                resolved = await gamma_client.check_resolution(
+                    list(condition_ids_to_check.keys())
+                )
+                for cid, winning_token_id in resolved.items():
+                    # Add to tracker temporarily if not present
+                    market = self.tracker.get_by_condition(cid)
+                    if market:
+                        self.tracker.mark_resolved(cid, winning_token_id)
+                        self._settle_pending(market)
+                    else:
+                        # Market not in tracker — settle manually
+                        for key in condition_ids_to_check.get(cid, []):
+                            opp = self._bet_placed[key]
+                            winning_side = "YES"  # default
+                            # Determine side from token_id if possible
+                            if opp.token_id:
+                                # We don't know which token won, but we know our token
+                                # If winning_token_id == our token_id, we won
+                                if winning_token_id == opp.token_id:
+                                    outcome = "win"
+                                    shares = opp.suggested_bet / opp.token_price if opp.token_price > 0 else 0
+                                    pnl = round(shares * opp.margin_net, 2)
+                                    self._stats["settled_wins"] += 1
+                                else:
+                                    outcome = "loss"
+                                    pnl = round(-opp.suggested_bet, 2)
+                                    self._stats["settled_losses"] += 1
+                            else:
+                                outcome = "loss"
+                                pnl = round(-opp.suggested_bet, 2)
+                                self._stats["settled_losses"] += 1
+
+                            opp.outcome = outcome
+                            opp.actual_pnl = pnl
+                            opp.resolved_at = now
+                            if opp.duration_seconds == 0:
+                                opp.duration_seconds = round(now - opp.timestamp, 1)
+                            self._balance = round(self._balance + pnl, 2)
+                            self._stats["simulated_pnl"] = round(
+                                self._stats["simulated_pnl"] + pnl, 2
+                            )
+                            logger.info(
+                                "sweep_settled",
+                                question=opp.question[:60],
+                                outcome=outcome,
+                                pnl=f"${pnl:+.2f}",
+                            )
+                            # Remove from stale list if resolved
+                            if key in stale_keys:
+                                stale_keys.remove(key)
+            except Exception as e:
+                logger.warning("sweep_resolution_error", error=str(e))
+
+        # Mark truly stale bets (>24h, unresolvable) as expired
+        for key in stale_keys:
+            opp = self._bet_placed[key]
+            if opp.outcome == "pending":
+                opp.outcome = "expired"
+                opp.actual_pnl = 0.0  # No P&L — treat as if never placed
+                opp.resolved_at = now
+                if opp.duration_seconds == 0:
+                    opp.duration_seconds = round(now - opp.timestamp, 1)
+                logger.info(
+                    "sweep_expired",
+                    question=opp.question[:60],
+                    age_hours=round((now - opp.timestamp) / 3600, 1),
+                )
+
+        pending_count = sum(1 for o in self._bet_placed.values() if o.outcome == "pending")
+        if condition_ids_to_check or stale_keys:
+            logger.info(
+                "sweep_complete",
+                checked=len(condition_ids_to_check),
+                expired=len(stale_keys),
+                remaining_pending=pending_count,
+            )
+
     def reset_stats(self, new_balance: float | None = None):
         """Reset all stats and bets (e.g. when switching from paper to live)."""
         self._opportunities_log.clear()
@@ -277,6 +390,10 @@ class ClosingArbitrageDetector:
             cost_usd = getattr(t, "cost_usd", 0.0) or 0.0
             price = getattr(t, "price", 0.0) or 0.0
             size = getattr(t, "size", 0.0) or 0.0
+            suggested_bet = cost_usd if cost_usd > 0 else size * price
+            # Skip ghost trades with no actual bet (no capital was committed)
+            if suggested_bet <= 0:
+                continue
             margin_net = net_margin(price, "crypto") if price > 0 else 0.0
             opp = Opportunity(
                 timestamp=getattr(t, "created_at", 0.0) or 0.0,
@@ -292,7 +409,7 @@ class ClosingArbitrageDetector:
                 depth_at_price=size,
                 resolved=False,
                 winning_token_id="",
-                suggested_bet=cost_usd if cost_usd > 0 else size * price,
+                suggested_bet=suggested_bet,
                 potential_profit=size * margin_net if margin_net > 0 else 0.0,
                 source_strategy="directional",
                 mode=getattr(t, "mode", "paper") or "paper",
@@ -660,8 +777,9 @@ class ClosingArbitrageDetector:
         is_yes = confirmed == "YES"
         price = market.best_ask_yes if is_yes else market.best_ask_no
 
-        # Don't buy at extreme prices: too low = no data, too high = no margin
-        if price <= 0 or price >= self.config.max_price:
+        # Don't buy at extreme prices: too low = noise, too high = no margin
+        min_price = getattr(self.config, 'min_price_updown', 0.10)
+        if price <= 0 or price < min_price or price >= self.config.max_price:
             self._stats["price_checks_rejected"] += 1
             # Throttle log: only log once per market+side per 5 seconds
             key = f"{market.condition_id}:{confirmed}:price_out_of_range"
@@ -673,6 +791,7 @@ class ClosingArbitrageDetector:
                     question=market.question[:60],
                     side=confirmed,
                     price=price,
+                    min_price=min_price,
                     max_price=self.config.max_price,
                 )
                 self._last_log_time[key] = now
@@ -784,7 +903,10 @@ class ClosingArbitrageDetector:
         fee = self._calculate_fee(price, 1.0)
         margin_net = margin_gross - fee - GAS_REDEEM_USD
 
-        if margin_net < self.config.min_margin_net:
+        # Closing arb uses its own margin threshold (lower than updown)
+        # because at p=0.98 the gross margin is only $0.02
+        min_margin = getattr(self.config, 'min_margin_closing', self.config.min_margin_net)
+        if margin_net < min_margin:
             return
 
         # Limit concurrent bets (shared with directional)

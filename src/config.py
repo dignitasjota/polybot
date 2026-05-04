@@ -35,6 +35,8 @@ class StrategyConfig:
     max_time_to_resolution: timedelta = field(default_factory=lambda: timedelta(hours=24))
     min_margin_net: float = 0.008
     max_price: float = 0.60          # Max price for up/down directional bets
+    min_price_updown: float = 0.10   # Min price for up/down bets (skip near-zero tokens)
+    min_margin_closing: float = 0.005  # Min margin for closing arb (separate from updown)
     min_buffer_pct: float = 0.10     # Min buffer % for price confirmation (global fallback)
     max_concurrent_bets: int = 3     # Max concurrent directional bets
     tag: str = ""                    # Filter markets by tag (e.g. "crypto")
