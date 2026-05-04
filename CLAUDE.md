@@ -362,6 +362,11 @@ profit = (1.00 × shares) - (price_YES × shares) - (price_NO × shares) - fees 
 ### Detección reactiva
 Además del scan periódico, el scanner recibe callbacks del WebSocket cada vez que un precio cambia. Esto permite detectar gaps efímeros que desaparecen en <5 segundos. Se comparte el WebSocket dispatch con el detector directional via `_ws_dispatch`.
 
+**Wiring para cuentas standalone**: Si la cuenta completeness no comparte runner con directional, `account_runner.py` wirea explícitamente el callback `scanner.check` al WebSocket client en el bloque `elif strat_name == "completeness"`.
+
+### Fallback de sizing
+Cuando el WebSocket solo envía eventos `best_bid_ask` (frecuentes) sin `book` completo (raro), el order book puede estar vacío pero con `best_ask_yes/no > 0`. En ese caso, el scanner usa fallback sizing: `size = max_cost_per_trade / best_ask_price` para no descartar oportunidades válidas.
+
 ### Ejecución atómica
 Las órdenes para ambos tokens se envían en paralelo (`asyncio.gather`). Si una falla, se cancelan las demás para evitar quedar con posición direccional no deseada.
 
@@ -378,7 +383,7 @@ Market making incentivado: ganar rewards de Polymarket por proveer liquidez SIN 
 
 La estrategia prioriza **rewards netos (rewards - pérdidas por fills)** sobre rewards brutos:
 - Estar lo más cerca posible del midpoint para maximizar Q-score (rewards)
-- Pero reaccionar rápido (cada 30s) a cualquier movimiento para huir antes de ser filled
+- Pero reaccionar rápido (cada 15s) a cualquier movimiento para huir antes de ser filled
 - Seleccionar mercados donde OTROS makers cotizan más tight (nos protegen) y tienen baja volatilidad
 
 ### Fase 1: RewardScanner con selección inteligente
@@ -401,10 +406,13 @@ Spread natural (spread_penalty):
   Si spread > 5¢                    → 1.5
   Si spread ≤ 5¢                    → 1.0 ✅ (otros más tight, estamos protegidos)
 
-Volatilidad (volume_factor):
-  vol > 50k     → 0.5 (muchos aggressive buyers)
-  vol > 10k     → 0.7
-  vol < 500     → 1.2 (tranquilo, pocos fills)
+Volatilidad (volume_factor) — 5 tiers graduales:
+  vol > 100k    → 0.05 (extremo, evitar)
+  vol > 50k     → 0.15 (muy alto, risky)
+  vol > 20k     → 0.4  (alto, riesgo moderado)
+  vol > 10k     → 0.6  (moderado, aceptable)
+  vol > 5k      → 0.8  (normal, OK)
+  vol < 500     → 1.2  (tranquilo, bonus)
 
 score = (reward_per_dollar × comp_factor × volume_factor) / (risk_factor × spread_penalty)
 ```
@@ -415,18 +423,18 @@ en lugar de "WTI $95 in April" ($100/day, comp=$0, spread=26¢, vol=3k) que caus
 ### Fase 2: LiquidityProvider con quoting agresivo + fast escape
 
 **Posicionamiento:**
-- `spread_pct_of_max = 0.65` → órdenes a **3¢ del midpoint** (vs 4¢ antes)
-- Esto da ~3× más Q-score → ~3× más rewards
-- Pero si el midpoint se mueve 0.5¢ hacia nosotros, cancelamos en max 30s
+- `spread_pct_of_max = 0.50` → órdenes a **~2.3¢ del midpoint** (vs 3¢ antes, 4¢ original)
+- Esto da ~4× más Q-score que el original → ~4× más rewards
+- Pero si el midpoint se mueve 0.5¢ hacia nosotros, cancelamos en max 15s
 
 **Monitoreo y reacción:**
-- `quote_refresh_s = 30` → chequea cada 30s si el midpoint se movió
+- `quote_refresh_s = 15` → chequea cada 15s si el midpoint se movió
 - `reprice_threshold = 0.005` (0.5¢) → cancela+replace si midpoint se acerca
 - Si midpoint no se mueve, la orden se mantiene cobrando rewards
 
 **Two-sided quoting:**
-- BUY YES a `bid_price` (3¢ abajo del midpoint)
-- BUY NO a `(1.0 - ask_price)` (3¢ arriba del midpoint)
+- BUY YES a `bid_price` (~2.3¢ abajo del midpoint)
+- BUY NO a `(1.0 - ask_price)` (~2.3¢ arriba del midpoint)
 - Ambas con `post_only=True` (maker, 0% fees)
 
 **Redeem automático:**
@@ -476,17 +484,17 @@ Esto evita que órdenes antiguas bloqueen el capital y causen fills no esperadas
 
 | Parámetro | Anterior | Actual | Razón |
 |-----------|----------|--------|-------|
-| `capital_per_market` | 50 | 34 | $34×3 = ~$100 total |
-| `max_markets` | 5 | 3 | Diversifica sin sobreexposición |
-| `spread_pct_of_max` | 0.85 (4¢) | **0.65 (3¢)** | ~3× más rewards |
-| `quote_refresh_s` | 120 | **30** | Reacciona 4× más rápido |
+| `capital_per_market` | 50 | 34 | $34 × N mercados según capital |
+| `max_markets` | 5 | **15** | Más diversificación, capital como límite real |
+| `spread_pct_of_max` | 0.85 (4¢) | **0.50 (~2.3¢)** | ~4× más Q-score |
+| `quote_refresh_s` | 120 | **15** | Reacciona 8× más rápido |
 | `reprice_threshold` | 0.01 (1¢) | **0.005 (0.5¢)** | Huye ante mínimo movimiento |
-| `max_min_size` | (manual) | **auto-calc** | 34/2/0.70 = 24 → accede a 376 mercados |
+| `max_min_size` | (manual) | **auto-calc** | total_capital/3/1.2 → accede a más mercados |
 
 **Auto-calc de max_min_size:**
-- Si `max_min_size=0` en config, se calcula automáticamente: `capital_per_market/2 / 0.70`
-- Con $34/mercado → max_min_size = 24 shares
-- Filtra a mercados con min_size ≤ 24 (evita barreras de entrada altas)
+- Si `max_min_size=0` en config, se calcula automáticamente: `total_capital / 3 / 1.2`
+- Con $500 total → max_min_size = 138 shares
+- Filtra a mercados con min_size ≤ 138 (evita barreras de entrada altas)
 
 ### Parámetros configurables (hot-reload via panel)
 | Parámetro | Default | Descripción |
@@ -495,27 +503,27 @@ Esto evita que órdenes antiguas bloqueen el capital y causen fills no esperadas
 | min_daily_rate | 1.0 | Mínimo $/día para considerar un mercado |
 | min_reward_per_dollar | 0.001 | Ratio mínimo reward/competencia |
 | capital_per_market | 34.0 | pUSD a asignar por mercado |
-| max_markets | 3 | Máximo mercados cotizando simultáneamente |
-| quote_refresh_s | 30 | Refresh cada 30s para reaccionar rápido |
-| spread_pct_of_max | 0.65 | 65% de max_spread → 3¢ del midpoint |
+| max_markets | 15 | Máximo mercados cotizando (capital es el límite real) |
+| quote_refresh_s | 15 | Refresh cada 15s para reaccionar rápido |
+| spread_pct_of_max | 0.50 | 50% de max_spread → ~2.3¢ del midpoint |
 | use_heartbeat | false | Activar heartbeat loop (requiere 24/7 uptime) |
 | heartbeat_interval | 5 | Segundos entre heartbeats |
 | scoring_check_interval | 60 | Segundos entre checks de scoring (endpoint no fiable) |
 
 ### Resultados esperados
 
-Con los cambios recientes (scoring v2 + quoting agresivo):
+Con los cambios recientes (scoring v3 + quoting ultra-agresivo):
 - **Rewards**: ~$10-30/día (estimado conservador en mercados políticos estables)
 - **Fill rate**: <1% (vs 18% con configuración anterior)
 - **Fill losses**: ~$0 por día (vs -$7.66 con WTI/Iran markets)
 - **Net P&L**: **+$10-30/día** (rewards sin pérdidas masivas)
-- **APY**: ~40-100% anualizado en $100 de capital
+- **APY**: ~40-100% anualizado en $500 de capital
 
 ### Monitoreo recomendado
 
 1. **Cada vez que despliegues**: Ver log `startup_cancel_all` confirmar que libera capital
-2. **Dashboard en vivo**: Monitorear quote refresh (cada 30s), ver si `reprice_threshold` se activa
-3. **Semanalmente**: Revisar `net_pnl` y comprar contra rewards reales en Polymarket UI
+2. **Dashboard en vivo**: Monitorear quote refresh (cada 15s), ver si `reprice_threshold` se activa
+3. **Semanalmente**: Revisar `net_pnl` y comparar contra rewards reales en Polymarket UI
 4. **Mensualmente**: Analizar `adverse_ratio` y si hay patrones de fills — si sube, revisar selección de mercados
 
 ---
@@ -597,7 +605,7 @@ CREATE TABLE audit_log (
 Archivo TOML con secciones: `[strategy]`, `[risk]`, `[data]`, `[websocket]`, `[logging]`, `[[accounts]]`.
 
 Cada `[[accounts]]` es independiente con su propia estrategia, credenciales y riesgo:
-- `strategy_type`: "directional" o "copy_trade"
+- `strategy_type`: "directional", "copy_trade", "completeness", o "liquidity"
 - `execution_mode`: "paper", "dry_run", o "live" (cambiable en caliente desde panel)
 - `[accounts.credentials]`: env vars para private key, API keys y tipo de wallet
 - `[accounts.copy_trade]`: config específica de copy trading
@@ -742,6 +750,7 @@ El bot usa `py-clob-client-v2` (paquete V2). Cambios clave respecto a V1:
 2. **Filtro crypto**: `tag="crypto"` en Gamma API reduce mercados de ~200 a ~20
 3. **Sesión HMAC ligera**: Reemplazó EncryptedCookieStorage (dependía de cryptography, muy lento en VPS)
 4. **Wallets deshabilitadas no se pollean**: `_poll_all_wallets` filtra por `_wallet_enabled`
+5. **Keyset pagination**: Gamma API usa `/markets/keyset` con cursor en vez de offset pagination (más eficiente para descubrimiento de mercados)
 
 ---
 
@@ -822,15 +831,34 @@ Nuevo sistema de fees por categoría + maker rebates. Implementado en `src/fees.
 **Vulnerabilidad**: Polymarket tiene un gap entre matching off-chain y settlement on-chain. Un atacante puede provocar que el match falle, y Polymarket elimina silenciosamente las órdenes de los market makers del orderbook sin notificar. El bot seguiría creyendo que tiene órdenes activas cuando en realidad fueron eliminadas (0 rewards, capital idle).
 **Solución**: `_check_order_status()` verifica en cada ciclo (30s) que cada orden activa realmente existe en el CLOB via `get_order()`. Si devuelve `None` o `CANCELLED/EXPIRED` sin que nosotros la cancelemos → log `ghost_order_detected` + incrementa `ghost_removals` + limpia referencia → `_refresh_quotes` recoloca inmediatamente. Tiempo máximo sin órdenes: ~30s (1 ciclo).
 
+### Problema: Completeness scanner detectaba 0 oportunidades (Mayo 2026)
+**Causa**: 3 bugs acumulados: (1) filtro `is_stale` descartaba mercados con `last_update=0` incluso cuando tenían precios válidos via `best_bid_ask`, (2) sin fallback de sizing cuando order book vacío pero `best_ask > 0`, (3) callback WebSocket no wired en cuentas standalone de completeness.
+**Solución**: (1) Reemplazar `is_stale` por `last_update == 0`, (2) añadir fallback sizing `size = max_cost_per_trade / best_ask`, (3) wiring explícito en `account_runner.py`. Resultado: 200+ mercados evaluados correctamente. Los mercados están perfectamente arbitrados (best_gap ~-0.001), pero el scanner detectará gaps cuando aparezcan.
+
+### Problema: spread_penalty usaba valor hardcodeado (Mayo 2026)
+**Causa**: En `reward_scanner.py`, `our_distance` se calculaba con `0.85` hardcodeado en vez del `spread_pct_of_max` real del config (que ya estaba en 0.65 y ahora en 0.50). Esto causaba que la penalización por spread se calculara mal.
+**Solución**: Pasar `spread_pct_of_max` como parámetro al RewardScanner y usarlo en `_rank_markets()`. Impacto: mejor selección de mercados donde realmente estamos protegidos.
+
+### Problema: volume_factor demasiado agresivo (Mayo 2026)
+**Causa**: Solo 3 tiers de volumen (>50k→0.05, >10k→0.15, >5k→0.4) excluían mercados de alto reward con volumen moderado como SPY $720 ($913/día, vol=23k → factor 0.15).
+**Solución**: 5 tiers graduales (100k→0.05, 50k→0.15, 20k→0.4, 10k→0.6, 5k→0.8) permiten acceso a mercados high-reward con riesgo aceptable.
+
+### Migración a keyset pagination en Gamma API (Mayo 2026)
+**Causa**: La offset pagination (`/markets?offset=N`) era ineficiente para descubrimiento de mercados.
+**Solución**: Migrar a `/markets/keyset` con cursor. Respuesta: `{"markets": [...], "next_cursor": "..."}`. Más eficiente y confiable.
+
 ### Cambios de parámetros (antes → ahora)
 
 | Aspecto | Antes | Ahora | Impacto |
 |--------|-------|-------|--------|
 | **Scoring** | Bonus 0 comp | Penalización 0.3× | Evita mercados sin competencia (fills seguros) |
-| **Spread distance** | 4¢ (85%) | 3¢ (65%) | ~3× más rewards |
-| **Refresh rate** | Cada 120s | Cada 30s | 4× más rápido huyendo |
+| **Spread distance** | 4¢ (85%) | **~2.3¢ (50%)** | ~4× más Q-score que original |
+| **Refresh rate** | Cada 120s | **Cada 15s** | 8× más rápido huyendo |
 | **Reprice trigger** | 1¢ movimiento | 0.5¢ | Reacciona a cambios micro |
-| **Capital split** | $50 × 5 mdo | $34 × 3 mdo | Diversificación + acceso a más mercados |
+| **Max markets** | 5 | **15** | Más diversificación, capital como límite real |
+| **Volume scoring** | 3 tiers agresivos | **5 tiers graduales** | Acceso a mercados high-reward con vol moderado |
+| **spread_penalty calc** | Hardcoded 0.85 | **Usa config real** | Scoring correcto según distancia real |
+| **Capital split** | $50 × 5 mdo | $34 × N mdo | Diversificación + acceso a más mercados |
 | **Startup cleanup** | Ninguno | cancel_all() | Libera capital bloqueado |
 | **Rewards tracking** | Simulado | Real (Data API) | Métricas confiables |
 
