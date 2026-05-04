@@ -25,6 +25,7 @@ src/
   liquidity_provider.py # LiquidityProvider: market making engine (quotes, inventory, risk)
   liquidity_metrics.py  # LiquidityMetrics: daily P&L tracking y KPIs
   completeness_scanner.py # CompletenessScanner: arbitraje YES+NO < $1.00
+  weather_scanner.py   # WeatherScanner: predicción meteorológica con ensemble ECMWF
   fees.py              # Fees centralizadas V2: taker_fee(), maker_rebate(), por categoría
   executor.py          # Executor: ejecuta trades (paper/dry_run/live)
   market_tracker.py    # MarketTracker: estado in-memory de mercados via WebSocket
@@ -530,6 +531,58 @@ Con los cambios recientes (scoring v3 + quoting ultra-agresivo):
 2. **Dashboard en vivo**: Monitorear quote refresh (cada 15s), ver si `reprice_threshold` se activa
 3. **Semanalmente**: Revisar `net_pnl` y comparar contra rewards reales en Polymarket UI
 4. **Mensualmente**: Analizar `adverse_ratio` y si hay patrones de fills — si sube, revisar selección de mercados
+
+---
+
+## Estrategia 5: Weather Prediction (Pronóstico Meteorológico)
+
+Predicción de temperatura usando 51 modelos ensemble ECMWF IFS vs precios de Polymarket.
+
+### Estructura de mercados en Polymarket
+
+Los mercados de temperatura son **eventos** que contienen N **mercados binarios** (Yes/No), uno por rango de temperatura:
+- Evento: "Highest temperature in Atlanta on May 6?"
+- Mercado 1: "Will it be 57°F or below?" → Yes/No
+- Mercado 2: "Will it be between 58-59°F?" → Yes/No
+- Mercado N: "Will it be 76°F or higher?" → Yes/No
+
+**Descubrimiento**: `tag_id=103040` (Daily Temperature) en endpoint `/events` de Gamma API. El parámetro `tag=weather` NO funciona.
+
+### Flujo
+1. `_discover_markets()`: Busca eventos con `tag_id=103040`, parsea slug para extraer ciudad+fecha
+2. `_get_forecast()`: Consulta Open-Meteo ensemble API (51 miembros ECMWF IFS), cachea 1h
+3. `_build_distribution()`: Convierte 51 predicciones de max_temp → distribución sobre los buckets del mercado
+4. `_evaluate_market()`: Compara distribución forecast vs precios de mercado → detecta edge
+5. `_execute_trade()`: Si edge > 8%, ejecuta con Kelly sizing (quarter-Kelly)
+
+### Open-Meteo Ensemble API
+- Endpoint: `https://ensemble-api.open-meteo.com/v1/ensemble`
+- Model: `ecmwf_ifs025` (51 miembros, 15 días)
+- Respuesta: `temperature_2m_member01..member50` + `temperature_2m` (media)
+- **Devuelve °C siempre**. Si el mercado usa °F, el scanner convierte antes de asignar buckets.
+- Gratis, sin API key
+
+### Manejo de unidades (°C / °F)
+- Open-Meteo siempre devuelve °C
+- Mercados de EEUU usan °F con rangos ("66-67°F"), mercados de Asia/Europa usan °C
+- `_build_distribution()` detecta la unidad desde los outcomes y convierte los ensemble temps a °F si necesario
+- `_determine_winner()` también convierte para resolución correcta
+
+### Ciudades soportadas
+75+ ciudades con coordenadas hardcodeadas en `CITY_COORDS`. Si aparece una ciudad no reconocida, se loguea como `weather_unknown_city` y se ignora.
+
+### Parámetros (config.toml `[accounts.weather]`)
+| Parámetro | Default | Descripción |
+|-----------|---------|-------------|
+| scan_interval | 900 | Cada 15 min |
+| min_edge | 0.08 | Mínimo 8% edge |
+| max_forecast_days | 3 | Solo mercados a ≤3 días |
+| min_forecast_prob | 0.15 | Ignora outcomes con <15% prob |
+| min_agreement | 0.20 | Al menos 20% de modelos deben coincidir |
+| max_price | 0.75 | No comprar outcomes >75¢ |
+| max_bet_per_trade | 10.0 | $10 max por trade |
+| bankroll | 200.0 | Capital total weather |
+| kelly_multiplier | 0.25 | Quarter-Kelly |
 
 ---
 
