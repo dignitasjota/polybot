@@ -469,3 +469,97 @@ def test_negative_fee_rate_falls_back_to_tags():
 
     assert opp is not None  # Geopolitics = 0% via tags
     assert opp.category == "geopolitics"
+
+
+# ── fee_rate_from_fee_type / category_from_fee_type ─────────────────
+
+
+def test_fee_rate_from_fee_type_crypto():
+    from src.fees import fee_rate_from_fee_type
+    assert fee_rate_from_fee_type("crypto_fees_v2", True) == 0.072
+
+
+def test_fee_rate_from_fee_type_sports():
+    from src.fees import fee_rate_from_fee_type
+    assert fee_rate_from_fee_type("sports_fees_v2", True) == 0.03
+
+
+def test_fee_rate_from_fee_type_politics():
+    from src.fees import fee_rate_from_fee_type
+    assert fee_rate_from_fee_type("politics_fees", True) == 0.04
+
+
+def test_fee_rate_from_fee_type_general():
+    from src.fees import fee_rate_from_fee_type
+    assert fee_rate_from_fee_type("general_fees", True) == 0.04
+
+
+def test_fee_rate_from_fee_type_culture():
+    from src.fees import fee_rate_from_fee_type
+    assert fee_rate_from_fee_type("culture_fees", True) == 0.05
+
+
+def test_fee_rate_from_fee_type_weather():
+    from src.fees import fee_rate_from_fee_type
+    assert fee_rate_from_fee_type("weather_fees", True) == 0.05
+
+
+def test_fee_rate_from_fee_type_fees_disabled():
+    from src.fees import fee_rate_from_fee_type
+    assert fee_rate_from_fee_type(None, False) == 0.0
+    assert fee_rate_from_fee_type("crypto_fees_v2", False) == 0.0
+
+
+def test_fee_rate_from_fee_type_null():
+    from src.fees import fee_rate_from_fee_type
+    assert fee_rate_from_fee_type(None, True) == -1.0
+
+
+def test_fee_rate_from_fee_type_unknown():
+    from src.fees import fee_rate_from_fee_type
+    assert fee_rate_from_fee_type("some_new_type", True) == -1.0
+
+
+def test_category_from_fee_type():
+    from src.fees import category_from_fee_type
+    assert category_from_fee_type("crypto_fees_v2") == "crypto"
+    assert category_from_fee_type("sports_fees_v2") == "sports"
+    assert category_from_fee_type("politics_fees") == "politics"
+    assert category_from_fee_type(None, False) == "geopolitics"
+    assert category_from_fee_type(None, True) == "other"
+
+
+# ── gamma_client feeType fallback ───────────────────────────────────
+
+
+def test_gamma_parse_fee_type_fallback():
+    """_parse_market uses feeType when feeSchedule is absent (keyset endpoint)."""
+    from src.gamma_client import GammaClient
+    import json
+
+    gc = GammaClient()
+    data = {
+        "conditionId": "0xabc",
+        "question": "Will Israel do X?",
+        "slug": "israel-x",
+        "clobTokenIds": json.dumps(["tok_yes", "tok_no"]),
+        "outcomePrices": json.dumps(["0.50", "0.50"]),
+        "outcomes": json.dumps(["Yes", "No"]),
+        "endDate": "2026-06-01T00:00:00Z",
+        "enableOrderBook": True,
+        "active": True,
+        "closed": False,
+        # No feeSchedule — keyset endpoint
+        "feeType": None,
+        "feesEnabled": False,
+    }
+    market = gc._parse_market(data)
+    assert market is not None
+    assert market.fee_rate == 0.0  # feesEnabled=false → geopolitics (0%)
+
+    # Now with crypto feeType
+    data["feeType"] = "crypto_fees_v2"
+    data["feesEnabled"] = True
+    market = gc._parse_market(data)
+    assert market is not None
+    assert market.fee_rate == 0.072

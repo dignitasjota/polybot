@@ -103,6 +103,50 @@ def category_from_tags(tags: list[str]) -> str:
     return DEFAULT_CATEGORY
 
 
+# Mapping from Gamma API feeType field to our fee categories
+# The keyset endpoint returns feeType instead of feeSchedule
+FEE_TYPE_MAP: dict[str, str] = {
+    "crypto_fees_v2": "crypto",
+    "sports_fees_v2": "sports",
+    "politics_fees": "politics",
+    "general_fees": "politics",      # general = finance/politics (0.04)
+    "culture_fees": "culture",
+    "weather_fees": "weather",
+}
+
+
+def fee_rate_from_fee_type(fee_type: str | None, fees_enabled: bool = True) -> float:
+    """Map Gamma API feeType to a taker fee rate.
+
+    Args:
+        fee_type: Value of the "feeType" field from keyset endpoint (e.g. "crypto_fees_v2")
+        fees_enabled: Value of the "feesEnabled" field
+
+    Returns:
+        Taker fee rate (e.g. 0.072 for crypto), or -1.0 if unknown.
+    """
+    if not fees_enabled:
+        return 0.0
+    if not fee_type:
+        return -1.0
+    category = FEE_TYPE_MAP.get(fee_type)
+    if category is None:
+        return -1.0
+    return TAKER_FEE_RATES.get(category, TAKER_FEE_RATES[DEFAULT_CATEGORY])
+
+
+def category_from_fee_type(fee_type: str | None, fees_enabled: bool = True) -> str:
+    """Map Gamma API feeType to our fee category name.
+
+    Returns DEFAULT_CATEGORY if unknown.
+    """
+    if not fees_enabled:
+        return "geopolitics"
+    if not fee_type:
+        return DEFAULT_CATEGORY
+    return FEE_TYPE_MAP.get(fee_type, DEFAULT_CATEGORY)
+
+
 def net_margin(price: float, category: str = "crypto") -> float:
     """Net margin per share after fees and gas: (1-p) - fee_per_share - gas."""
     return (1.0 - price) - taker_fee_per_share(price, category) - GAS_REDEEM_USD

@@ -322,10 +322,22 @@ class GammaClient:
                     elif isinstance(t, dict):
                         tags.append(t.get("label", t.get("slug", "")).lower())
 
-            # Parse feeSchedule (Gamma API returns per-market fee params)
+            # Parse fee info: prefer feeSchedule (full market endpoint),
+            # fallback to feeType+feesEnabled (keyset endpoint)
             fee_schedule = data.get("feeSchedule") or {}
             fee_rate = float(fee_schedule.get("rate", -1))
             fee_exponent = int(fee_schedule.get("exponent", 1))
+
+            if fee_rate < 0:
+                # Keyset endpoint doesn't return feeSchedule but has feeType
+                from src.fees import fee_rate_from_fee_type
+                fee_type = data.get("feeType")
+                fees_enabled = data.get("feesEnabled", True)
+                if isinstance(fees_enabled, str):
+                    fees_enabled = fees_enabled.lower() == "true"
+                inferred = fee_rate_from_fee_type(fee_type, fees_enabled)
+                if inferred >= 0:
+                    fee_rate = inferred
 
             return Market(
                 condition_id=data.get("conditionId", ""),
