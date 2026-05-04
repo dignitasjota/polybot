@@ -256,7 +256,7 @@ Compra tokens que cotizan a $0.97+ cuando el mercado está cerca de resolverse. 
 
 ### Up/Down Directional
 Para mercados tipo "Will BTC go up in the next 5 minutes?":
-1. Detector ve un mercado Up/Down con precio <= `max_price` (default 0.60)
+1. Detector ve un mercado Up/Down con precio entre `min_price_updown` (default 0.10) y `max_price` (default 0.60)
 2. Consulta precio actual de Binance via `PriceChecker`
 3. Si el cambio de precio en Binance confirma la dirección con buffer >= `min_buffer_pct` (default 3%) → oportunidad
 4. Límite de `max_concurrent_bets` (default 3) para evitar drawdowns correlacionados
@@ -265,8 +265,10 @@ Para mercados tipo "Will BTC go up in the next 5 minutes?":
 | Parámetro | Default | Descripción |
 |-----------|---------|-------------|
 | kill_switch | false | Detiene todo el trading inmediatamente |
-| min_margin_net | 0.008 | Margen mínimo por share después de fees |
+| min_margin_net | 0.008 | Margen mínimo por share después de fees (Up/Down) |
+| min_margin_closing | 0.005 | Margen mínimo para closing arb (separado porque gross margin a p=0.98 es solo $0.02) |
 | max_price | 0.60 | Precio máximo para bets Up/Down |
+| min_price_updown | 0.10 | Precio mínimo para bets Up/Down (rechaza tokens near-zero como $0.001) |
 | min_buffer_pct | 0.03 | Cambio mínimo en Binance (%) para confirmar dirección |
 | max_concurrent_bets | 3 | Máximo bets simultáneas en ventana de 5 min |
 | max_bet_per_trade | 200 | Tope absoluto en $ por trade |
@@ -357,7 +359,10 @@ profit = (1.00 × shares) - (price_YES × shares) - (price_NO × shares) - fees 
 | min_shares | 5.0 | Min shares para que valga la pena |
 | max_cost_per_trade | 50.0 | Máximo $ por trade |
 | cooldown_s | 30.0 | Segundos antes de reintentar mismo mercado |
-| category | crypto | Categoría de fees |
+| category | crypto | Categoría de fees (auto-detectada si viene del keyset endpoint) |
+
+### Auto-detección de categoría de fees
+El endpoint keyset de Gamma API no devuelve `feeSchedule` pero sí `feeType` (e.g. `"crypto_fees_v2"`, `"sports_fees_v2"`, `"politics_fees"`, `"general_fees"`, `"culture_fees"`, `"weather_fees"`) y `feesEnabled` (bool). `gamma_client.py` infiere el `fee_rate` a partir de `feeType`+`feesEnabled` cuando `feeSchedule` está ausente, usando `fee_rate_from_fee_type()` de `src/fees.py`. Esto permite evaluar correctamente mercados de geopolítica (0% fees, gap mínimo ~$0.005) que antes se rechazaban erróneamente al asumir fees de crypto (7.2%, gap mínimo ~$0.04).
 
 ### Detección reactiva
 Además del scan periódico, el scanner recibe callbacks del WebSocket cada vez que un precio cambia. Esto permite detectar gaps efímeros que desaparecen en <5 segundos. Se comparte el WebSocket dispatch con el detector directional via `_ws_dispatch`.
@@ -769,7 +774,8 @@ Fees por categoría. Makers nunca pagan fees. Takers pagan: `feeRate × shares �
 - **Fórmula taker**: `feeRate × shares × price × (1 - price)` — máximo a p=0.50, decrece hacia extremos
 - **Maker rebate**: % del fee del taker devuelto al maker cuando es filled
 - **Gas redeem**: ~$0.004 por redención
-- **Módulo centralizado**: `src/fees.py` contiene `taker_fee()`, `taker_fee_per_share()`, `maker_rebate()`, `net_margin()`
+- **Módulo centralizado**: `src/fees.py` contiene `taker_fee()`, `taker_fee_per_share()`, `maker_rebate()`, `net_margin()`, `fee_rate_from_fee_type()`, `category_from_fee_type()`
+- **Auto-detección desde Gamma API**: `FEE_TYPE_MAP` mapea `feeType` strings (e.g. `"crypto_fees_v2"` → `"crypto"`, `"sports_fees_v2"` → `"sports"`) a categorías internas. `fee_rate_from_fee_type(fee_type, fees_enabled)` devuelve el `feeRate` correcto; si `fees_enabled=False` devuelve 0.0
 
 Ejemplos (crypto, 100 shares):
 | Precio | Fee/share | Fee total | Maker rebate |
@@ -846,6 +852,26 @@ Nuevo sistema de fees por categoría + maker rebates. Implementado en `src/fees.
 ### Migración a keyset pagination en Gamma API (Mayo 2026)
 **Causa**: La offset pagination (`/markets?offset=N`) era ineficiente para descubrimiento de mercados.
 **Solución**: Migrar a `/markets/keyset` con cursor. Respuesta: `{"markets": [...], "next_cursor": "..."}`. Más eficiente y confiable.
+
+### Problema: Completeness scanner usaba fees incorrectas para mercados no-crypto (Mayo 2026)
+**Causa**: El endpoint keyset de Gamma API no devuelve `feeSchedule`, solo `feeType` (e.g. `"crypto_fees_v2"`, `"politics_fees"`) y `feesEnabled`. Sin inferencia, todos los mercados se evaluaban con fees de crypto (7.2%). Mercados de geopolítica (fees 0%) que solo necesitan $0.005 de gap se rechazaban al exigir $0.04.
+**Solución**: `gamma_client.py` infiere `fee_rate` desde `feeType`+`feesEnabled`. Nuevas funciones en `src/fees.py`: `fee_rate_from_fee_type()`, `category_from_fee_type()`, `FEE_TYPE_MAP`. Mercados con `feesEnabled=false` obtienen correctamente 0% fees.
+
+### Problema: Ghost trades bloqueaban _bet_placed permanentemente (Mayo 2026)
+**Causa**: `restore_open_positions()` restauraba trades de la DB con `cost_usd=0, size=0` → `suggested_bet=0`. Estos trades fantasma bloqueaban keys en `_bet_placed` para siempre, impidiendo nuevas apuestas en esos mercados.
+**Solución**: Skip de trades con `suggested_bet <= 0` durante la restauración.
+
+### Problema: Bets en tokens Up/Down con precio near-zero (Mayo 2026)
+**Causa**: No existía un precio mínimo para bets Up/Down. Tokens a $0.001 pasaban el filtro `max_price=0.60`.
+**Solución**: Nuevo parámetro `min_price_updown=0.10` que rechaza tokens con precio demasiado bajo.
+
+### Problema: Closing arb completamente bloqueado por min_margin_net (Mayo 2026)
+**Causa**: Closing arb compartía `min_margin_net=0.05` con Up/Down. A precio $0.98, el margen bruto es solo $0.02 → closing arb nunca pasaba el filtro de margen.
+**Solución**: Nuevo parámetro `min_margin_closing=0.005` separado para closing arb, que tiene márgenes inherentemente más estrechos pero mayor certeza.
+
+### Problema: Bets pendientes forever en mercados expirados (Mayo 2026)
+**Causa**: Si un mercado se eliminaba del tracker antes de la resolución, las bets quedaban en estado "pending" para siempre sin posibilidad de resolverse.
+**Solución**: Nuevo background loop `sweep_stale_pending` en `main.py`, ejecuta cada 5 minutos. Resuelve bets stuck en "pending" para mercados expirados hace >1h consultando la CLOB API. Marca como "expired" bets irresolubles (>24h antiguas).
 
 ### Cambios de parámetros (antes → ahora)
 
