@@ -73,6 +73,19 @@ CITY_COORDS: dict[str, tuple[float, float, str]] = {
     "moscow": (55.76, 37.62, "Europe/Moscow"),
     "helsinki": (60.17, 24.94, "Europe/Helsinki"),
     "ankara": (39.93, 32.86, "Europe/Istanbul"),
+    "berlin": (52.52, 13.41, "Europe/Berlin"),
+    "rome": (41.90, 12.50, "Europe/Rome"),
+    "dublin": (53.35, -6.26, "Europe/Dublin"),
+    "lisbon": (38.72, -9.14, "Europe/Lisbon"),
+    "athens": (37.97, 23.73, "Europe/Athens"),
+    "vienna": (48.21, 16.37, "Europe/Vienna"),
+    "prague": (50.08, 14.44, "Europe/Prague"),
+    "copenhagen": (55.68, 12.57, "Europe/Copenhagen"),
+    "stockholm": (59.33, 18.07, "Europe/Stockholm"),
+    "zurich": (47.38, 8.54, "Europe/Zurich"),
+    "brussels": (50.85, 4.35, "Europe/Brussels"),
+    "oslo": (59.91, 10.75, "Europe/Oslo"),
+    "bucharest": (44.43, 26.10, "Europe/Bucharest"),
     # Americas
     "new-york": (40.71, -74.01, "America/New_York"),
     "nyc": (40.71, -74.01, "America/New_York"),
@@ -89,10 +102,41 @@ CITY_COORDS: dict[str, tuple[float, float, str]] = {
     "buenos-aires": (-34.60, -58.38, "America/Argentina/Buenos_Aires"),
     "panama-city": (8.98, -79.52, "America/Panama"),
     "sao-paulo": (-23.55, -46.63, "America/Sao_Paulo"),
+    "atlanta": (33.75, -84.39, "America/New_York"),
+    "san-francisco": (37.77, -122.42, "America/Los_Angeles"),
+    "phoenix": (33.45, -112.07, "America/Phoenix"),
+    "washington": (38.91, -77.04, "America/New_York"),
+    "washington-dc": (38.91, -77.04, "America/New_York"),
+    "boston": (42.36, -71.06, "America/New_York"),
+    "philadelphia": (39.95, -75.17, "America/New_York"),
+    "san-diego": (32.72, -117.16, "America/Los_Angeles"),
+    "detroit": (42.33, -83.05, "America/Detroit"),
+    "minneapolis": (44.98, -93.27, "America/Chicago"),
+    "portland": (45.52, -122.68, "America/Los_Angeles"),
+    "las-vegas": (36.17, -115.14, "America/Los_Angeles"),
+    "vancouver": (49.28, -123.12, "America/Vancouver"),
+    "montreal": (45.50, -73.57, "America/Toronto"),
+    "charlotte": (35.23, -80.84, "America/New_York"),
+    "nashville": (36.16, -86.78, "America/Chicago"),
+    "salt-lake-city": (40.76, -111.89, "America/Denver"),
+    "honolulu": (21.31, -157.86, "Pacific/Honolulu"),
+    "anchorage": (61.22, -149.90, "America/Anchorage"),
     # Africa/Middle East
     "lagos": (6.52, 3.38, "Africa/Lagos"),
     "cape-town": (-33.93, 18.42, "Africa/Johannesburg"),
     "jeddah": (21.49, 39.19, "Asia/Riyadh"),
+    "dubai": (25.20, 55.27, "Asia/Dubai"),
+    "riyadh": (24.69, 46.72, "Asia/Riyadh"),
+    "cairo": (30.04, 31.24, "Africa/Cairo"),
+    "nairobi": (-1.29, 36.82, "Africa/Nairobi"),
+    "mumbai": (19.08, 72.88, "Asia/Kolkata"),
+    "delhi": (28.61, 77.21, "Asia/Kolkata"),
+    "new-delhi": (28.61, 77.21, "Asia/Kolkata"),
+    "sydney": (-33.87, 151.21, "Australia/Sydney"),
+    "melbourne": (-37.81, 144.96, "Australia/Melbourne"),
+    "osaka": (34.69, 135.50, "Asia/Tokyo"),
+    "ho-chi-minh-city": (10.82, 106.63, "Asia/Ho_Chi_Minh"),
+    "hanoi": (21.03, 105.85, "Asia/Ho_Chi_Minh"),
 }
 
 
@@ -100,19 +144,27 @@ CITY_COORDS: dict[str, tuple[float, float, str]] = {
 
 @dataclass
 class WeatherMarket:
-    """A Polymarket temperature market parsed from Gamma API."""
+    """A Polymarket temperature event with multiple binary outcome markets.
+
+    Polymarket structures temperature markets as an EVENT containing N binary
+    markets (each Yes/No). E.g. "Highest temperature in LA on May 6?" has:
+      - "Will it be 57°F or below?" → Yes/No (conditionId A, tokenIds A)
+      - "Will it be 58-59°F?"       → Yes/No (conditionId B, tokenIds B)
+      - ...
+    """
     event_slug: str
-    condition_id: str
-    question: str
+    event_title: str
     city_slug: str
     target_date: date
-    outcomes: list[str]           # ["17°C or below", "18°C", "19°C", ..., "27°C or higher"]
-    outcome_prices: list[float]   # Current market prices for each outcome
-    token_ids: list[str]          # CLOB token IDs for each outcome
+    outcomes: list[str]           # ["57°F or below", "58-59°F", ..., "76°F or higher"]
+    outcome_prices: list[float]   # YES price for each outcome binary market
+    condition_ids: list[str]      # Per-outcome conditionId (each is a binary market)
+    token_ids: list[str]          # Per-outcome YES token ID (clobTokenIds[0])
     volume: float = 0.0
     liquidity: float = 0.0
     end_date: str = ""
     fee_rate: float = 0.05        # weather_fees default
+    unit: str = "C"               # "C" or "F" — detected from outcome labels
 
 
 @dataclass
@@ -357,93 +409,82 @@ class WeatherScanner:
 
     # ── Market Discovery ─────────────────────────────────────────────────
 
+    # Polymarket tag_id for "Daily Temperature" markets
+    TEMPERATURE_TAG_ID = 103040
+
     async def _discover_markets(self) -> list[WeatherMarket]:
-        """Fetch active temperature markets from Gamma API."""
+        """Fetch active temperature events from Gamma API.
+
+        Temperature markets are structured as EVENTS, each containing N binary
+        markets (one per temperature bucket). We use tag_id=103040 (Daily Temperature)
+        to discover them.
+        """
         if not self._session:
             return []
 
         markets: list[WeatherMarket] = []
+        seen_slugs: set[str] = set()
 
-        # Try multiple search queries to find temperature markets
-        queries = [
-            "highest temperature",
-            "high temperature",
-        ]
+        try:
+            url = f"{GAMMA_API}/events"
+            params = {
+                "tag_id": str(self.TEMPERATURE_TAG_ID),
+                "active": "true",
+                "closed": "false",
+                "limit": "100",
+                "order": "startDate",
+                "ascending": "false",
+            }
+            async with self._session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    logger.warning("weather_discovery_http_error", status=resp.status)
+                    return []
+                events = await resp.json()
 
-        seen_conditions: set[str] = set()
+            for event in events:
+                slug = event.get("slug", "")
+                if slug in seen_slugs:
+                    continue
+                seen_slugs.add(slug)
 
-        for query in queries:
-            try:
-                url = f"{GAMMA_API}/events"
-                params = {
-                    "active": "true",
-                    "closed": "false",
-                    "limit": "50",
-                    "title": query,
-                }
-                async with self._session.get(url, params=params) as resp:
-                    if resp.status != 200:
-                        continue
-                    events = await resp.json()
+                parsed = self._parse_temperature_event(event)
+                if parsed:
+                    markets.append(parsed)
 
-                for event in events:
-                    event_markets = event.get("markets", [])
-                    for mkt in event_markets:
-                        cid = mkt.get("conditionId", "")
-                        if cid in seen_conditions:
-                            continue
-                        if not mkt.get("active") or mkt.get("closed"):
-                            continue
-
-                        parsed = self._parse_temperature_market(mkt, event)
-                        if parsed:
-                            seen_conditions.add(cid)
-                            markets.append(parsed)
-            except Exception as e:
-                logger.warning("weather_discovery_error", query=query, error=str(e))
+        except Exception as e:
+            logger.warning("weather_discovery_error", error=str(e))
 
         return markets
 
-    def _parse_temperature_market(self, mkt: dict, event: dict) -> WeatherMarket | None:
-        """Parse a Gamma API market response into WeatherMarket.
+    def _parse_temperature_event(self, event: dict) -> WeatherMarket | None:
+        """Parse a Gamma API event response into WeatherMarket.
 
-        Expected slug format: highest-temperature-in-{city}-on-{month}-{day}-{year}
-        Expected question: "Highest temperature in {City} on {Month} {Day}?"
+        Each event contains N binary markets (one per temperature bucket).
+        We extract city+date from the event slug and aggregate all binary
+        markets into a single WeatherMarket with N outcomes.
+
+        Event slug format: highest-temperature-in-{city}-on-{month}-{day}-{year}
         """
-        slug = mkt.get("slug", "") or event.get("slug", "")
-        question = mkt.get("question", "") or mkt.get("groupItemTitle", "")
-
-        if not slug and not question:
-            return None
+        slug = event.get("slug", "")
+        title = event.get("title", "")
 
         # Extract city and date from slug
-        # Pattern: highest-temperature-in-{city}-on-{month}-{day}-{year}
         slug_match = re.match(
             r"highest-temperature-in-(.+?)-on-(\w+)-(\d+)(?:-(\d{4}))?",
             slug,
         )
         if not slug_match:
-            # Try from question: "Highest temperature in {City} on {Month} {Day}?"
-            q_match = re.match(
-                r"(?:Highest|High) temperature in (.+?) on (\w+) (\d+)",
-                question, re.IGNORECASE,
-            )
-            if not q_match:
-                return None
-            city_raw = q_match.group(1).lower().replace(" ", "-")
-            month_str = q_match.group(2)
-            day_str = q_match.group(3)
-            year_str = None
-        else:
-            city_raw = slug_match.group(1)
-            month_str = slug_match.group(2)
-            day_str = slug_match.group(3)
-            year_str = slug_match.group(4)
+            return None
+
+        city_raw = slug_match.group(1)
+        month_str = slug_match.group(2)
+        day_str = slug_match.group(3)
+        year_str = slug_match.group(4)
 
         # Resolve city
         city_slug = self._normalize_city(city_raw)
         if city_slug not in CITY_COORDS:
-            logger.debug("weather_unknown_city", city=city_raw)
+            logger.debug("weather_unknown_city", city=city_raw, slug=slug)
             return None
 
         # Parse date
@@ -456,42 +497,124 @@ class WeatherScanner:
         if target_date < today:
             return None
 
-        # Skip markets too far in future (forecast unreliable beyond 7 days)
+        # Skip markets too far in future (forecast unreliable)
         if (target_date - today).days > self._config.max_forecast_days:
             return None
 
-        # Parse outcomes and prices
-        outcomes = mkt.get("outcomes", [])
-        outcome_prices_raw = mkt.get("outcomePrices", [])
-        token_ids = mkt.get("clobTokenIds", [])
-
-        if not outcomes or not outcome_prices_raw or not token_ids:
+        # Parse binary markets within this event into outcomes
+        event_markets = event.get("markets", [])
+        if not event_markets:
             return None
 
-        # Multi-outcome markets have outcomes like ["17°C or below", "18°C", ...]
-        # Binary markets have ["Yes", "No"] — skip those for now
+        outcomes: list[str] = []
+        outcome_prices: list[float] = []
+        condition_ids: list[str] = []
+        token_ids: list[str] = []
+        total_volume = 0.0
+        total_liquidity = 0.0
+        fee_rate = 0.05
+        end_date = ""
+        unit = "C"
+
+        for mkt in event_markets:
+            if not mkt.get("active") or mkt.get("closed"):
+                continue
+
+            question = mkt.get("question", "")
+            cid = mkt.get("conditionId", "")
+            clob_tokens = mkt.get("clobTokenIds", [])
+            prices_raw = mkt.get("outcomePrices", [])
+
+            if not cid or not clob_tokens or not prices_raw:
+                continue
+
+            # Extract outcome label from question
+            # e.g. "Will the highest temperature in LA be 57°F or below on May 6?"
+            # → "57°F or below"
+            label = self._extract_outcome_label(question)
+            if not label:
+                continue
+
+            # Detect unit
+            if "°F" in label:
+                unit = "F"
+
+            # YES price is first in outcomePrices
+            try:
+                yes_price = float(prices_raw[0])
+            except (ValueError, TypeError, IndexError):
+                continue
+
+            # YES token is first in clobTokenIds
+            yes_token = clob_tokens[0] if clob_tokens else ""
+
+            outcomes.append(label)
+            outcome_prices.append(yes_price)
+            condition_ids.append(cid)
+            token_ids.append(yes_token)
+            total_volume += float(mkt.get("volume", 0) or 0)
+            total_liquidity += float(mkt.get("liquidity", 0) or 0)
+            fee_rate = self._extract_fee_rate(mkt)
+            if not end_date:
+                end_date = mkt.get("endDate", "")
+
         if len(outcomes) < 3:
             return None
 
-        try:
-            outcome_prices = [float(p) for p in outcome_prices_raw]
-        except (ValueError, TypeError):
-            return None
+        # Sort outcomes by temperature (ascending)
+        indexed = list(zip(outcomes, outcome_prices, condition_ids, token_ids))
+        indexed.sort(key=lambda x: self._parse_outcome_temp(x[0]) or 999)
+        outcomes, outcome_prices, condition_ids, token_ids = [list(t) for t in zip(*indexed)]
 
         return WeatherMarket(
             event_slug=slug,
-            condition_id=mkt.get("conditionId", ""),
-            question=question or mkt.get("question", ""),
+            event_title=title,
             city_slug=city_slug,
             target_date=target_date,
             outcomes=outcomes,
             outcome_prices=outcome_prices,
+            condition_ids=condition_ids,
             token_ids=token_ids,
-            volume=float(mkt.get("volume", 0) or 0),
-            liquidity=float(mkt.get("liquidity", 0) or 0),
-            end_date=mkt.get("endDate", ""),
-            fee_rate=self._extract_fee_rate(mkt),
+            volume=total_volume,
+            liquidity=total_liquidity,
+            end_date=end_date,
+            fee_rate=fee_rate,
+            unit=unit,
         )
+
+    def _extract_outcome_label(self, question: str) -> str | None:
+        """Extract temperature range from binary market question.
+
+        Input: "Will the highest temperature in LA be between 66-67°F on May 6?"
+        Output: "66-67°F"
+
+        Input: "Will the highest temperature in LA be 57°F or below on May 6?"
+        Output: "57°F or below"
+
+        Input: "Will the highest temperature in LA be 76°F or higher on May 6?"
+        Output: "76°F or higher"
+        """
+        # "between X-Y°F/°C"
+        m = re.search(r"between\s+(\d+[-–]\d+\s*°[CF])", question, re.IGNORECASE)
+        if m:
+            return m.group(1).replace("–", "-")
+
+        # "X°F/°C or below/less"
+        m = re.search(r"(\d+\s*°[CF])\s+or\s+(below|less)", question, re.IGNORECASE)
+        if m:
+            return f"{m.group(1)} or below"
+
+        # "X°F/°C or higher/more/above"
+        m = re.search(r"(\d+\s*°[CF])\s+or\s+(higher|more|above)", question, re.IGNORECASE)
+        if m:
+            return f"{m.group(1)} or higher"
+
+        # Single temp: "be X°F/°C on"
+        m = re.search(r"be\s+(\d+\s*°[CF])\s+on", question, re.IGNORECASE)
+        if m:
+            return m.group(1)
+
+        return None
 
     def _normalize_city(self, city_raw: str) -> str:
         """Normalize city slug to match CITY_COORDS keys."""
@@ -661,43 +784,81 @@ class WeatherScanner:
     ) -> dict[str, float]:
         """Convert ensemble max temps into probability per outcome bucket.
 
+        Open-Meteo returns °C. If outcomes are in °F, we convert forecast temps
+        to °F before bucketing (avoids fractional °C ranges).
+
         Outcome format examples:
-          - "17°C or below" → all temps ≤ 17
-          - "18°C"          → temps in [17.5, 18.5)
-          - "27°C or higher" → all temps ≥ 27 (actually ≥ 26.5)
+          - "57°F or below"  → all temps ≤ 57°F
+          - "58-59°F"        → temps in [58, 60) °F
+          - "66-67°F"        → temps in [66, 68) °F
+          - "76°F or higher" → all temps ≥ 76°F
+          - "17°C or below"  → all temps < 17.5°C
+          - "18°C"           → temps in [17.5, 18.5)°C
         """
         n_members = len(max_temps)
         if n_members == 0:
             return {}
 
-        # Parse outcome buckets: extract temperature thresholds
-        parsed_buckets: list[tuple[str, float, float]] = []  # (label, low, high)
+        # Detect unit from outcomes
+        unit = "C"
+        for o in outcomes:
+            if "°F" in o:
+                unit = "F"
+                break
 
-        for i, outcome in enumerate(outcomes):
-            temp = self._parse_outcome_temp(outcome)
-            if temp is None:
-                continue
+        # Convert forecast temps to outcome unit if needed
+        if unit == "F":
+            member_temps = [t * 9 / 5 + 32 for t in max_temps]  # °C → °F
+        else:
+            member_temps = list(max_temps)
 
-            if "or below" in outcome.lower() or "or less" in outcome.lower():
-                parsed_buckets.append((outcome, -999, temp + 0.5))
-            elif "or higher" in outcome.lower() or "or more" in outcome.lower() or "+" in outcome:
-                parsed_buckets.append((outcome, temp - 0.5, 999))
+        # Parse outcome buckets: extract temperature ranges
+        parsed_buckets: list[tuple[str, float, float]] = []  # (label, low_incl, high_excl)
+
+        for outcome in outcomes:
+            lower = outcome.lower()
+
+            if "or below" in lower or "or less" in lower:
+                temp = self._parse_outcome_temp(outcome)
+                if temp is None:
+                    continue
+                # "57°F or below" → (-inf, 58)  (i.e. ≤57, which means <58 in integer world)
+                parsed_buckets.append((outcome, -999, temp + 1 if unit == "F" else temp + 0.5))
+
+            elif "or higher" in lower or "or more" in lower or "+" in lower:
+                temp = self._parse_outcome_temp(outcome)
+                if temp is None:
+                    continue
+                # "76°F or higher" → [76, +inf)
+                parsed_buckets.append((outcome, temp, 999))
+
             else:
-                # Single degree: e.g. "18°C" means [17.5, 18.5)
-                parsed_buckets.append((outcome, temp - 0.5, temp + 0.5))
+                # Range "66-67°F" or single "18°C"
+                m = re.search(r"(-?\d+)\s*[-–]\s*(-?\d+)", outcome)
+                if m:
+                    low = float(m.group(1))
+                    high = float(m.group(2))
+                    # "66-67°F" → [66, 68)  (covers 66.0..67.99)
+                    parsed_buckets.append((outcome, low, high + 1))
+                else:
+                    temp = self._parse_outcome_temp(outcome)
+                    if temp is None:
+                        continue
+                    # Single degree: "18°C" → [17.5, 18.5)
+                    parsed_buckets.append((outcome, temp - 0.5, temp + 0.5))
 
         if not parsed_buckets:
             return {}
 
         # Count members falling into each bucket
         counts: dict[str, int] = {label: 0 for label, _, _ in parsed_buckets}
-        for temp in max_temps:
+        for temp in member_temps:
             for label, low, high in parsed_buckets:
                 if low <= temp < high:
                     counts[label] += 1
                     break
             else:
-                # Temp outside all buckets — assign to nearest
+                # Temp outside all buckets — assign to nearest edge
                 if temp < parsed_buckets[0][1]:
                     counts[parsed_buckets[0][0]] += 1
                 else:
@@ -707,27 +868,43 @@ class WeatherScanner:
         return {label: count / n_members for label, count in counts.items()}
 
     def _parse_outcome_temp(self, outcome: str) -> float | None:
-        """Extract temperature value from outcome label.
+        """Extract representative temperature from outcome label.
 
-        Examples: "18°C" → 18, "72°F" → 22.2, "17°C or below" → 17
+        Returns the representative temp in the ORIGINAL unit (no conversion).
+        For ranges like "66-67°F", returns the midpoint (66.5).
+        For "or below"/"or higher", returns the boundary value.
+
+        Examples:
+          "18°C" → 18.0
+          "72°F" → 72.0
+          "66-67°F" → 66.5
+          "17°C or below" → 17.0
+          "-5°C" → -5.0
         """
-        # Match patterns like "18°C", "72°F", "18 °C"
-        match = re.search(r"(-?\d+)\s*°\s*([CF])", outcome)
-        if not match:
-            # Try plain number
-            match = re.search(r"(-?\d+)", outcome)
-            if not match:
-                return None
-            return float(match.group(1))
+        # Range: "66-67°F" or "20-21°C"
+        m = re.search(r"(-?\d+)\s*[-–]\s*(-?\d+)\s*°\s*([CF])", outcome)
+        if m:
+            low = float(m.group(1))
+            high = float(m.group(2))
+            return (low + high) / 2
 
-        temp = float(match.group(1))
-        unit = match.group(2)
+        # Single temp: "18°C", "72°F", "18 °C"
+        m = re.search(r"(-?\d+)\s*°\s*([CF])", outcome)
+        if m:
+            return float(m.group(1))
 
-        if unit == "F":
-            # Convert to Celsius (Open-Meteo returns °C)
-            temp = (temp - 32) * 5 / 9
+        # Plain number fallback
+        m = re.search(r"(-?\d+)", outcome)
+        if m:
+            return float(m.group(1))
 
-        return temp
+        return None
+
+    def _outcome_unit(self, outcome: str) -> str:
+        """Detect unit from outcome label. Returns 'F' or 'C'."""
+        if "°F" in outcome:
+            return "F"
+        return "C"
 
     # ── Evaluation ───────────────────────────────────────────────────────
 
@@ -826,8 +1003,8 @@ class WeatherScanner:
 
         trade = WeatherTrade(
             trade_id=f"wx_{uuid.uuid4().hex[:12]}",
-            condition_id=market.condition_id,
-            question=market.question,
+            condition_id=market.condition_ids[opp.best_outcome_idx],
+            question=market.event_title,
             city=market.city_slug,
             outcome=opp.best_outcome_label,
             shares=round(shares, 2),
@@ -937,7 +1114,7 @@ class WeatherScanner:
             # Parse the trade's target date from the question
             # Only check if the market date has passed
             market = next(
-                (m for m in self._markets if m.condition_id == trade.condition_id),
+                (m for m in self._markets if trade.condition_id in m.condition_ids),
                 None,
             )
             if not market:
@@ -1022,30 +1199,48 @@ class WeatherScanner:
 
         return None
 
-    def _determine_winner(self, actual_temp: float, outcomes: list[str]) -> str | None:
-        """Determine which outcome won given the actual temperature.
+    def _determine_winner(self, actual_temp_c: float, outcomes: list[str]) -> str | None:
+        """Determine which outcome won given the actual temperature (°C from API).
 
-        Uses same bucket logic as _build_distribution:
-          - "X°C or below": (-inf, X+0.5)
-          - "X°C": [X-0.5, X+0.5)
-          - "X°C or higher": [X-0.5, +inf)
-        Iterates in order; first match wins.
+        Converts to °F if outcomes use Fahrenheit. Uses same bucket ranges
+        as _build_distribution.
         """
-        for outcome in outcomes:
-            temp = self._parse_outcome_temp(outcome)
-            if temp is None:
-                continue
+        # Detect unit and convert actual temp if needed
+        unit = "C"
+        for o in outcomes:
+            if "°F" in o:
+                unit = "F"
+                break
 
-            if "or below" in outcome.lower() or "or less" in outcome.lower():
-                if actual_temp < temp + 0.5:
+        actual = actual_temp_c * 9 / 5 + 32 if unit == "F" else actual_temp_c
+
+        for outcome in outcomes:
+            lower = outcome.lower()
+
+            if "or below" in lower or "or less" in lower:
+                temp = self._parse_outcome_temp(outcome)
+                if temp is not None:
+                    boundary = temp + 1 if unit == "F" else temp + 0.5
+                    if actual < boundary:
+                        return outcome
+
+            elif "or higher" in lower or "or more" in lower or "+" in outcome:
+                temp = self._parse_outcome_temp(outcome)
+                if temp is not None and actual >= temp:
                     return outcome
-            elif "or higher" in outcome.lower() or "or more" in outcome.lower() or "+" in outcome:
-                if actual_temp >= temp - 0.5:
-                    return outcome
+
             else:
-                # Single degree bucket: [temp-0.5, temp+0.5)
-                if temp - 0.5 <= actual_temp < temp + 0.5:
-                    return outcome
+                # Range "66-67°F" or single "18°C"
+                m = re.search(r"(-?\d+)\s*[-–]\s*(-?\d+)", outcome)
+                if m:
+                    low = float(m.group(1))
+                    high = float(m.group(2))
+                    if low <= actual < high + 1:
+                        return outcome
+                else:
+                    temp = self._parse_outcome_temp(outcome)
+                    if temp is not None and temp - 0.5 <= actual < temp + 0.5:
+                        return outcome
 
         return None
 

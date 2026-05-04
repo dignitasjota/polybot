@@ -48,6 +48,7 @@ class TestCityCoords:
         expected = [
             "hong-kong", "taipei", "seoul", "tokyo", "paris",
             "london", "new-york", "chicago", "singapore", "shanghai",
+            "atlanta", "los-angeles", "miami", "san-francisco",
         ]
         for city in expected:
             assert city in CITY_COORDS, f"{city} missing from CITY_COORDS"
@@ -69,10 +70,9 @@ class TestOutcomeParsing:
     def test_parse_celsius_with_space(self, scanner):
         assert scanner._parse_outcome_temp("18 °C") == 18.0
 
-    def test_parse_fahrenheit(self, scanner):
-        # 72°F = 22.22°C
-        result = scanner._parse_outcome_temp("72°F")
-        assert abs(result - 22.22) < 0.1
+    def test_parse_fahrenheit_no_conversion(self, scanner):
+        """_parse_outcome_temp now returns original value without converting."""
+        assert scanner._parse_outcome_temp("72°F") == 72.0
 
     def test_parse_below(self, scanner):
         assert scanner._parse_outcome_temp("17°C or below") == 17.0
@@ -86,11 +86,42 @@ class TestOutcomeParsing:
     def test_parse_no_match(self, scanner):
         assert scanner._parse_outcome_temp("Unknown") is None
 
+    def test_parse_range_fahrenheit(self, scanner):
+        """Range outcomes like '66-67°F' return midpoint."""
+        assert scanner._parse_outcome_temp("66-67°F") == 66.5
+
+    def test_parse_range_celsius(self, scanner):
+        assert scanner._parse_outcome_temp("20-21°C") == 20.5
+
+
+# ── Label extraction ────────────────────────────────────────────────────
+
+class TestLabelExtraction:
+    def test_between_range(self, scanner):
+        q = "Will the highest temperature in LA be between 66-67°F on May 6?"
+        assert scanner._extract_outcome_label(q) == "66-67°F"
+
+    def test_or_below(self, scanner):
+        q = "Will the highest temperature in LA be 57°F or below on May 6?"
+        assert scanner._extract_outcome_label(q) == "57°F or below"
+
+    def test_or_higher(self, scanner):
+        q = "Will the highest temperature in LA be 76°F or higher on May 6?"
+        assert scanner._extract_outcome_label(q) == "76°F or higher"
+
+    def test_single_temp(self, scanner):
+        q = "Will the highest temperature in LA be 65°F on May 6?"
+        assert scanner._extract_outcome_label(q) == "65°F"
+
+    def test_no_match(self, scanner):
+        q = "Will it rain tomorrow?"
+        assert scanner._extract_outcome_label(q) is None
+
 
 # ── Distribution building ────────────────────────────────────────────────
 
 class TestBuildDistribution:
-    def test_unanimous_agreement(self, scanner):
+    def test_unanimous_agreement_celsius(self, scanner):
         """All members predict same temp → 100% on one bucket."""
         outcomes = ["17°C or below", "18°C", "19°C", "20°C", "21°C or higher"]
         max_temps = [19.2] * 51  # All predict ~19°C
@@ -99,17 +130,16 @@ class TestBuildDistribution:
         assert dist["19°C"] == pytest.approx(1.0)
         assert dist["18°C"] == pytest.approx(0.0)
 
-    def test_split_distribution(self, scanner):
+    def test_split_distribution_celsius(self, scanner):
         """Members split between two buckets."""
         outcomes = ["14°C or below", "15°C", "16°C", "17°C or higher"]
-        # 30 members predict 15, 21 predict 16
         max_temps = [15.1] * 30 + [16.2] * 21
 
         dist = scanner._build_distribution(max_temps, outcomes)
         assert dist["15°C"] == pytest.approx(30 / 51, abs=0.01)
         assert dist["16°C"] == pytest.approx(21 / 51, abs=0.01)
 
-    def test_edge_buckets(self, scanner):
+    def test_edge_buckets_celsius(self, scanner):
         """Extreme temperatures go to edge buckets."""
         outcomes = ["17°C or below", "18°C", "19°C", "20°C or higher"]
         max_temps = [15.0] * 10 + [19.0] * 20 + [22.0] * 21
@@ -124,6 +154,33 @@ class TestBuildDistribution:
         dist = scanner._build_distribution([], outcomes)
         assert dist == {}
 
+    def test_fahrenheit_range_distribution(self, scanner):
+        """Fahrenheit range outcomes: temps in °C converted to °F for bucketing."""
+        outcomes = ["57°F or below", "58-59°F", "60-61°F", "62°F or higher"]
+        # All ensemble members predict 15.5°C = 59.9°F → should fall in "58-59°F"
+        max_temps = [15.5] * 51  # 15.5°C = 59.9°F
+
+        dist = scanner._build_distribution(max_temps, outcomes)
+        assert dist["58-59°F"] == pytest.approx(1.0)
+
+    def test_fahrenheit_edge_bucket(self, scanner):
+        """Cold temps go to 'or below' bucket."""
+        outcomes = ["57°F or below", "58-59°F", "60-61°F", "62°F or higher"]
+        # 13°C = 55.4°F → "57°F or below"
+        max_temps = [13.0] * 51
+
+        dist = scanner._build_distribution(max_temps, outcomes)
+        assert dist["57°F or below"] == pytest.approx(1.0)
+
+    def test_fahrenheit_high_bucket(self, scanner):
+        """Hot temps go to 'or higher' bucket."""
+        outcomes = ["57°F or below", "58-59°F", "60-61°F", "62°F or higher"]
+        # 20°C = 68°F → "62°F or higher"
+        max_temps = [20.0] * 51
+
+        dist = scanner._build_distribution(max_temps, outcomes)
+        assert dist["62°F or higher"] == pytest.approx(1.0)
+
 
 # ── Market evaluation ────────────────────────────────────────────────────
 
@@ -131,15 +188,16 @@ class TestEvaluateMarket:
     def _make_market(self, prices, outcomes=None):
         if outcomes is None:
             outcomes = ["14°C or below", "15°C", "16°C", "17°C", "18°C or higher"]
+        n = len(outcomes)
         return WeatherMarket(
             event_slug="test",
-            condition_id="0x123",
-            question="Highest temperature in Paris on May 5?",
+            event_title="Highest temperature in Paris on May 5?",
             city_slug="paris",
             target_date=date.today() + timedelta(days=1),
             outcomes=outcomes,
             outcome_prices=prices,
-            token_ids=[f"tok_{i}" for i in range(len(outcomes))],
+            condition_ids=[f"0x{i:03d}" for i in range(n)],
+            token_ids=[f"tok_{i}" for i in range(n)],
             fee_rate=0.05,
         )
 
@@ -158,7 +216,7 @@ class TestEvaluateMarket:
         market = self._make_market([0.05, 0.40, 0.30, 0.15, 0.10])
         forecast = self._make_forecast({
             "14°C or below": 0.02,
-            "15°C": 0.60,  # Forecast says 60%, market says 40% → 20% edge
+            "15°C": 0.60,
             "16°C": 0.25,
             "17°C": 0.08,
             "18°C or higher": 0.05,
@@ -182,14 +240,14 @@ class TestEvaluateMarket:
         })
 
         opp = scanner._evaluate_market(market, forecast)
-        assert opp is None  # No edge above min_edge (0.08)
+        assert opp is None
 
     def test_small_edge_filtered(self, scanner):
         """Edge below min_edge threshold → no opportunity."""
         market = self._make_market([0.05, 0.45, 0.30, 0.15, 0.05])
         forecast = self._make_forecast({
             "14°C or below": 0.05,
-            "15°C": 0.50,  # 5% edge — below min_edge=8%
+            "15°C": 0.50,
             "16°C": 0.30,
             "17°C": 0.10,
             "18°C or higher": 0.05,
@@ -199,7 +257,7 @@ class TestEvaluateMarket:
         assert opp is None
 
     def test_low_agreement_filtered(self, scanner):
-        """Low model agreement → skip (too uncertain)."""
+        """Low model agreement → skip."""
         market = self._make_market([0.05, 0.10, 0.30, 0.30, 0.25])
         forecast = self._make_forecast({
             "14°C or below": 0.10,
@@ -208,7 +266,6 @@ class TestEvaluateMarket:
             "17°C": 0.10,
             "18°C or higher": 0.10,
         })
-        # agreement = max(probs) = 0.10 < min_agreement=0.20
         forecast.agreement = 0.10
 
         opp = scanner._evaluate_market(market, forecast)
@@ -220,7 +277,7 @@ class TestEvaluateMarket:
         forecast = self._make_forecast({
             "14°C or below": 0.01,
             "15°C": 0.01,
-            "16°C": 0.95,  # Huge edge, but market_price=0.80 > max_price=0.75
+            "16°C": 0.95,
             "17°C": 0.02,
             "18°C or higher": 0.01,
         })
@@ -229,124 +286,147 @@ class TestEvaluateMarket:
         assert opp is None
 
 
-# ── Slug/question parsing ────────────────────────────────────────────────
+# ── Event parsing ───────────────────────────────────────────────────────
 
-class TestMarketParsing:
-    def test_parse_slug_standard(self, scanner):
-        """Standard slug format parsing."""
-        mkt = {
-            "slug": "highest-temperature-in-paris-on-may-5-2026",
-            "question": "Highest temperature in Paris on May 5?",
-            "conditionId": "0xabc",
-            "outcomes": ["14°C or below", "15°C", "16°C", "17°C", "18°C or higher"],
-            "outcomePrices": ["0.05", "0.51", "0.37", "0.05", "0.02"],
-            "clobTokenIds": ["t1", "t2", "t3", "t4", "t5"],
-            "active": True,
-            "closed": False,
-            "volume": "84000",
-            "liquidity": "5000",
+class TestEventParsing:
+    def _make_event(self, city, month_name, day, year, outcomes_questions):
+        """Create a mock Gamma API event with nested binary markets."""
+        slug = f"highest-temperature-in-{city}-on-{month_name.lower()}-{day}-{year}"
+        markets = []
+        for i, (question, yes_price) in enumerate(outcomes_questions):
+            markets.append({
+                "question": question,
+                "conditionId": f"0x{i:04d}",
+                "clobTokenIds": [f"tok_yes_{i}", f"tok_no_{i}"],
+                "outcomePrices": [str(yes_price), str(round(1 - yes_price, 2))],
+                "active": True,
+                "closed": False,
+                "volume": "1000",
+                "liquidity": "500",
+            })
+        return {
+            "slug": slug,
+            "title": f"Highest temperature in {city.replace('-', ' ').title()} on {month_name} {day}?",
+            "markets": markets,
         }
-        event = {"slug": "highest-temperature-in-paris-on-may-5-2026"}
 
-        result = scanner._parse_temperature_market(mkt, event)
-        # May be None if date is in the past, but test the parsing logic
-        if result:
-            assert result.city_slug == "paris"
-            assert result.target_date.month == 5
-            assert result.target_date.day == 5
-
-    def test_parse_question_fallback(self, scanner):
-        """Parse from question when slug doesn't match pattern."""
+    def test_parse_event_standard(self, scanner):
+        """Parse a standard temperature event with range outcomes."""
         tomorrow = date.today() + timedelta(days=1)
         month_name = tomorrow.strftime("%B")
         day = tomorrow.day
 
-        mkt = {
-            "slug": "some-random-slug",
-            "question": f"Highest temperature in Seoul on {month_name} {day}?",
-            "conditionId": "0xdef",
-            "outcomes": ["20°C or below", "21°C", "22°C", "23°C", "24°C or higher"],
-            "outcomePrices": ["0.10", "0.20", "0.40", "0.20", "0.10"],
-            "clobTokenIds": ["t1", "t2", "t3", "t4", "t5"],
-            "active": True,
-            "closed": False,
-        }
-        event = {"slug": ""}
+        event = self._make_event("paris", month_name, day, "2026", [
+            (f"Will the highest temperature in Paris be 14°C or below on {month_name} {day}?", 0.05),
+            (f"Will the highest temperature in Paris be between 15-16°C on {month_name} {day}?", 0.30),
+            (f"Will the highest temperature in Paris be between 17-18°C on {month_name} {day}?", 0.40),
+            (f"Will the highest temperature in Paris be 19°C or higher on {month_name} {day}?", 0.25),
+        ])
 
-        result = scanner._parse_temperature_market(mkt, event)
+        result = scanner._parse_temperature_event(event)
         assert result is not None
-        assert result.city_slug == "seoul"
+        assert result.city_slug == "paris"
         assert result.target_date == tomorrow
+        assert len(result.outcomes) == 4
+        assert len(result.condition_ids) == 4
+        assert len(result.token_ids) == 4
+        assert result.unit == "C"
 
-    def test_unknown_city_returns_none(self, scanner):
+    def test_parse_event_fahrenheit(self, scanner):
+        """Parse a Fahrenheit temperature event."""
+        tomorrow = date.today() + timedelta(days=1)
+        month_name = tomorrow.strftime("%B")
+        day = tomorrow.day
+
+        event = self._make_event("atlanta", month_name, day, "2026", [
+            (f"Will the highest temperature in Atlanta be 57°F or below on {month_name} {day}?", 0.05),
+            (f"Will the highest temperature in Atlanta be between 58-59°F on {month_name} {day}?", 0.10),
+            (f"Will the highest temperature in Atlanta be between 60-61°F on {month_name} {day}?", 0.30),
+            (f"Will the highest temperature in Atlanta be 62°F or higher on {month_name} {day}?", 0.55),
+        ])
+
+        result = scanner._parse_temperature_event(event)
+        assert result is not None
+        assert result.city_slug == "atlanta"
+        assert result.unit == "F"
+
+    def test_parse_event_unknown_city(self, scanner):
         """Unknown city → None."""
         tomorrow = date.today() + timedelta(days=1)
         month_name = tomorrow.strftime("%B")
-        day = tomorrow.day
 
-        mkt = {
-            "slug": f"highest-temperature-in-timbuktu-on-{month_name.lower()}-{day}-2026",
-            "question": f"Highest temperature in Timbuktu on {month_name} {day}?",
-            "conditionId": "0xghi",
-            "outcomes": ["30°C", "31°C", "32°C"],
-            "outcomePrices": ["0.33", "0.34", "0.33"],
-            "clobTokenIds": ["t1", "t2", "t3"],
-            "active": True,
-            "closed": False,
-        }
-        event = {"slug": ""}
+        event = self._make_event("timbuktu", month_name, tomorrow.day, "2026", [
+            (f"Will the highest temperature in Timbuktu be 30°C on {month_name} {tomorrow.day}?", 0.33),
+            (f"Will the highest temperature in Timbuktu be 31°C on {month_name} {tomorrow.day}?", 0.34),
+            (f"Will the highest temperature in Timbuktu be 32°C on {month_name} {tomorrow.day}?", 0.33),
+        ])
 
-        result = scanner._parse_temperature_market(mkt, event)
+        result = scanner._parse_temperature_event(event)
         assert result is None
 
-    def test_binary_market_rejected(self, scanner):
-        """Binary Yes/No markets → None (need multi-outcome)."""
+    def test_parse_event_too_few_markets(self, scanner):
+        """Event with < 3 binary markets → None."""
         tomorrow = date.today() + timedelta(days=1)
         month_name = tomorrow.strftime("%B")
 
-        mkt = {
-            "slug": f"high-temperature-in-chicago-above-60f-{month_name.lower()}-{tomorrow.day}",
-            "question": f"High temperature in Chicago above 60°F on {month_name} {tomorrow.day}?",
-            "conditionId": "0xjkl",
-            "outcomes": ["Yes", "No"],
-            "outcomePrices": ["0.70", "0.30"],
-            "clobTokenIds": ["t1", "t2"],
-            "active": True,
-            "closed": False,
-        }
-        event = {"slug": ""}
+        event = self._make_event("paris", month_name, tomorrow.day, "2026", [
+            (f"Will the highest temperature in Paris be 20°C on {month_name} {tomorrow.day}?", 0.50),
+            (f"Will the highest temperature in Paris be 21°C on {month_name} {tomorrow.day}?", 0.50),
+        ])
 
-        result = scanner._parse_temperature_market(mkt, event)
-        assert result is None  # < 3 outcomes
+        result = scanner._parse_temperature_event(event)
+        assert result is None
+
+    def test_parse_event_past_date(self, scanner):
+        """Past date → None."""
+        yesterday = date.today() - timedelta(days=1)
+        month_name = yesterday.strftime("%B")
+
+        event = self._make_event("paris", month_name, yesterday.day, str(yesterday.year), [
+            (f"Will the highest temperature in Paris be 18°C on {month_name} {yesterday.day}?", 0.33),
+            (f"Will the highest temperature in Paris be 19°C on {month_name} {yesterday.day}?", 0.34),
+            (f"Will the highest temperature in Paris be 20°C on {month_name} {yesterday.day}?", 0.33),
+        ])
+
+        result = scanner._parse_temperature_event(event)
+        assert result is None
 
 
 # ── Resolution ───────────────────────────────────────────────────────────
 
 class TestResolution:
-    def test_determine_winner_exact(self, scanner):
+    def test_determine_winner_celsius_exact(self, scanner):
         outcomes = ["17°C or below", "18°C", "19°C", "20°C or higher"]
         assert scanner._determine_winner(18.3, outcomes) == "18°C"
         assert scanner._determine_winner(19.4, outcomes) == "19°C"
 
-    def test_determine_winner_edge_low(self, scanner):
+    def test_determine_winner_celsius_edge_low(self, scanner):
         outcomes = ["17°C or below", "18°C", "19°C", "20°C or higher"]
         assert scanner._determine_winner(16.0, outcomes) == "17°C or below"
         assert scanner._determine_winner(17.2, outcomes) == "17°C or below"
 
-    def test_determine_winner_edge_high(self, scanner):
+    def test_determine_winner_celsius_edge_high(self, scanner):
         outcomes = ["17°C or below", "18°C", "19°C", "20°C or higher"]
         assert scanner._determine_winner(20.1, outcomes) == "20°C or higher"
         assert scanner._determine_winner(25.0, outcomes) == "20°C or higher"
 
-    def test_determine_winner_boundary(self, scanner):
-        """Boundary: "17°C or below" covers <17.5, "18°C" covers [17.5, 18.5)."""
+    def test_determine_winner_celsius_boundary(self, scanner):
+        """Boundary: '17°C or below' covers <17.5, '18°C' covers [17.5, 18.5)."""
         outcomes = ["17°C or below", "18°C", "19°C"]
-        # 17.4 falls in "17°C or below" (< 17.5)
         assert scanner._determine_winner(17.4, outcomes) == "17°C or below"
-        # 17.5 falls in "18°C" bucket [17.5, 18.5)
         assert scanner._determine_winner(17.5, outcomes) == "18°C"
         assert scanner._determine_winner(18.49, outcomes) == "18°C"
         assert scanner._determine_winner(18.5, outcomes) == "19°C"
+
+    def test_determine_winner_fahrenheit_range(self, scanner):
+        """Fahrenheit range outcomes. Input is actual_temp in °C."""
+        outcomes = ["57°F or below", "58-59°F", "60-61°F", "62°F or higher"]
+        # 15°C = 59°F → "58-59°F" (range [58, 60))
+        assert scanner._determine_winner(15.0, outcomes) == "58-59°F"
+        # 13°C = 55.4°F → "57°F or below"
+        assert scanner._determine_winner(13.0, outcomes) == "57°F or below"
+        # 20°C = 68°F → "62°F or higher"
+        assert scanner._determine_winner(20.0, outcomes) == "62°F or higher"
 
 
 # ── Date parsing ─────────────────────────────────────────────────────────
@@ -380,7 +460,7 @@ class TestFeeExtraction:
 
     def test_fallback_default(self, scanner):
         mkt = {}
-        assert scanner._extract_fee_rate(mkt) == 0.05  # weather_fees default
+        assert scanner._extract_fee_rate(mkt) == 0.05
 
 
 # ── Stats ────────────────────────────────────────────────────────────────
