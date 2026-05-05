@@ -34,6 +34,9 @@ if TYPE_CHECKING:
 
 CLOB_URL = "https://clob.polymarket.com"
 
+# Polymarket requires marketable BUY orders to be at least $1 per leg.
+MIN_ORDER_USD = 1.0
+
 logger = structlog.get_logger("polymarket.completeness")
 
 
@@ -120,6 +123,10 @@ class CompletenessScanner:
         self._trades_failed = 0
         self._total_profit = 0.0
         self._started_at: float = 0.0
+
+        # Live balance cache (pUSD free) — refreshed on demand before execution
+        self._live_balance: float | None = None
+        self._last_balance_fetch: float = 0.0
 
         # Redeem callback (set by strategy/runner)
         self._on_redeem = None
@@ -377,6 +384,13 @@ class CompletenessScanner:
         if max_shares < self._config.min_shares:
             return None
 
+        # Polymarket requires each marketable BUY leg to be ≥ $1 of notional.
+        # Binding constraint is the cheap leg: shares × min(prices) ≥ 1.
+        # If we can't satisfy this within max_cost_per_trade, skip.
+        min_price = min(p for p in prices if p > 0)
+        if max_shares * min_price < MIN_ORDER_USD:
+            return None
+
         # Gap calculation
         price_sum = sum(prices)
         gap = 1.0 - price_sum
@@ -476,7 +490,26 @@ class CompletenessScanner:
         """Execute real arb: buy all outcomes in parallel, then redeem."""
         if not self._client:
             logger.error("no_clob_client_for_arb")
+            trade.cost_total = 0.0
             trade.status = "failed"
+            self._trades_failed += 1
+            self._trades.append(trade)
+            return
+
+        # Pre-flight: refresh balance and skip if not enough pUSD for the full arb.
+        # Avoids the half-fill scenario where leg 1 consumes balance and leg 2 fails.
+        balance = await self._refresh_balance()
+        if balance is not None and balance < trade.cost_total:
+            logger.warning(
+                "arb_skipped_insufficient_balance",
+                trade_id=trade.trade_id,
+                balance=f"${balance:.2f}",
+                required=f"${trade.cost_total:.2f}",
+                question=opp.question[:50],
+            )
+            trade.cost_total = 0.0
+            trade.status = "failed"
+            trade.actual_pnl = 0.0
             self._trades_failed += 1
             self._trades.append(trade)
             return
@@ -529,8 +562,13 @@ class CompletenessScanner:
             trade.order_ids = order_ids
 
             if not all_success:
-                # Partial execution — cancel any placed orders
+                # Partial execution — cancel any placed orders.
+                # Reset cost_total to 0: the displayed "cost" was the *expected* spend;
+                # since cancellation reverses any partial fills (best-effort), the
+                # net realized cost is effectively 0 when no leg matched, and the
+                # half-filled case is already a residual position outside the arb.
                 await self._cancel_partial_orders(order_ids)
+                trade.cost_total = 0.0
                 trade.status = "failed"
                 self._trades_failed += 1
                 self._trades.append(trade)
@@ -539,6 +577,9 @@ class CompletenessScanner:
             trade.status = "confirmed"
             self._trades.append(trade)
             self._trades_executed += 1
+
+            # Force balance refresh on next check — both legs consumed pUSD.
+            self._last_balance_fetch = 0.0
 
             logger.info(
                 "arb_orders_placed",
@@ -556,9 +597,38 @@ class CompletenessScanner:
 
         except Exception as e:
             logger.error("arb_execution_error", error=str(e))
+            trade.cost_total = 0.0
             trade.status = "failed"
             self._trades_failed += 1
             self._trades.append(trade)
+
+    async def _refresh_balance(self) -> float | None:
+        """Fetch free pUSD from CLOB. Cached for 30s to avoid excess RPC calls."""
+        if not self._client:
+            return None
+        now = time.time()
+        if self._live_balance is not None and (now - self._last_balance_fetch) < 30.0:
+            return self._live_balance
+        try:
+            from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
+
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(
+                None,
+                lambda: self._client.get_balance_allowance(
+                    BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+                ),
+            )
+            if not (isinstance(resp, dict) and "balance" in resp):
+                return self._live_balance
+            raw = float(resp["balance"] or 0)
+            # Auto-detect format (matches executor.py): raw > 1000 ⇒ 6-decimal units.
+            self._live_balance = raw / 1e6 if raw > 1000 else raw
+            self._last_balance_fetch = now
+            return self._live_balance
+        except Exception as e:
+            logger.warning("completeness_balance_fetch_failed", error=str(e))
+            return self._live_balance  # fall back to cached value (may be None)
 
     async def _post_order_async(self, signed_order) -> dict:
         """Post an order to CLOB (sync call wrapped in executor for parallel)."""

@@ -80,7 +80,12 @@ Se cambia desde el panel web (Settings). Al cambiar de modo:
 
 1. **Paper → Live**: Se inicializa el cliente CLOB V2 con credenciales, se ejecuta `cancel_all()` para liberar órdenes huérfanas, se refresca el balance pUSD real, se **resetean todas las stats y apuestas del período paper** (bets, wins, losses, P&L), y se establece el balance real como nuevo `starting_balance`. Esto garantiza una vista limpia de la operativa live.
 2. **Live → Paper**: Se resetean stats y se vuelve al `simulated_balance` del config.
-3. **Métodos de reset**: `CopyTrader.reset_stats()`, `ClosingArbitrageDetector.reset_stats()`, `Executor.reset_trades()` — limpian todo el historial y reinician contadores. Mantienen `polls`/`total_scans` para diagnóstico.
+3. **Cualquier cambio de modo** (paper↔dry_run↔live): Todas las estrategias resetean sus stats y trades internos via `set_mode()`. Cada modo empieza con datos limpios.
+4. **Métodos de reset por estrategia**:
+   - `CopyTrader.reset_stats()`, `ClosingArbitrageDetector.reset_stats()`, `Executor.reset_trades()` — directional/copy
+   - `CompletenessScanner.reset_stats()` — borra trades, cooldowns, contadores
+   - `LiquidityProvider.reset_stats()` + `LiquidityMetrics.reset()` — borra posiciones, órdenes, métricas diarias
+   - `WeatherScanner.reset_stats()` — borra trades, cache forecasts, contadores, persiste estado vacío
 
 ### Balance en modo live
 
