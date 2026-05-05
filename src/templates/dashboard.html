@@ -18,6 +18,9 @@
     .mode-live { background: #ff4444; color: #fff; }
     .mode-paper { background: #00ff88; color: #000; }
     .mode-disabled { background: #333; color: #888; }
+    .collapsible-toggle { cursor: pointer; user-select: none; }
+    .collapsible-toggle:hover { color: #00ff88; }
+    .toggle-icon { font-size: 0.7em; margin-left: 6px; }
 </style>
 {% endblock %}
 
@@ -159,22 +162,28 @@
 </div>
 {% endfor %}
 
-<h2>MONITORED MARKETS ({{ markets_count }})</h2>
-<table>
-    <thead>
-        <tr>
-            <th>Market</th>
-            <th>Time Left</th>
-            <th>YES Ask</th>
-            <th>NO Ask</th>
-            <th>Best</th>
-            <th>Status</th>
-        </tr>
-    </thead>
-    <tbody>
-        {{ markets_html|safe }}
-    </tbody>
-</table>
+<div class="collapsible-section">
+    <h2 class="collapsible-toggle" onclick="toggleSection('markets-section')">
+        MONITORED MARKETS ({{ markets_count }}) <span id="markets-section-icon" class="toggle-icon">&#9654;</span>
+    </h2>
+    <div id="markets-section" class="collapsible-content" style="display:none;">
+        <table>
+            <thead>
+                <tr>
+                    <th>Market</th>
+                    <th>Time Left</th>
+                    <th>YES Ask</th>
+                    <th>NO Ask</th>
+                    <th>Best</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{ markets_html|safe }}
+            </tbody>
+        </table>
+    </div>
+</div>
 
 <script>
 function toggleUpdates(groupIdx) {
@@ -185,6 +194,17 @@ function toggleUpdates(groupIdx) {
     btn.textContent = isVisible
         ? '+ ' + rows.length
         : '− ' + rows.length;
+}
+function toggleSection(id) {
+    const el = document.getElementById(id);
+    const icon = document.getElementById(id + '-icon');
+    if (el.style.display === 'none') {
+        el.style.display = 'block';
+        icon.innerHTML = '&#9660;';
+    } else {
+        el.style.display = 'none';
+        icon.innerHTML = '&#9654;';
+    }
 }
 </script>
 {% endblock %}
