@@ -1097,6 +1097,26 @@ Nueva estrategia que predice temperatura máxima diaria usando ensemble ECMWF IF
 | `max_price` | 0.75 | **0.65** | Más upside por trade |
 | `max_forecast_days` | 3 | **2** | Ensemble mucho más fiable a ≤48h |
 
+### Weather: Robustez operativa (Mayo 2026)
+
+**Bankroll efectivo**: Kelly sizing usa bankroll - capital comprometido en trades pendientes. Evita sobre-exposición con múltiples trades abiertos simultáneamente.
+
+**Resolución independiente**: Cada `WeatherTrade` almacena `target_date`, `outcomes` y `unit` al ejecutarse. `check_resolutions()` no depende de `self._markets` (que se sobreescribe cada scan). Trades huérfanos se resuelven correctamente aunque el mercado ya no esté activo en Gamma API.
+
+**Re-check precio en live**: Antes de colocar una orden real, consulta el precio actual vía CLOB `/book`. Si el edge cayó por debajo de `min_edge` (otro trader ya corrigió), cancela la ejecución. Protege contra datos stale (forecast cacheado 1h).
+
+**Pruning de trades**: Trades resueltos con >7 días se eliminan de memoria cada ciclo. Hard cap de 500 trades como safety net para operación continua.
+
+**Pre-filtro de mercados**: `_has_edge_potential()` descarta mercados donde todos los precios > `max_price` antes de consultar la API de forecast. Ahorra requests innecesarias.
+
+**Rate limiting Open-Meteo**: Semáforo de 5 requests concurrentes máximo. Maneja 429 con retry delay de 2s.
+
+**Persistencia** (`data/weather_trades.json`):
+- Guarda trades pendientes/confirmados + stats acumulados (wins, losses, P&L, scans)
+- Restaura al inicio → deduplicación, bankroll efectivo y dashboard sobreviven reinicios
+- Compatible con formato anterior (lista plana de trades)
+- Al cambiar de modo (paper→live): `reset_stats()` borra trades, contadores y cache. Live empieza de cero con datos 100% reales
+
 ---
 
 ## Idioma
