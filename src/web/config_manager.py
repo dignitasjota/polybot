@@ -344,6 +344,110 @@ class ConfigManager:
 
         self._persist()
 
+    # ── Weather ────────────────────────────────────────────────────
+
+    def get_weather_params(self) -> dict:
+        """Return current weather strategy params."""
+        for runner in self.bot.accounts:
+            strat = runner.strategies.get("weather")
+            if strat and hasattr(strat, "config"):
+                cfg = strat.config
+                return {
+                    "max_bet_per_trade": cfg.max_bet_per_trade,
+                    "bankroll": cfg.bankroll,
+                    "kelly_multiplier": cfg.kelly_multiplier,
+                    "max_bets_per_cycle": cfg.max_bets_per_cycle,
+                    "max_price": cfg.max_price,
+                    "min_edge": cfg.min_edge,
+                    "min_forecast_prob": cfg.min_forecast_prob,
+                    "min_agreement": cfg.min_agreement,
+                    "scan_interval": cfg.scan_interval,
+                    "max_forecast_days": cfg.max_forecast_days,
+                    "forecast_cache_ttl": cfg.forecast_cache_ttl,
+                }
+        # Defaults
+        return {
+            "max_bet_per_trade": 15.0,
+            "bankroll": 300.0,
+            "kelly_multiplier": 0.30,
+            "max_bets_per_cycle": 8,
+            "max_price": 0.65,
+            "min_edge": 0.10,
+            "min_forecast_prob": 0.15,
+            "min_agreement": 0.30,
+            "scan_interval": 900,
+            "max_forecast_days": 2,
+            "forecast_cache_ttl": 3600,
+        }
+
+    def set_weather_params(self, params: dict):
+        """Update weather params in-memory (config + scanner) and persist."""
+        for runner in self.bot.accounts:
+            strat = runner.strategies.get("weather")
+            if not strat:
+                continue
+
+            cfg = strat.config
+            scanner = strat.scanner if hasattr(strat, "scanner") else None
+
+            if "max_bet_per_trade" in params:
+                val = float(params["max_bet_per_trade"])
+                cfg.max_bet_per_trade = val
+                if scanner:
+                    scanner._config.max_bet_per_trade = val
+            if "bankroll" in params:
+                val = float(params["bankroll"])
+                cfg.bankroll = val
+                if scanner:
+                    scanner._config.bankroll = val
+            if "kelly_multiplier" in params:
+                val = float(params["kelly_multiplier"])
+                cfg.kelly_multiplier = val
+                if scanner:
+                    scanner._config.kelly_multiplier = val
+            if "max_bets_per_cycle" in params:
+                val = int(params["max_bets_per_cycle"])
+                cfg.max_bets_per_cycle = val
+                if scanner:
+                    scanner._config.max_bets_per_cycle = val
+            if "max_price" in params:
+                val = float(params["max_price"])
+                cfg.max_price = val
+                if scanner:
+                    scanner._config.max_price = val
+            if "min_edge" in params:
+                val = float(params["min_edge"])
+                cfg.min_edge = val
+                if scanner:
+                    scanner._config.min_edge = val
+            if "min_forecast_prob" in params:
+                val = float(params["min_forecast_prob"])
+                cfg.min_forecast_prob = val
+                if scanner:
+                    scanner._config.min_forecast_prob = val
+            if "min_agreement" in params:
+                val = float(params["min_agreement"])
+                cfg.min_agreement = val
+                if scanner:
+                    scanner._config.min_agreement = val
+            if "scan_interval" in params:
+                val = int(params["scan_interval"])
+                cfg.scan_interval = val
+                if scanner:
+                    scanner._config.scan_interval = val
+            if "max_forecast_days" in params:
+                val = int(params["max_forecast_days"])
+                cfg.max_forecast_days = val
+                if scanner:
+                    scanner._config.max_forecast_days = val
+            if "forecast_cache_ttl" in params:
+                val = int(params["forecast_cache_ttl"])
+                cfg.forecast_cache_ttl = val
+                if scanner:
+                    scanner._config.forecast_cache_ttl = val
+
+        self._persist()
+
     # ── Crypto Configs ────────────────────────────────────────────
 
     def get_crypto_configs(self) -> dict:
@@ -459,6 +563,24 @@ class ConfigManager:
                     liq_raw["scan_interval"] = lc.scan_interval
                     liq_raw["min_daily_rate"] = lc.min_daily_rate
                     liq_raw["min_reward_per_dollar"] = lc.min_reward_per_dollar
+
+                # Persist weather config
+                weather_strat = runner.strategies.get("weather")
+                if weather_strat and hasattr(weather_strat, "config"):
+                    wc = weather_strat.config
+                    acc_raw.setdefault("weather", {})
+                    w_raw = acc_raw["weather"]
+                    w_raw["max_bet_per_trade"] = wc.max_bet_per_trade
+                    w_raw["bankroll"] = wc.bankroll
+                    w_raw["kelly_multiplier"] = wc.kelly_multiplier
+                    w_raw["max_bets_per_cycle"] = wc.max_bets_per_cycle
+                    w_raw["max_price"] = wc.max_price
+                    w_raw["min_edge"] = wc.min_edge
+                    w_raw["min_forecast_prob"] = wc.min_forecast_prob
+                    w_raw["min_agreement"] = wc.min_agreement
+                    w_raw["scan_interval"] = wc.scan_interval
+                    w_raw["max_forecast_days"] = wc.max_forecast_days
+                    w_raw["forecast_cache_ttl"] = wc.forecast_cache_ttl
 
         with open(self._toml_path, "wb") as f:
             tomli_w.dump(raw, f)

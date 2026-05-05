@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% block title %}Weather — Polymarket Bot{% endblock %}
+
+{% block content %}
+<h2>WEATHER PREDICTION CONFIGURATION</h2>
+
+{# Status #}
+<div class="section">
+    <h3>STATUS</h3>
+    <div style="display:flex;gap:20px;flex-wrap:wrap;">
+        <div class="stat">
+            <div class="label">Running</div>
+            <div class="value" style="color:{{ '#00ff88' if stats.running else '#ff4444' }};">
+                {{ 'YES' if stats.running else 'NO' }}
+            </div>
+        </div>
+        <div class="stat">
+            <div class="label">Mode</div>
+            <div class="value">{{ stats.mode|upper }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Total Scans</div>
+            <div class="value">{{ stats.total_scans }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Markets Found</div>
+            <div class="value">{{ stats.markets_found }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Trades Executed</div>
+            <div class="value">{{ stats.trades_executed }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Win Rate</div>
+            <div class="value">{{ "%.1f"|format(stats.win_rate * 100) }}%</div>
+        </div>
+        <div class="stat">
+            <div class="label">P&amp;L</div>
+            <div class="value" style="color:{{ '#00ff88' if stats.total_pnl >= 0 else '#ff4444' }};">
+                ${{ "%+.2f"|format(stats.total_pnl) }}
+            </div>
+        </div>
+    </div>
+</div>
+
+{# Bet Sizing #}
+<div class="section">
+    <h3>BET SIZING</h3>
+    <form method="POST" action="/panel/weather/params">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Max Bet Per Trade ($)</label>
+                <input type="number" name="max_bet_per_trade" value="{{ params.max_bet_per_trade }}" step="1" min="1" max="100">
+                <span class="desc">Tope absoluto en $ por trade individual</span>
+            </div>
+            <div class="form-group">
+                <label>Bankroll ($)</label>
+                <input type="number" name="bankroll" value="{{ params.bankroll }}" step="10" min="10">
+                <span class="desc">Capital total asignado a weather. Afecta el Kelly sizing</span>
+            </div>
+            <div class="form-group">
+                <label>Kelly Multiplier</label>
+                <input type="number" name="kelly_multiplier" value="{{ params.kelly_multiplier }}" step="0.05" min="0.05" max="1.0">
+                <span class="desc">Fraccion de Kelly (0.25 = quarter-Kelly, conservador)</span>
+            </div>
+        </div>
+        <div class="form-row" style="margin-top:12px;">
+            <div class="form-group">
+                <label>Max Bets Per Cycle</label>
+                <input type="number" name="max_bets_per_cycle" value="{{ params.max_bets_per_cycle }}" min="1" max="10">
+                <span class="desc">Maximo trades nuevos por ciclo de scan (15 min)</span>
+            </div>
+            <div class="form-group">
+                <label>Max Price</label>
+                <input type="number" name="max_price" value="{{ params.max_price }}" step="0.05" min="0.05" max="0.95">
+                <span class="desc">No comprar outcomes con precio superior (poco upside)</span>
+            </div>
+        </div>
+        <div style="margin-top:15px;">
+            <button type="submit" class="btn btn-success">Save Bet Sizing</button>
+        </div>
+    </form>
+</div>
+
+{# Edge Thresholds #}
+<div class="section">
+    <h3>EDGE THRESHOLDS</h3>
+    <form method="POST" action="/panel/weather/params">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Min Edge</label>
+                <input type="number" name="min_edge" value="{{ params.min_edge }}" step="0.01" min="0.01" max="0.50">
+                <span class="desc">Edge minimo (forecast_prob - market_price) para apostar. 0.08 = 8%</span>
+            </div>
+            <div class="form-group">
+                <label>Min Forecast Prob</label>
+                <input type="number" name="min_forecast_prob" value="{{ params.min_forecast_prob }}" step="0.05" min="0.05" max="0.90">
+                <span class="desc">Prob minima del ensemble para considerar un outcome (filtra ruido)</span>
+            </div>
+            <div class="form-group">
+                <label>Min Agreement</label>
+                <input type="number" name="min_agreement" value="{{ params.min_agreement }}" step="0.05" min="0.05" max="0.90">
+                <span class="desc">Porcentaje minimo de modelos que deben coincidir en el top bucket</span>
+            </div>
+        </div>
+        <div style="margin-top:15px;">
+            <button type="submit" class="btn btn-success">Save Thresholds</button>
+        </div>
+    </form>
+</div>
+
+{# Timing #}
+<div class="section">
+    <h3>TIMING</h3>
+    <form method="POST" action="/panel/weather/params">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Scan Interval (s)</label>
+                <input type="number" name="scan_interval" value="{{ params.scan_interval }}" step="60" min="60" max="7200">
+                <span class="desc">Segundos entre ciclos de scan. 900 = cada 15 min</span>
+            </div>
+            <div class="form-group">
+                <label>Max Forecast Days</label>
+                <input type="number" name="max_forecast_days" value="{{ params.max_forecast_days }}" min="1" max="7">
+                <span class="desc">Solo apostar en mercados a N dias o menos (forecast mas fiable)</span>
+            </div>
+            <div class="form-group">
+                <label>Forecast Cache TTL (s)</label>
+                <input type="number" name="forecast_cache_ttl" value="{{ params.forecast_cache_ttl }}" step="300" min="300" max="7200">
+                <span class="desc">Tiempo de cache del forecast (evita consultas excesivas)</span>
+            </div>
+        </div>
+        <div style="margin-top:15px;">
+            <button type="submit" class="btn btn-success">Save Timing</button>
+        </div>
+    </form>
+</div>
+
+{# Active Forecasts #}
+{% if forecasts %}
+<div class="section">
+    <h3>ACTIVE FORECASTS ({{ forecasts|length }})</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>City / Date</th>
+                <th>Top Prediction</th>
+                <th>Probability</th>
+                <th>Agreement</th>
+                <th>Members</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for f in forecasts %}
+            <tr>
+                <td>{{ f.city_date }}</td>
+                <td style="font-weight:bold;">{{ f.top_prediction }}</td>
+                <td style="color:#00ff88;">{{ "%.0f"|format(f.top_prob * 100) }}%</td>
+                <td>{{ "%.0f"|format(f.agreement * 100) }}%</td>
+                <td>{{ f.members }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% endblock %}

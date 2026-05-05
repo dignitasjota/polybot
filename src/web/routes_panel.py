@@ -488,6 +488,71 @@ async def panel_liquidity_cancel_all(request: web.Request) -> web.Response:
     raise web.HTTPFound("/panel/liquidity")
 
 
+# ── Weather ────────────────────────────────────────────────────────
+
+def _get_weather_scanner(request: web.Request):
+    """Find the first weather strategy's scanner."""
+    bot = request.app["bot"]
+    for runner in bot.accounts:
+        for strat_name, strat in runner.strategies.items():
+            if strat_name == "weather" and hasattr(strat, "scanner"):
+                return strat.scanner
+    return None
+
+
+@routes.get("/panel/weather")
+async def panel_weather(request: web.Request) -> web.Response:
+    cm = _get_cm(request)
+    ctx = await _base_context(request)
+
+    scanner = _get_weather_scanner(request)
+    if scanner:
+        stats = scanner.get_stats()
+        forecasts = stats.get("active_forecasts", [])
+    else:
+        stats = {
+            "running": False,
+            "mode": "paper",
+            "total_scans": 0,
+            "markets_found": 0,
+            "trades_executed": 0,
+            "win_rate": 0.0,
+            "total_pnl": 0.0,
+        }
+        forecasts = []
+
+    params = cm.get_weather_params()
+
+    ctx.update({
+        "active_tab": "weather",
+        "stats": stats,
+        "params": params,
+        "forecasts": forecasts,
+    })
+    return aiohttp_jinja2.render_template("panel/weather.html", request, ctx)
+
+
+@routes.post("/panel/weather/params")
+async def panel_weather_params(request: web.Request) -> web.Response:
+    cm = _get_cm(request)
+    session = request.get("session", {})
+    user = session.get("user", "unknown")
+    data = await request.post()
+
+    params = {}
+    for key in ("max_bet_per_trade", "bankroll", "kelly_multiplier",
+                "max_bets_per_cycle", "max_price", "min_edge",
+                "min_forecast_prob", "min_agreement", "scan_interval",
+                "max_forecast_days", "forecast_cache_ttl"):
+        if key in data and data[key]:
+            params[key] = data[key]
+
+    cm.set_weather_params(params)
+    await add_audit(user, "weather_params", str(params))
+
+    raise web.HTTPFound("/panel/weather")
+
+
 async def _settings_with_flash(request, msg, flash_type):
     cm = _get_cm(request)
     ctx = await _base_context(request)

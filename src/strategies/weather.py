@@ -26,19 +26,19 @@ class WeatherConfig(StrategyConfig):
     # Scan settings
     scan_interval: float = 900.0       # Seconds between scans (15 min — forecasts don't change fast)
     forecast_cache_ttl: float = 3600.0  # Cache forecasts for 1 hour
-    max_forecast_days: int = 3          # Only bet on markets within 3 days (forecast accuracy drops)
+    max_forecast_days: int = 2          # Only bet on markets within 2 days (ensemble most reliable)
 
     # Edge thresholds
-    min_edge: float = 0.08             # Minimum edge (forecast_prob - market_price) to trade (8%)
+    min_edge: float = 0.10             # Minimum edge (forecast_prob - market_price) to trade (10%)
     min_forecast_prob: float = 0.15    # Don't bet on outcomes with <15% forecast prob (noisy)
-    min_agreement: float = 0.20        # Minimum model agreement (20% = at least 10/51 agree)
-    max_price: float = 0.75            # Don't buy outcomes priced above 75¢ (low upside)
+    min_agreement: float = 0.30        # Minimum model agreement (30% = at least 15/50 agree)
+    max_price: float = 0.65            # Don't buy outcomes priced above 65¢ (more upside)
 
     # Bet sizing
-    max_bet_per_trade: float = 10.0    # Max $ per trade (conservative start)
-    bankroll: float = 200.0            # Total bankroll for weather strategy
-    kelly_multiplier: float = 0.25     # Fraction of Kelly (quarter-Kelly = conservative)
-    max_bets_per_cycle: int = 3        # Max trades per scan cycle
+    max_bet_per_trade: float = 15.0    # Max $ per trade (Kelly sizing is the real driver)
+    bankroll: float = 300.0            # Total bankroll for weather strategy
+    kelly_multiplier: float = 0.30     # 30% Kelly (slightly more aggressive)
+    max_bets_per_cycle: int = 8        # Max trades per scan cycle (cities are independent)
 
     # Resolution
     resolution_check_interval: float = 3600.0  # Check resolutions every hour
