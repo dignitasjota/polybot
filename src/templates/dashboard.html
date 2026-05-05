@@ -74,6 +74,57 @@
             <div class="label">Polls</div>
             <div class="value">{{ acc.polls }}</div>
         </div>
+        {% elif acc.is_weather %}
+        <div class="stat">
+            <div class="label">Markets</div>
+            <div class="value">{{ acc.markets_found }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Forecasts</div>
+            <div class="value">{{ acc.forecast_cache_count }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Trades</div>
+            <div class="value">{{ acc.opportunities_found }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Scans</div>
+            <div class="value">{{ acc.total_scans }}</div>
+        </div>
+        {% elif acc.is_completeness %}
+        <div class="stat">
+            <div class="label">Opportunities</div>
+            <div class="value">{{ acc.opportunities_found }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Pending Redeems</div>
+            <div class="value">{{ acc.pending_redeems }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Scans</div>
+            <div class="value">{{ acc.total_scans }}</div>
+        </div>
+        {% elif acc.is_liquidity %}
+        <div class="stat">
+            <div class="label">Reward Markets</div>
+            <div class="value">{{ acc.opportunities_found }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Active Quotes</div>
+            <div class="value">{{ acc.active_quotes }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Markets Quoting</div>
+            <div class="value">{{ acc.active_liq_markets }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Rewards $</div>
+            <div class="value" style="color:#00ff88;">${{ "%.2f"|format(acc.total_rewards) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Scans</div>
+            <div class="value">{{ acc.total_scans }}</div>
+        </div>
         {% else %}
         <div class="stat">
             <div class="label">Opportunities</div>

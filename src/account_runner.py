@@ -783,4 +783,16 @@ class AccountRunner:
             return self.detector.export_opportunities()
         if self.copy_trader:
             return self.copy_trader.export_opportunities()
+        # Completeness strategy exports trades as opportunities
+        if "completeness" in self.strategies:
+            strat = self.strategies["completeness"]
+            if hasattr(strat, "get_stats"):
+                stats = strat.get_stats()
+                return stats.get("recent_trades", [])
+        # Weather strategy exports trades as opportunities
+        if "weather" in self.strategies:
+            strat = self.strategies["weather"]
+            if hasattr(strat, "get_stats"):
+                stats = strat.get_stats()
+                return stats.get("recent_trades", [])
         return []

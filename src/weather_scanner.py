@@ -395,13 +395,28 @@ class WeatherScanner:
                     error=str(e),
                 )
 
-        # Step 3: Execute best opportunities
+        # Step 3: Execute best opportunities (deduplicated)
         if opportunities:
+            # Build set of condition_ids with pending trades to avoid duplicates
+            pending_cids = {
+                t.condition_id for t in self._trades
+                if t.status == "pending"
+            }
+
             # Sort by edge (highest first)
             opportunities.sort(key=lambda o: o.edge, reverse=True)
-            for opp in opportunities[:self._config.max_bets_per_cycle]:
+            executed_this_cycle = 0
+            for opp in opportunities:
+                if executed_this_cycle >= self._config.max_bets_per_cycle:
+                    break
+                # Skip if we already have a pending trade on this condition
+                cid = opp.market.condition_ids[opp.best_outcome_idx]
+                if cid in pending_cids:
+                    continue
                 self._opportunities_found += 1
                 await self._execute_trade(opp)
+                pending_cids.add(cid)
+                executed_this_cycle += 1
 
         # Diagnostic log
         if self._total_scans % 5 == 1:
@@ -847,14 +862,14 @@ class WeatherScanner:
         for outcome in outcomes:
             lower = outcome.lower()
 
-            if "or below" in lower or "or less" in lower:
+            if "or below" in lower or "or less" in lower or "or under" in lower or "or lower" in lower:
                 temp = self._parse_outcome_temp(outcome)
                 if temp is None:
                     continue
                 # "57°F or below" → (-inf, 58)  (i.e. ≤57, which means <58 in integer world)
                 parsed_buckets.append((outcome, -999, temp + 1 if unit == "F" else temp + 0.5))
 
-            elif "or higher" in lower or "or more" in lower or "+" in lower:
+            elif "or higher" in lower or "or more" in lower or "or above" in lower or "+" in lower:
                 temp = self._parse_outcome_temp(outcome)
                 if temp is None:
                     continue
@@ -879,21 +894,41 @@ class WeatherScanner:
         if not parsed_buckets:
             return {}
 
+        # Identify edge buckets (those with -999 or 999 bounds)
+        first_is_edge = parsed_buckets[0][1] == -999  # "X or below"
+        last_is_edge = parsed_buckets[-1][2] == 999   # "X or higher"
+
         # Count members falling into each bucket
         counts: dict[str, int] = {label: 0 for label, _, _ in parsed_buckets}
+        unmatched = 0
         for temp in member_temps:
             for label, low, high in parsed_buckets:
                 if low <= temp < high:
                     counts[label] += 1
                     break
             else:
-                # Temp outside all buckets — assign to nearest edge
-                if temp < parsed_buckets[0][1]:
+                # Temp outside all buckets — only assign to edge buckets
+                if temp < parsed_buckets[0][1] and first_is_edge:
                     counts[parsed_buckets[0][0]] += 1
-                else:
+                elif temp >= parsed_buckets[-1][2] and last_is_edge:
                     counts[parsed_buckets[-1][0]] += 1
+                else:
+                    # No matching bucket and no appropriate edge bucket
+                    # This means the market buckets don't cover this temperature
+                    unmatched += 1
 
-        # Convert to probabilities
+        if unmatched > 0:
+            logger.warning(
+                "weather_unmatched_temps",
+                unmatched=unmatched,
+                total=n_members,
+                temp_range=f"{min(member_temps):.1f}-{max(member_temps):.1f}",
+                bucket_range=f"{parsed_buckets[0][1]}-{parsed_buckets[-1][2]}",
+                first_is_edge=first_is_edge,
+                last_is_edge=last_is_edge,
+            )
+
+        # Convert to probabilities (use total members, unmatched get 0 prob)
         return {label: count / n_members for label, count in counts.items()}
 
     def _parse_outcome_temp(self, outcome: str) -> float | None:
@@ -1246,14 +1281,14 @@ class WeatherScanner:
         for outcome in outcomes:
             lower = outcome.lower()
 
-            if "or below" in lower or "or less" in lower:
+            if "or below" in lower or "or less" in lower or "or under" in lower or "or lower" in lower:
                 temp = self._parse_outcome_temp(outcome)
                 if temp is not None:
                     boundary = temp + 1 if unit == "F" else temp + 0.5
                     if actual < boundary:
                         return outcome
 
-            elif "or higher" in lower or "or more" in lower or "+" in outcome:
+            elif "or higher" in lower or "or more" in lower or "or above" in lower or "+" in outcome:
                 temp = self._parse_outcome_temp(outcome)
                 if temp is not None and actual >= temp:
                     return outcome

@@ -120,9 +120,18 @@ async def handle_scanner(request: web.Request) -> web.Response:
 def _build_account_data(acc, tz_display, wallet_aliases: dict | None = None) -> dict:
     stats = acc.get_stats()
     is_copy = acc.strategy_type == "copy_trade"
+    is_weather = acc.strategy_type == "weather"
+    is_completeness = acc.strategy_type == "completeness"
+    is_liquidity = acc.strategy_type == "liquidity"
 
     if is_copy and "copy_trader" in stats:
         s = stats["copy_trader"]
+    elif is_weather:
+        s = stats.get("strategies", {}).get("weather", {})
+    elif is_completeness:
+        s = stats.get("strategies", {}).get("completeness", {})
+    elif is_liquidity:
+        s = stats.get("strategies", {}).get("liquidity", {})
     elif not is_copy and "detector" in stats:
         s = stats["detector"]
     else:
@@ -131,11 +140,40 @@ def _build_account_data(acc, tz_display, wallet_aliases: dict | None = None) -> 
     # In live mode, show real USDC balance from executor
     executor_stats = stats.get("executor", {})
     live_balance = executor_stats.get("live_balance")
-    balance = live_balance if live_balance is not None else s.get("current_balance", s.get("starting_balance", 0))
-    starting = s.get("starting_balance", 0)
+    if is_weather or is_completeness or is_liquidity:
+        if is_weather:
+            pnl_val = s.get("total_pnl", 0)
+        elif is_completeness:
+            pnl_val = s.get("total_profit", 0)
+        else:  # liquidity
+            metrics_today = s.get("metrics_today", {})
+            pnl_val = metrics_today.get("net_pnl", 0)
+        balance = live_balance if live_balance is not None else pnl_val + acc.account.risk.simulated_balance
+        starting = acc.account.risk.simulated_balance
+    else:
+        balance = live_balance if live_balance is not None else s.get("current_balance", s.get("starting_balance", 0))
+        starting = s.get("starting_balance", 0)
 
     opps = acc.export_opportunities()
-    opps_html = _render_copy_table(opps, tz_display, wallet_aliases or {}) if is_copy else _render_directional_table(opps, tz_display)
+    if is_copy:
+        opps_html = _render_copy_table(opps, tz_display, wallet_aliases or {})
+    elif is_weather:
+        opps_html = _render_weather_table(opps, tz_display)
+    elif is_completeness:
+        opps_html = _render_completeness_table(opps, tz_display)
+    elif is_liquidity:
+        opps_html = _render_liquidity_table(s)
+    else:
+        opps_html = _render_directional_table(opps, tz_display)
+
+    # Badge per strategy type
+    badge_map = {
+        "copy_trade": ("badge-copy", "COPY-TRADE"),
+        "weather": ("badge-weather", "WEATHER"),
+        "completeness": ("badge-completeness", "COMPLETENESS"),
+        "liquidity": ("badge-liquidity", "LIQUIDITY"),
+    }
+    badge_class, badge_text = badge_map.get(acc.strategy_type, ("badge-directional", "DIRECTIONAL"))
 
     # Per-strategy info (Fase 11)
     strategies_info = []
@@ -147,30 +185,75 @@ def _build_account_data(acc, tz_display, wallet_aliases: dict | None = None) -> 
             "mode": mode,
             "badge_class": "badge-copy" if strat_name == "copy_trade" else "badge-directional",
             "badge_text": strat_name.upper().replace("_", "-"),
-            "wins": strat_stats.get("settled_wins", strat_stats.get("wins", 0)),
-            "losses": strat_stats.get("settled_losses", strat_stats.get("losses", 0)),
+            "wins": strat_stats.get("settled_wins", strat_stats.get("trades_won", 0)),
+            "losses": strat_stats.get("settled_losses", strat_stats.get("trades_lost", 0)),
             "pnl": strat_stats.get("simulated_pnl", strat_stats.get("total_pnl", 0)),
-            "trades": strat_stats.get("trades_copied", strat_stats.get("opportunities_found", 0)),
+            "trades": strat_stats.get("trades_copied", strat_stats.get("trades_executed", strat_stats.get("opportunities_found", 0))),
         })
+
+    # Different strategies use different field names
+    if is_weather:
+        pnl = s.get("total_pnl", 0)
+        roi = round(pnl / starting * 100, 2) if starting > 0 else 0
+        wins = s.get("trades_won", 0)
+        losses = s.get("trades_lost", 0)
+        opportunities = s.get("opportunities_found", 0)
+        total_scans = s.get("total_scans", 0)
+    elif is_completeness:
+        pnl = s.get("total_profit", 0)
+        roi = round(pnl / starting * 100, 2) if starting > 0 else 0
+        wins = s.get("trades_executed", 0)
+        losses = s.get("trades_failed", 0)
+        opportunities = s.get("opportunities_found", 0)
+        total_scans = s.get("total_scans", 0)
+    elif is_liquidity:
+        metrics_today = s.get("metrics_today", {})
+        pnl = metrics_today.get("net_pnl", 0)
+        roi = metrics_today.get("roi_pct", 0)
+        provider = s.get("provider", {})
+        wins = provider.get("total_fills", 0)
+        losses = provider.get("emergency_cancels", 0)
+        opportunities = s.get("total_reward_markets", 0)
+        total_scans = s.get("scan_count", 0)
+    else:
+        pnl = s.get("simulated_pnl", 0)
+        roi = s.get("roi_pct", 0)
+        wins = s.get("settled_wins", 0)
+        losses = s.get("settled_losses", 0)
+        opportunities = s.get("opportunities_found", 0)
+        total_scans = s.get("total_scans", 0)
 
     return {
         "name": acc.name,
         "is_copy": is_copy,
-        "badge_class": "badge-copy" if is_copy else "badge-directional",
-        "badge_text": "COPY-TRADE" if is_copy else "DIRECTIONAL",
+        "is_weather": is_weather,
+        "is_completeness": is_completeness,
+        "is_liquidity": is_liquidity,
+        "badge_class": badge_class,
+        "badge_text": badge_text,
         "exec_mode": acc.exec_mode.value,
         "balance": balance,
         "starting": starting,
-        "pnl": s.get("simulated_pnl", 0),
-        "roi": s.get("roi_pct", 0),
-        "wins": s.get("settled_wins", 0),
-        "losses": s.get("settled_losses", 0),
+        "pnl": pnl,
+        "roi": roi,
+        "wins": wins,
+        "losses": losses,
         "copied": s.get("trades_copied", 0),
         "polls": s.get("polls", 0),
-        "opportunities_found": s.get("opportunities_found", 0),
-        "total_scans": s.get("total_scans", 0),
+        "opportunities_found": opportunities,
+        "total_scans": total_scans,
         "opps_html": opps_html,
         "strategies": strategies_info,
+        # Weather-specific stats for template
+        "markets_found": s.get("markets_found", 0) if is_weather else 0,
+        "running": s.get("running", False) if (is_weather or is_completeness) else (s.get("provider", {}).get("running", False) if is_liquidity else False),
+        "forecast_cache_count": len(s.get("forecast_cache", [])) if is_weather else 0,
+        # Completeness-specific
+        "pending_redeems": s.get("pending_redeems", 0) if is_completeness else 0,
+        # Liquidity-specific
+        "active_quotes": s.get("provider", {}).get("active_bids", 0) + s.get("provider", {}).get("active_asks", 0) if is_liquidity else 0,
+        "total_rewards": s.get("provider", {}).get("total_rewards", 0) if is_liquidity else 0,
+        "active_liq_markets": s.get("provider", {}).get("active_markets", 0) if is_liquidity else 0,
     }
 
 
@@ -355,6 +438,141 @@ def _render_directional_table(opportunities: list[dict], tz_display) -> str:
             <th>Margin Net</th><th>Time Left</th><th>Depth</th>
             <th>Bet</th><th>Profit</th><th>Duration</th>
             <th>Result</th><th>P&L</th>
+        </tr></thead>
+        <tbody>{rows}</tbody>
+    </table>"""
+
+
+def _render_weather_table(trades: list[dict], tz_display) -> str:
+    if not trades:
+        return '<div style="color:#555;padding:10px;">No weather trades yet...</div>'
+
+    rows = ""
+    for t in trades:
+        status = t.get("status", "pending")
+        pnl = t.get("pnl", 0)
+
+        if status == "won":
+            badge = '<span class="badge win">WIN</span>'
+            pnl_class = "pnl-win"
+        elif status == "lost":
+            badge = '<span class="badge loss">LOSS</span>'
+            pnl_class = "pnl-loss"
+        else:
+            badge = '<span class="badge pending">PENDING</span>'
+            pnl_class = ""
+
+        city = _esc(t.get("city", "?"))
+        outcome = _esc(t.get("outcome", "?"))
+        price = t.get("price", 0)
+        edge = t.get("edge", 0)
+        cost = t.get("cost", 0)
+        mode = t.get("mode", "paper")
+
+        rows += f"""
+        <tr>
+            <td>{city}</td>
+            <td class="question">{outcome}</td>
+            <td>${price:.3f}</td>
+            <td style="color:#00ff88;">{edge*100:.1f}%</td>
+            <td>${cost:.2f}</td>
+            <td>{badge}</td>
+            <td class="{pnl_class}">{f'${pnl:+.2f}' if status != 'pending' else '-'}</td>
+            <td style="color:#888;font-size:0.75em;">{mode}</td>
+        </tr>"""
+
+    return f"""
+    <table>
+        <thead><tr>
+            <th>City</th><th>Outcome</th><th>Price</th>
+            <th>Edge</th><th>Cost</th>
+            <th>Result</th><th>P&L</th><th>Mode</th>
+        </tr></thead>
+        <tbody>{rows}</tbody>
+    </table>"""
+
+
+def _render_completeness_table(trades: list[dict], tz_display) -> str:
+    if not trades:
+        return '<div style="color:#555;padding:10px;">No completeness arb trades yet...</div>'
+
+    rows = ""
+    for t in trades:
+        status = t.get("status", "pending")
+        profit = t.get("profit", 0)
+
+        if status == "redeemed":
+            badge = '<span class="badge win">REDEEMED</span>'
+            pnl_class = "pnl-win"
+        elif status == "failed":
+            badge = '<span class="badge loss">FAILED</span>'
+            pnl_class = "pnl-loss"
+        else:
+            badge = f'<span class="badge pending">{_esc(status.upper())}</span>'
+            pnl_class = ""
+
+        question = _esc(t.get("question", "?"))
+        shares = t.get("shares", 0)
+        cost = t.get("cost", 0)
+        mode = t.get("mode", "paper")
+
+        rows += f"""
+        <tr>
+            <td class="question">{question}</td>
+            <td>{shares:.0f}</td>
+            <td>${cost:.4f}</td>
+            <td>${profit:.4f}</td>
+            <td>{badge}</td>
+            <td style="color:#888;font-size:0.75em;">{mode}</td>
+        </tr>"""
+
+    return f"""
+    <table>
+        <thead><tr>
+            <th>Market</th><th>Shares</th><th>Cost</th>
+            <th>Profit</th><th>Status</th><th>Mode</th>
+        </tr></thead>
+        <tbody>{rows}</tbody>
+    </table>"""
+
+
+def _render_liquidity_table(liq_stats: dict) -> str:
+    provider = liq_stats.get("provider", {})
+    positions = provider.get("positions", [])
+    if not positions:
+        return '<div style="color:#555;padding:10px;">No active liquidity positions...</div>'
+
+    rows = ""
+    for p in positions:
+        question = _esc(p.get("question", "?")[:55])
+        midpoint = p.get("midpoint", 0)
+        bid_price = p.get("bid_price")
+        ask_price = p.get("ask_price")
+        fills_yes = p.get("fills_yes", 0)
+        fills_no = p.get("fills_no", 0)
+        skew = p.get("inventory_skew", 0)
+        rewards = p.get("total_rewards_earned", 0)
+
+        bid_str = f"${bid_price:.3f}" if bid_price else "-"
+        ask_str = f"${ask_price:.3f}" if ask_price else "-"
+        skew_color = "#ff4444" if abs(skew) > 0.6 else "#ffcc00" if abs(skew) > 0.3 else "#00ff88"
+
+        rows += f"""
+        <tr>
+            <td class="question">{question}</td>
+            <td>${midpoint:.3f}</td>
+            <td>{bid_str}</td>
+            <td>{ask_str}</td>
+            <td>{fills_yes:.0f}/{fills_no:.0f}</td>
+            <td style="color:{skew_color};">{skew:+.2f}</td>
+            <td style="color:#00ff88;">${rewards:.2f}</td>
+        </tr>"""
+
+    return f"""
+    <table>
+        <thead><tr>
+            <th>Market</th><th>Mid</th><th>Bid</th>
+            <th>Ask</th><th>Fills Y/N</th><th>Skew</th><th>Rewards</th>
         </tr></thead>
         <tbody>{rows}</tbody>
     </table>"""

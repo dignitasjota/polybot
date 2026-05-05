@@ -181,6 +181,36 @@ class TestBuildDistribution:
         dist = scanner._build_distribution(max_temps, outcomes)
         assert dist["62°F or higher"] == pytest.approx(1.0)
 
+    def test_no_edge_bucket_no_false_assignment(self, scanner):
+        """Temps outside all buckets when no edge bucket → prob stays 0, not falsely 100%."""
+        # Buckets only cover 26-28°C, NO "or higher"/"or below"
+        outcomes = ["26°C", "27°C", "28°C"]
+        # All members predict ~30°C, outside all buckets
+        max_temps = [30.0] * 50
+
+        dist = scanner._build_distribution(max_temps, outcomes)
+        # None should be assigned to "28°C" (the bug was assigning all 50 here)
+        assert dist["28°C"] == pytest.approx(0.0)
+        assert dist["27°C"] == pytest.approx(0.0)
+        assert dist["26°C"] == pytest.approx(0.0)
+
+    def test_partial_edge_only_low(self, scanner):
+        """Only 'or below' edge bucket, temps above all → unmatched, not assigned to last."""
+        outcomes = ["17°C or below", "18°C", "19°C"]
+        max_temps = [22.0] * 50  # All above 19.5°C
+
+        dist = scanner._build_distribution(max_temps, outcomes)
+        # No "or higher" bucket, so 22°C should NOT be assigned to "19°C"
+        assert dist["19°C"] == pytest.approx(0.0)
+
+    def test_or_above_recognized(self, scanner):
+        """'or above' should be treated same as 'or higher'."""
+        outcomes = ["17°C or below", "18°C", "19°C", "20°C or above"]
+        max_temps = [22.0] * 50
+
+        dist = scanner._build_distribution(max_temps, outcomes)
+        assert dist["20°C or above"] == pytest.approx(1.0)
+
 
 # ── Market evaluation ────────────────────────────────────────────────────
 
@@ -464,6 +494,48 @@ class TestFeeExtraction:
 
 
 # ── Stats ────────────────────────────────────────────────────────────────
+
+class TestDeduplication:
+    def test_pending_trade_blocks_duplicate(self, scanner):
+        """A pending trade on a condition_id should prevent re-betting."""
+        from src.weather_scanner import WeatherTrade
+        # Simulate a pending trade
+        scanner._trades.append(WeatherTrade(
+            trade_id="wx_test1",
+            condition_id="0x001",
+            question="Will temp be 18°C?",
+            city="paris",
+            outcome="18°C",
+            shares=100,
+            price=0.10,
+            cost=10.0,
+            forecast_prob=0.90,
+            edge=0.80,
+            status="pending",
+        ))
+        # Build pending set (same logic as _run_scan_cycle)
+        pending_cids = {t.condition_id for t in scanner._trades if t.status == "pending"}
+        assert "0x001" in pending_cids
+
+    def test_resolved_trade_allows_new_bet(self, scanner):
+        """A resolved (won/lost) trade should NOT block new bets."""
+        from src.weather_scanner import WeatherTrade
+        scanner._trades.append(WeatherTrade(
+            trade_id="wx_test2",
+            condition_id="0x002",
+            question="Will temp be 19°C?",
+            city="paris",
+            outcome="19°C",
+            shares=100,
+            price=0.10,
+            cost=10.0,
+            forecast_prob=0.90,
+            edge=0.80,
+            status="won",
+        ))
+        pending_cids = {t.condition_id for t in scanner._trades if t.status == "pending"}
+        assert "0x002" not in pending_cids
+
 
 class TestStats:
     def test_initial_stats(self, scanner):

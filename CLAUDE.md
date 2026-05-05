@@ -536,7 +536,7 @@ Con los cambios recientes (scoring v3 + quoting ultra-agresivo):
 
 ## Estrategia 5: Weather Prediction (Pronóstico Meteorológico)
 
-Predicción de temperatura usando 51 modelos ensemble ECMWF IFS vs precios de Polymarket.
+Predicción de temperatura usando 50 modelos ensemble ECMWF IFS vs precios de Polymarket.
 
 ### Estructura de mercados en Polymarket
 
@@ -548,41 +548,126 @@ Los mercados de temperatura son **eventos** que contienen N **mercados binarios*
 
 **Descubrimiento**: `tag_id=103040` (Daily Temperature) en endpoint `/events` de Gamma API. El parámetro `tag=weather` NO funciona.
 
-### Flujo
-1. `_discover_markets()`: Busca eventos con `tag_id=103040`, parsea slug para extraer ciudad+fecha
-2. `_get_forecast()`: Consulta Open-Meteo ensemble API (51 miembros ECMWF IFS), cachea 1h
-3. `_build_distribution()`: Convierte 51 predicciones de max_temp → distribución sobre los buckets del mercado
-4. `_evaluate_market()`: Compara distribución forecast vs precios de mercado → detecta edge
-5. `_execute_trade()`: Si edge > 8%, ejecuta con Kelly sizing (quarter-Kelly)
+### Arquitectura de archivos
+
+```
+src/
+  weather_scanner.py       # WeatherScanner: descubrimiento, forecast, edge detection, ejecución
+  strategies/weather.py    # WeatherStrategy: wrapper que registra el scanner como estrategia
+```
+
+- `WeatherStrategy` extiende `BaseStrategy`, crea un `WeatherScanner` interno y un `_resolution_task`
+- Se registra via `register_strategy("weather", WeatherStrategy, WeatherConfig)`
+- `WeatherConfig.from_dict()` parsea la sección `[accounts.weather]` del TOML
+
+### Flujo completo
+1. `_discover_markets()`: Busca eventos con `tag_id=103040` en Gamma API `/events`, parsea slug para extraer ciudad+fecha
+2. `_parse_temperature_event()`: Para cada evento, extrae los mercados binarios individuales con sus `clobTokenIds`, `outcomePrices`, `condition_id`, y el label del outcome (via `_extract_outcome_label()` o fallback a `groupItemTitle`)
+3. `_get_forecast()`: Consulta Open-Meteo ensemble API (50 miembros ECMWF IFS), cachea 1h. Usa datos **hourly** (`temperature_2m`) y calcula el **max diario** por miembro
+4. `_build_distribution()`: Convierte 50 predicciones de max_temp → distribución de probabilidad sobre los buckets del mercado
+5. `_evaluate_market()`: Compara distribución forecast vs precios de mercado → detecta edge (`forecast_prob - market_price`)
+6. `_execute_trade()`: Si edge > 8%, ejecuta con Kelly sizing (quarter-Kelly). Paper/dry_run simula, live usa ClobClient
+7. `check_resolutions()`: Loop periódico (cada `resolution_check_interval`) que resuelve trades pendientes consultando la temperatura real via Open-Meteo daily API
 
 ### Open-Meteo Ensemble API
-- Endpoint: `https://ensemble-api.open-meteo.com/v1/ensemble`
-- Model: `ecmwf_ifs025` (51 miembros, 15 días)
-- Respuesta: `temperature_2m_member01..member50` + `temperature_2m` (media)
-- **Devuelve °C siempre**. Si el mercado usa °F, el scanner convierte antes de asignar buckets.
+- **Endpoint**: `https://ensemble-api.open-meteo.com/v1/ensemble`
+- **Model**: `ecmwf_ifs025` (50 miembros, 15 días). La API dice "51 members" pero devuelve `member01..member50` (50 reales) + `temperature_2m` (media/control)
+- **Datos usados**: Hourly `temperature_2m` por cada miembro → max diario calculado internamente
+- **Devuelve °C siempre**. Si el mercado usa °F, el scanner convierte antes de asignar buckets
 - Gratis, sin API key
 
 ### Manejo de unidades (°C / °F)
 - Open-Meteo siempre devuelve °C
-- Mercados de EEUU usan °F con rangos ("66-67°F"), mercados de Asia/Europa usan °C
-- `_build_distribution()` detecta la unidad desde los outcomes y convierte los ensemble temps a °F si necesario
+- Mercados de EEUU usan °F con rangos ("66-67°F"), mercados de Asia/Europa usan °C con grados individuales ("18°C")
+- `_build_distribution()` detecta la unidad desde los outcomes y convierte: `member_temps = [t * 9 / 5 + 32 for t in max_temps]`
 - `_determine_winner()` también convierte para resolución correcta
 
+### Parsing de buckets (temperatura → rango)
+
+Cada outcome se parsea a un rango `[low_incl, high_excl)`:
+
+| Formato outcome | Ejemplo | Rango resultante |
+|----------------|---------|------------------|
+| "X°F or below" | "57°F or below" | `(-999, 58)` (≤57 en integer) |
+| "X°C or below" | "17°C or below" | `(-999, 17.5)` |
+| "X-Y°F" | "66-67°F" | `[66, 68)` |
+| "X°C" (individual) | "18°C" | `[17.5, 18.5)` |
+| "X°F or higher" | "76°F or higher" | `[76, 999)` |
+
+**Variantes reconocidas**: "or below"/"or less"/"or under"/"or lower" (bajo), "or higher"/"or more"/"or above"/"+" (alto).
+
+**Extracción de label**: Primero intenta `_extract_outcome_label(question)` que parsea el texto de la pregunta y normaliza (e.g. "or above" → "or higher"). Si falla, usa `groupItemTitle` de la Gamma API como fallback.
+
+**Importante**: Los campos `clobTokenIds`, `outcomePrices`, `outcomes` de Gamma API vienen como **JSON strings** (no arrays nativos). Requieren `json.loads()` para parsear.
+
+### Protección contra fallback de temperatura fuera de rango
+
+Si la temperatura predicha está **fuera de todos los buckets**, solo se asigna si existe un bucket edge apropiado:
+- Temp por debajo de todos → solo si el primer bucket es tipo "or below" (bound -999)
+- Temp por encima de todos → solo si el último bucket es tipo "or higher" (bound 999)
+- Si no existe edge bucket apropiado → el miembro queda como `unmatched` y no infla ningún bucket
+
+**Motivación**: Sin esta protección, si el bucket "29°C or higher" no se parsea correctamente (formato no reconocido), los 50 miembros a ~30°C se asignarían al último bucket regular ("28°C") dando una probabilidad falsa del 100% y un edge ficticio del 86%.
+
 ### Ciudades soportadas
-75+ ciudades con coordenadas hardcodeadas en `CITY_COORDS`. Si aparece una ciudad no reconocida, se loguea como `weather_unknown_city` y se ignora.
+75+ ciudades con coordenadas hardcodeadas en `CITY_COORDS`. Incluye: ciudades EEUU (NYC, LA, Chicago, Miami, Atlanta, Phoenix, etc.), Europa (London, Paris, Madrid, Berlin, Rome, etc.), Asia (Tokyo, Shanghai, Singapore, Seoul, Wuhan, Qingdao, etc.), Oceanía (Sydney, Melbourne, Wellington), Medio Oriente (Dubai, Tel-Aviv, Cairo), Sudamérica (São Paulo, Buenos Aires, Lima, Bogotá). Si aparece una ciudad no reconocida, se loguea como `weather_unknown_city` y se ignora.
+
+### Edge y bet sizing
+
+```
+edge = forecast_prob - market_price
+ev_per_share = forecast_prob - market_price - fee_per_share
+fee_per_share = fee_rate × price × (1 - price)  # weather_fees = 0.05
+
+# Kelly criterion: f* = (bp - q) / b
+b = (1 / price) - 1    # odds
+kelly = (b × prob - (1-prob)) / b
+kelly = clamp(kelly, 0, 0.25)  # max 25% Kelly
+
+bet_size = min(bankroll × kelly × kelly_multiplier, max_bet_per_trade)
+```
+
+### Filtros de calidad
+
+Un trade se ejecuta solo si:
+1. `edge >= min_edge` (8%)
+2. `forecast_prob >= min_forecast_prob` (15%) — descarta predicciones ruidosas
+3. `market_price <= max_price` (75¢) — asegura upside suficiente
+4. `agreement >= min_agreement` (20%) — al menos 20% de miembros coinciden en un bucket
+5. `ev_per_share > 0` — EV positivo tras fees
+6. Max `max_bets_per_cycle` (3) trades por ciclo de scan
+
+### Resolución de trades
+
+`_resolution_loop()` corre cada `resolution_check_interval` (1h). Para cada trade pendiente:
+1. Consulta Open-Meteo **daily** API (`temperature_2m_max`) para la ciudad y fecha del trade
+2. `_determine_winner()`: Compara la temp real contra cada outcome bucket (misma lógica de parsing que `_build_distribution`)
+3. Si el outcome comprado ganó → `status = "won"`, `pnl = (1.0 / price - 1) × cost`
+4. Si otro outcome ganó → `status = "lost"`, `pnl = -cost`
+
+### Dashboard
+
+La cuenta weather se muestra en el dashboard principal con:
+- **Badge**: "WEATHER" (amarillo, `badge-weather`)
+- **Stats**: Markets (descubiertos), Forecasts (cacheados), Trades (ejecutados), Scans
+- **Tabla de trades**: City, Outcome, Price, Edge, Cost, Result, P&L, Mode
+- **Balance**: `simulated_balance + total_pnl` (paper mode)
 
 ### Parámetros (config.toml `[accounts.weather]`)
 | Parámetro | Default | Descripción |
 |-----------|---------|-------------|
 | scan_interval | 900 | Cada 15 min |
-| min_edge | 0.08 | Mínimo 8% edge |
-| max_forecast_days | 3 | Solo mercados a ≤3 días |
-| min_forecast_prob | 0.15 | Ignora outcomes con <15% prob |
+| forecast_cache_ttl | 3600 | Cache de forecasts: 1 hora |
+| max_forecast_days | 3 | Solo mercados a ≤3 días (forecast fiable) |
+| min_edge | 0.08 | Mínimo 8% edge para apostar |
+| min_forecast_prob | 0.15 | Ignora outcomes con <15% prob (ruido) |
 | min_agreement | 0.20 | Al menos 20% de modelos deben coincidir |
-| max_price | 0.75 | No comprar outcomes >75¢ |
-| max_bet_per_trade | 10.0 | $10 max por trade |
+| max_price | 0.75 | No comprar outcomes >75¢ (poco upside) |
+| max_bet_per_trade | 10.0 | $10 max por trade (conservador) |
 | bankroll | 200.0 | Capital total weather |
-| kelly_multiplier | 0.25 | Quarter-Kelly |
+| kelly_multiplier | 0.25 | Quarter-Kelly (conservador) |
+| max_bets_per_cycle | 3 | Max 3 trades por ciclo de scan |
+| resolution_check_interval | 3600 | Verificar resoluciones cada hora |
 
 ---
 
@@ -616,6 +701,20 @@ En Settings se puede cambiar el modo de cada cuenta (paper/live). El cambio:
 - En live: inicializa el CLOB client, refresca balance real, usa balance real como starting_balance
 - En paper: vuelve al simulated_balance del config
 - Si la inicialización del CLOB falla, revierte al modo anterior y loguea el error
+
+### Dashboard multi-estrategia
+
+El dashboard principal (`/`) muestra cada cuenta con su badge, stats y tabla de trades adaptados al tipo de estrategia:
+
+| Estrategia | Badge (color) | Stats específicos | Tabla de trades |
+|-----------|--------------|-------------------|----------------|
+| Directional | DIRECTIONAL (azul) | Opportunities, Scans | Time, Market, Side, Price, Margin, Time Left, Depth, Bet, Profit, Duration, Result, P&L |
+| Copy-Trade | COPY-TRADE (naranja) | Trades Copied, Polls | Time, Market, Side, Price, Bet, Profit, Duration, Result, P&L, Source |
+| Weather | WEATHER (amarillo) | Markets, Forecasts, Trades, Scans | City, Outcome, Price, Edge, Cost, Result, P&L, Mode |
+| Completeness | COMPLETENESS (cyan) | Opportunities, Pending Redeems, Scans | Market, Shares, Cost, Profit, Status, Mode |
+| Liquidity | LIQUIDITY (púrpura) | Reward Markets, Active Quotes, Markets Quoting, Rewards $, Scans | Market, Mid, Bid, Ask, Fills Y/N, Skew, Rewards |
+
+El mapping de stats se realiza en `_build_account_data()` (`routes_dashboard.py`), que detecta `strategy_type` y lee los campos correctos de cada estrategia (e.g. weather usa `trades_won`/`total_pnl`, completeness usa `trades_executed`/`total_profit`, liquidity lee de `provider` y `metrics_today`).
 
 ### Autenticación
 - Cookie HMAC-SHA256 firmada (sin dependencias externas de crypto)
@@ -947,6 +1046,36 @@ Nuevo sistema de fees por categoría + maker rebates. Implementado en `src/fees.
 |---|---|---|---|---|
 | Antigua (WTI/Iran) | 18.2% | -$7.66 | $0.01 | **-$7.65** |
 | Nueva (Starmer/Weinstein) | <1% | ~$0 | $10-30 | **+$10-30** |
+
+### Weather: Estrategia implementada desde cero (Mayo 2026)
+
+Nueva estrategia que predice temperatura máxima diaria usando ensemble ECMWF IFS de 50 miembros vs precios de mercados de temperatura en Polymarket.
+
+**Archivos creados:**
+- `src/weather_scanner.py` (~1300 líneas): scanner completo con descubrimiento, forecast, edge detection, ejecución y resolución
+- `src/strategies/weather.py` (~130 líneas): wrapper como BaseStrategy con WeatherConfig
+- `tests/test_weather_scanner.py` (48 tests): cobertura de parsing, distribución, evaluación, resolución y event parsing
+
+**Integración con el sistema existente:**
+- Configurado como `[[accounts]]` con `strategy_type = "weather"` en config.toml
+- `account_runner.py`: `_init_weather()` crea la estrategia, `export_full_report()` y `export_opportunities()` manejan weather
+- Dashboard: badge amarillo "WEATHER", stats propios (Markets, Forecasts, Trades, Scans), tabla de trades por ciudad
+
+### Problema: Weather scanner reportaba `{"error": "no data"}` (Mayo 2026)
+**Causa**: `account_runner.export_full_report()` no tenía handler para `strategy_type == "weather"`. Retornaba `None` → API devolvía 404.
+**Solución**: Añadir `if "weather" in self.strategies:` handler en `export_full_report()`.
+
+### Problema: Weather 0 mercados descubiertos (silencioso) (Mayo 2026)
+**Causa**: Gamma API devuelve `clobTokenIds`, `outcomePrices`, `outcomes` como **JSON strings** (e.g. `"[\"token1\"]"`), no arrays nativos. El código hacía `clob_tokens[0]` sobre el string, obteniendo el carácter `[` en vez de un token ID.
+**Solución**: Añadir `json.loads()` parsing con `isinstance` check y fallback. Ahora parsea ~90 mercados correctamente.
+
+### Problema: Weather edges falsamente altos (86%, 82%) (Mayo 2026)
+**Causa**: Bug crítico en `_build_distribution()`. Cuando la temperatura predicha estaba fuera de todos los buckets parseados (e.g. 50 miembros a 30°C pero buckets solo cubrían hasta 28°C), el fallback asignaba TODOS los miembros al último bucket regular → probabilidad falsa del 100%. Ocurría cuando el bucket edge "29°C or higher" no se parseaba por formato no reconocido (e.g. "or above" en vez de "or higher" en `groupItemTitle`).
+**Solución**: (1) Solo asignar a edge buckets (bounds -999 o 999), no a buckets regulares. Miembros sin match quedan como `unmatched` con log warning. (2) Añadir "or above", "or under", "or lower" como variantes reconocidas en `_build_distribution()` y `_determine_winner()`.
+
+### Problema: Dashboard mostraba 0 stats para cuentas no-directional (Mayo 2026)
+**Causa**: `_build_account_data()` en `routes_dashboard.py` solo reconocía `copy_trade` y `detector` (directional). Cuentas de weather, completeness y liquidity caían al `else: s = {}` → todos los stats en 0, badge siempre "DIRECTIONAL".
+**Solución**: Dashboard multi-estrategia con detección de `strategy_type` para cada cuenta. Cada tipo lee sus stats con los campos correctos (e.g. weather: `trades_won`/`total_pnl`, completeness: `trades_executed`/`total_profit`, liquidity: `provider`/`metrics_today`). Badges diferenciados: Weather amarillo, Completeness cyan, Liquidity púrpura. Tablas de trades adaptadas por tipo.
 
 ---
 
