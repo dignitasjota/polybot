@@ -216,6 +216,26 @@ class LiquidityProvider:
         self._cached_available_capital: float | None = None
         self._last_capital_check: float = 0.0
 
+    def reset_stats(self) -> None:
+        """Reset all stats and positions — called on mode change."""
+        self._positions.clear()
+        self._total_orders_placed = 0
+        self._total_orders_cancelled = 0
+        self._total_fills = 0
+        self._errors = 0
+        self._emergency_cancels = 0
+        self._markets_abandoned = 0
+        self._ghost_removals = 0
+        self._total_redeems = 0
+        self._total_auto_exits = 0
+        self._heartbeat_count = 0
+        self._heartbeat_errors = 0
+        self._orders_scoring = 0
+        self._orders_not_scoring = 0
+        self._scoring_checks = 0
+        self._started_at = time.time()
+        logger.info("liquidity_provider_stats_reset")
+
     # ── Configuration ─────────────────────────────────────────────────
 
     @property

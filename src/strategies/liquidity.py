@@ -193,6 +193,10 @@ class LiquidityStrategy(Strategy):
 
     async def set_mode(self, new_mode: str) -> None:
         old_mode = self.config.mode
+        if new_mode != old_mode:
+            # Reset stats when switching mode so each mode starts clean
+            self._provider.reset_stats()
+            self._metrics.reset()
         await super().set_mode(new_mode)
 
         # Clear paper/dry_run positions when transitioning to live (or vice versa)

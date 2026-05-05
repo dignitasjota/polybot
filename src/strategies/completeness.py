@@ -110,6 +110,9 @@ class CompletenessStrategy(Strategy):
 
     async def set_mode(self, new_mode: str) -> None:
         old_mode = self.config.mode
+        if new_mode != old_mode:
+            # Reset stats and trades when switching mode so each mode starts clean
+            self._scanner.reset_stats()
         await super().set_mode(new_mode)
 
         # If transitioning to live, init ClobClient

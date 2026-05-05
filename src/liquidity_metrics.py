@@ -183,6 +183,11 @@ class LiquidityMetrics:
     def update_active_markets(self, count: int):
         self._get_today().markets_active = count
 
+    def reset(self) -> None:
+        """Reset all metrics — called on mode change."""
+        self._days.clear()
+        self._current_date = self._today()
+
     # ── Query methods ─────────────────────────────────────────────────
 
     def get_today(self) -> dict:

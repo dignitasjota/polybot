@@ -124,6 +124,19 @@ class CompletenessScanner:
         # Redeem callback (set by strategy/runner)
         self._on_redeem = None
 
+    def reset_stats(self) -> None:
+        """Reset all stats and trades — called on mode change."""
+        self._trades.clear()
+        self._pending_redeems.clear()
+        self._cooldown.clear()
+        self._total_scans = 0
+        self._opportunities_found = 0
+        self._trades_executed = 0
+        self._trades_failed = 0
+        self._total_profit = 0.0
+        self._started_at = time.time()
+        logger.info("completeness_stats_reset")
+
     # ── Properties ───────────────────────────────────────────────────
 
     @property
