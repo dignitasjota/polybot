@@ -144,6 +144,9 @@ class WeatherStrategy(Strategy):
 
     async def set_mode(self, new_mode: str) -> None:
         old_mode = self.config.mode
+        if new_mode != old_mode:
+            # Reset stats and trades when switching mode so live only shows live data
+            self._scanner.reset_stats()
         await super().set_mode(new_mode)
         if new_mode in ("dry_run", "live") and not self._scanner._initialized:
             await self._scanner._init_clob_client()

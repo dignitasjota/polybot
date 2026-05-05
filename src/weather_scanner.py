@@ -272,6 +272,25 @@ class WeatherScanner:
         self._total_pnl = 0.0
         self._started_at: float = 0.0
 
+    def reset_stats(self):
+        """Reset all trades and stats. Called when switching execution mode.
+
+        Clears pending trades, counters, and the persistence file so that
+        the new mode starts with a clean slate (e.g. live only shows live data).
+        """
+        self._trades.clear()
+        self._total_scans = 0
+        self._markets_found = 0
+        self._opportunities_found = 0
+        self._trades_executed = 0
+        self._trades_won = 0
+        self._trades_lost = 0
+        self._total_pnl = 0.0
+        self._forecast_cache.clear()
+        # Persist empty state
+        self._save_pending_trades()
+        logger.info("weather_stats_reset", mode=self._config.mode)
+
     @property
     def is_paper(self) -> bool:
         return self._config.mode == "paper"
