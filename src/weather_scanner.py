@@ -214,7 +214,10 @@ class WeatherTrade:
     cost: float
     forecast_prob: float
     edge: float
-    status: str = "pending"       # pending, confirmed, won, lost
+    target_date: date | None = None  # Market resolution date (for orphan resolution)
+    outcomes: list[str] = field(default_factory=list)  # All outcomes (for resolution without _markets)
+    unit: str = "C"               # "C" or "F" — needed for resolution
+    status: str = "pending"       # pending, confirmed, won, lost, expired
     created_at: float = 0.0
     resolved_at: float = 0.0
     pnl: float = 0.0
@@ -1076,6 +1079,9 @@ class WeatherScanner:
             cost=round(cost, 4),
             forecast_prob=opp.forecast_prob,
             edge=opp.edge,
+            target_date=market.target_date,
+            outcomes=list(market.outcomes),
+            unit=market.unit,
             created_at=time.time(),
             mode="paper" if self.should_simulate else "live",
         )
@@ -1086,11 +1092,19 @@ class WeatherScanner:
             await self._live_execute(trade, opp)
 
     def _calculate_bet_size(self, opp: WeatherOpportunity) -> float:
-        """Calculate bet size using fractional Kelly."""
-        max_bet = self._config.max_bet_per_trade
-        kelly_bet = self._config.bankroll * opp.kelly_fraction * self._config.kelly_multiplier
+        """Calculate bet size using fractional Kelly on effective bankroll.
 
-        # Use fraction of Kelly (conservative)
+        Effective bankroll = total bankroll - capital committed in pending trades.
+        This prevents over-exposure when multiple trades are open simultaneously.
+        """
+        max_bet = self._config.max_bet_per_trade
+
+        # Effective bankroll: subtract capital already committed
+        committed = sum(t.cost for t in self._trades if t.status in ("pending", "confirmed"))
+        effective_bankroll = max(0, self._config.bankroll - committed)
+
+        kelly_bet = effective_bankroll * opp.kelly_fraction * self._config.kelly_multiplier
+
         bet = min(kelly_bet, max_bet)
         bet = max(bet, 0)
 
@@ -1170,43 +1184,54 @@ class WeatherScanner:
 
         Called periodically by the strategy. Uses actual temperature data
         from Open-Meteo historical endpoint to determine winners.
+
+        Resolution uses trade.target_date and trade.outcomes stored at execution
+        time, so it works independently of self._markets (which only contains
+        currently active markets and gets overwritten each scan cycle).
         """
         now = time.time()
-        pending = [t for t in self._trades if t.status == "pending"]
+        pending = [t for t in self._trades if t.status in ("pending", "confirmed")]
 
         for trade in pending:
-            # Parse the trade's target date from the question
-            # Only check if the market date has passed
-            market = next(
-                (m for m in self._markets if trade.condition_id in m.condition_ids),
-                None,
-            )
-            if not market:
-                # If market date info not available, check by age (>48h = expired)
+            # Use target_date stored in the trade itself
+            if trade.target_date is None:
+                # Legacy trade without target_date — expire after 48h
                 if now - trade.created_at > 172800:
                     trade.status = "expired"
+                    trade.resolved_at = now
                 continue
 
-            if market.target_date >= date.today():
+            if trade.target_date >= date.today():
                 continue  # Market not yet resolved
 
-            # Fetch actual temperature to determine winner
-            actual_temp = await self._fetch_actual_temperature(market)
+            # Fetch actual temperature
+            coords = CITY_COORDS.get(trade.city)
+            if not coords:
+                if now - trade.created_at > 172800:
+                    trade.status = "expired"
+                    trade.resolved_at = now
+                continue
+
+            actual_temp = await self._fetch_actual_temp_for_trade(
+                coords[0], coords[1], coords[2], trade.target_date
+            )
             if actual_temp is None:
                 continue
 
-            # Determine which outcome won
-            winning_outcome = self._determine_winner(actual_temp, market.outcomes)
+            # Determine which outcome won using trade's stored outcomes
+            winning_outcome = self._determine_winner(actual_temp, trade.outcomes)
             if winning_outcome is None:
+                # If we can't determine winner and it's been >48h, expire
+                if now - trade.created_at > 172800:
+                    trade.status = "expired"
+                    trade.resolved_at = now
                 continue
 
             if trade.outcome == winning_outcome:
-                # We won: payout = $1.00 * shares - cost
                 trade.pnl = (1.0 * trade.shares) - trade.cost
                 trade.status = "won"
                 self._trades_won += 1
             else:
-                # We lost: lost our cost
                 trade.pnl = -trade.cost
                 trade.status = "lost"
                 self._trades_lost += 1
@@ -1225,19 +1250,14 @@ class WeatherScanner:
                 pnl=f"${trade.pnl:.2f}",
             )
 
-    async def _fetch_actual_temperature(self, market: WeatherMarket) -> float | None:
-        """Fetch actual recorded temperature for a resolved market."""
+    async def _fetch_actual_temp_for_trade(
+        self, lat: float, lon: float, tz: str, target_date: date
+    ) -> float | None:
+        """Fetch actual recorded max temperature for a specific date and location."""
         if not self._session:
             return None
 
-        coords = CITY_COORDS.get(market.city_slug)
-        if not coords:
-            return None
-
-        lat, lon, tz = coords
-        target_str = market.target_date.isoformat()
-
-        # Use Open-Meteo historical weather API
+        target_str = target_date.isoformat()
         url = "https://api.open-meteo.com/v1/forecast"
         params = {
             "latitude": str(lat),
@@ -1259,9 +1279,10 @@ class WeatherScanner:
             if temps and temps[0] is not None:
                 return float(temps[0])
         except Exception as e:
-            logger.warning("weather_actual_fetch_error", error=str(e))
+            logger.warning("weather_actual_fetch_error", error=str(e), city_lat=lat)
 
         return None
+
 
     def _determine_winner(self, actual_temp_c: float, outcomes: list[str]) -> str | None:
         """Determine which outcome won given the actual temperature (°C from API).
