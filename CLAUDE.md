@@ -50,6 +50,7 @@ src/
     panel/
       copy_trade.html   # Gestión wallets + parámetros copy trading
       directional.html  # Kill switch + market filter + parámetros directional
+      weather.html      # Bet sizing, edge thresholds, timing + forecasts activos
       settings.html     # Cambio password + audit log
   static/
     htmx.min.js         # htmx vendored (interactividad sin SPA)
@@ -658,16 +659,18 @@ La cuenta weather se muestra en el dashboard principal con:
 |-----------|---------|-------------|
 | scan_interval | 900 | Cada 15 min |
 | forecast_cache_ttl | 3600 | Cache de forecasts: 1 hora |
-| max_forecast_days | 3 | Solo mercados a ≤3 días (forecast fiable) |
-| min_edge | 0.08 | Mínimo 8% edge para apostar |
+| max_forecast_days | 2 | Solo mercados a ≤2 días (ensemble más fiable) |
+| min_edge | 0.10 | Mínimo 10% edge para apostar |
 | min_forecast_prob | 0.15 | Ignora outcomes con <15% prob (ruido) |
-| min_agreement | 0.20 | Al menos 20% de modelos deben coincidir |
-| max_price | 0.75 | No comprar outcomes >75¢ (poco upside) |
-| max_bet_per_trade | 10.0 | $10 max por trade (conservador) |
-| bankroll | 200.0 | Capital total weather |
-| kelly_multiplier | 0.25 | Quarter-Kelly (conservador) |
-| max_bets_per_cycle | 3 | Max 3 trades por ciclo de scan |
+| min_agreement | 0.30 | Al menos 30% de modelos (15/50) deben coincidir |
+| max_price | 0.65 | No comprar outcomes >65¢ (más upside) |
+| max_bet_per_trade | 15.0 | $15 max por trade (Kelly sizing es el driver real) |
+| bankroll | 300.0 | Capital total weather |
+| kelly_multiplier | 0.30 | 30% Kelly (ligeramente más agresivo) |
+| max_bets_per_cycle | 8 | Max 8 trades por ciclo (ciudades son independientes) |
 | resolution_check_interval | 3600 | Verificar resoluciones cada hora |
+
+Todos los parámetros son editables en caliente desde la pestaña Weather del panel web (`/panel/weather`).
 
 ---
 
@@ -684,6 +687,8 @@ Accesible en `http://host:8080`. Protegido por login con cookie HMAC-SHA256.
 | `/panel/directional` | Kill switch + market filter (crypto_only) + parámetros |
 | `/panel/liquidity` | Scanner + provider + quotes activas + métricas P&L |
 | `/panel/liquidity/cancel-all` | POST: emergency cancel de todas las órdenes de liquidez |
+| `/panel/weather` | Config weather: bet sizing, edge thresholds, timing + forecasts activos |
+| `/panel/weather/params` | POST: actualizar parámetros weather (hot-reload) |
 | `/panel/settings` | Cambio password + execution mode (paper/live) + audit log |
 | `/api/report` | JSON completo de estado del bot |
 | `/api/report/{account}` | JSON por cuenta específica |
@@ -1076,6 +1081,21 @@ Nueva estrategia que predice temperatura máxima diaria usando ensemble ECMWF IF
 ### Problema: Dashboard mostraba 0 stats para cuentas no-directional (Mayo 2026)
 **Causa**: `_build_account_data()` en `routes_dashboard.py` solo reconocía `copy_trade` y `detector` (directional). Cuentas de weather, completeness y liquidity caían al `else: s = {}` → todos los stats en 0, badge siempre "DIRECTIONAL".
 **Solución**: Dashboard multi-estrategia con detección de `strategy_type` para cada cuenta. Cada tipo lee sus stats con los campos correctos (e.g. weather: `trades_won`/`total_pnl`, completeness: `trades_executed`/`total_profit`, liquidity: `provider`/`metrics_today`). Badges diferenciados: Weather amarillo, Completeness cyan, Liquidity púrpura. Tablas de trades adaptadas por tipo.
+
+### Weather: Panel web + optimización de parámetros (Mayo 2026)
+**Añadido**: Pestaña `/panel/weather` con hot-reload de todos los parámetros (bet sizing, edge thresholds, timing) + tabla de forecasts activos.
+**Optimización**: Filtros más estrictos compensan mayor volumen — menos falsos positivos, más capital en oportunidades reales:
+
+| Parámetro | Antes | Ahora | Razón |
+|-----------|-------|-------|-------|
+| `max_bets_per_cycle` | 3 | **8** | Ciudades independientes, dedup activo |
+| `max_bet_per_trade` | $10 | **$15** | Kelly sizing es el driver real |
+| `bankroll` | $200 | **$300** | Más capital → sizing ligeramente mayor en high-edge |
+| `kelly_multiplier` | 0.25 | **0.30** | 30% Kelly, aún conservador |
+| `min_edge` | 0.08 | **0.10** | Filtra más ruido |
+| `min_agreement` | 0.20 | **0.30** | 15/50 modelos (más consenso) |
+| `max_price` | 0.75 | **0.65** | Más upside por trade |
+| `max_forecast_days` | 3 | **2** | Ensemble mucho más fiable a ≤48h |
 
 ---
 
