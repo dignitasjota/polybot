@@ -421,6 +421,9 @@ class WeatherScanner:
                 pending_cids.add(cid)
                 executed_this_cycle += 1
 
+        # Prune resolved trades older than 7 days to limit memory growth
+        self._prune_old_trades()
+
         # Diagnostic log
         if self._total_scans % 5 == 1:
             logger.info(
@@ -432,6 +435,35 @@ class WeatherScanner:
                 total_trades=self._trades_executed,
                 total_pnl=round(self._total_pnl, 2),
             )
+
+    # ── Pruning ──────────────────────────────────────────────────────────
+
+    _MAX_RESOLVED_AGE = 7 * 86400  # 7 days in seconds
+    _MAX_TRADES_KEPT = 500         # Hard cap on list size
+
+    def _prune_old_trades(self):
+        """Remove resolved trades older than 7 days to prevent unbounded memory growth.
+
+        Keeps all pending/confirmed trades (still active) and the most recent
+        resolved ones up to _MAX_TRADES_KEPT total.
+        """
+        now = time.time()
+        cutoff = now - self._MAX_RESOLVED_AGE
+
+        self._trades = [
+            t for t in self._trades
+            if t.status in ("pending", "confirmed")
+            or t.resolved_at > cutoff
+            or (t.resolved_at == 0 and now - t.created_at < self._MAX_RESOLVED_AGE)
+        ]
+
+        # Hard cap as safety net
+        if len(self._trades) > self._MAX_TRADES_KEPT:
+            # Keep pending first, then most recent
+            pending = [t for t in self._trades if t.status in ("pending", "confirmed")]
+            resolved = [t for t in self._trades if t.status not in ("pending", "confirmed")]
+            resolved.sort(key=lambda t: t.created_at, reverse=True)
+            self._trades = pending + resolved[: self._MAX_TRADES_KEPT - len(pending)]
 
     # ── Market Discovery ─────────────────────────────────────────────────
 
@@ -1130,7 +1162,11 @@ class WeatherScanner:
         )
 
     async def _live_execute(self, trade: WeatherTrade, opp: WeatherOpportunity):
-        """Execute real trade via CLOB."""
+        """Execute real trade via CLOB.
+
+        Re-checks the current market price before placing the order to avoid
+        executing on stale data (forecast is cached 1h, prices can move).
+        """
         if not self._client:
             logger.error("no_clob_client_for_weather")
             trade.status = "failed"
@@ -1142,8 +1178,29 @@ class WeatherScanner:
             from py_clob_client_v2.order_builder.constants import BUY
 
             token_id = opp.market.token_ids[opp.best_outcome_idx]
+
+            # Re-check current price before executing
+            current_price = await self._get_current_price(token_id)
+            if current_price is not None:
+                actual_edge = opp.forecast_prob - current_price
+                if actual_edge < self._config.min_edge:
+                    logger.info(
+                        "weather_edge_vanished",
+                        trade_id=trade.trade_id,
+                        city=trade.city,
+                        original_edge=f"{opp.edge:.1%}",
+                        current_edge=f"{actual_edge:.1%}",
+                        original_price=f"${opp.market_price:.3f}",
+                        current_price=f"${current_price:.3f}",
+                    )
+                    return  # Don't append to trades — edge is gone
+                # Update trade with actual execution price
+                trade.price = current_price
+                trade.cost = round(trade.shares * current_price, 4)
+                trade.edge = actual_edge
+
             order_args = OrderArgs(
-                price=opp.market_price,
+                price=trade.price,
                 size=round(trade.shares, 2),
                 side=BUY,
                 token_id=token_id,
@@ -1164,7 +1221,7 @@ class WeatherScanner:
                     city=trade.city,
                     outcome=trade.outcome,
                     price=f"${trade.price:.3f}",
-                    edge=f"{opp.edge:.1%}",
+                    edge=f"{trade.edge:.1%}",
                 )
             else:
                 trade.status = "failed"
@@ -1176,6 +1233,24 @@ class WeatherScanner:
 
         self._trades.append(trade)
         self._trades_executed += 1
+
+    async def _get_current_price(self, token_id: str) -> float | None:
+        """Fetch current best ask price from CLOB for a token."""
+        if not self._session:
+            return None
+        try:
+            url = f"{CLOB_URL}/book"
+            params = {"token_id": token_id}
+            async with self._session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+            asks = data.get("asks", [])
+            if asks:
+                return float(asks[0].get("price", 0))
+        except Exception:
+            pass
+        return None
 
     # ── Resolution ───────────────────────────────────────────────────────
 
