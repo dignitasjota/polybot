@@ -36,9 +36,13 @@ import structlog
 if TYPE_CHECKING:
     from src.config import CredentialsConfig
 
+import os
+from pathlib import Path
+
 CLOB_URL = "https://clob.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
 ENSEMBLE_API = "https://ensemble-api.open-meteo.com/v1/ensemble"
+TRADES_FILE = Path(os.environ.get("WEATHER_TRADES_PATH", "data/weather_trades.json"))
 
 logger = structlog.get_logger("polymarket.weather")
 
@@ -285,6 +289,9 @@ class WeatherScanner:
         import aiohttp
         self._session = aiohttp.ClientSession()
 
+        # Restore pending trades from previous run
+        self._load_pending_trades()
+
         if not self.should_simulate:
             await self._init_clob_client()
 
@@ -297,6 +304,7 @@ class WeatherScanner:
             mode=self._config.mode,
             scan_interval=self._config.scan_interval,
             min_edge=self._config.min_edge,
+            pending_trades=len([t for t in self._trades if t.status in ("pending", "confirmed")]),
         )
 
     async def stop(self):
@@ -307,6 +315,8 @@ class WeatherScanner:
                 await self._scan_task
             except asyncio.CancelledError:
                 pass
+        # Persist pending trades before shutdown
+        self._save_pending_trades()
         if self._session:
             await self._session.close()
             self._session = None
@@ -1173,6 +1183,7 @@ class WeatherScanner:
         trade.status = "pending"
         self._trades.append(trade)
         self._trades_executed += 1
+        self._save_pending_trades()
 
         logger.info(
             "weather_paper_trade",
@@ -1259,6 +1270,7 @@ class WeatherScanner:
 
         self._trades.append(trade)
         self._trades_executed += 1
+        self._save_pending_trades()
 
     async def _get_current_price(self, token_id: str) -> float | None:
         """Fetch current best ask price from CLOB for a token."""
@@ -1351,6 +1363,9 @@ class WeatherScanner:
                 pnl=f"${trade.pnl:.2f}",
             )
 
+        # Persist: resolved trades removed from file, pending ones kept
+        self._save_pending_trades()
+
     async def _fetch_actual_temp_for_trade(
         self, lat: float, lon: float, tz: str, target_date: date
     ) -> float | None:
@@ -1429,6 +1444,92 @@ class WeatherScanner:
                         return outcome
 
         return None
+
+    # ── Stats ────────────────────────────────────────────────────────────
+
+    # ── Trade Persistence ──────────────────────────────────────────────────
+
+    def _save_pending_trades(self):
+        """Persist pending/confirmed trades to JSON for crash recovery.
+
+        Only saves active trades (pending/confirmed). Resolved trades are
+        removed from the file since Polymarket keeps the history.
+        """
+        active = [t for t in self._trades if t.status in ("pending", "confirmed")]
+        if not active and not TRADES_FILE.exists():
+            return
+
+        TRADES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        records = []
+        for t in active:
+            records.append({
+                "trade_id": t.trade_id,
+                "condition_id": t.condition_id,
+                "question": t.question,
+                "city": t.city,
+                "outcome": t.outcome,
+                "shares": t.shares,
+                "price": t.price,
+                "cost": t.cost,
+                "forecast_prob": t.forecast_prob,
+                "edge": t.edge,
+                "target_date": t.target_date.isoformat() if t.target_date else None,
+                "outcomes": t.outcomes,
+                "unit": t.unit,
+                "status": t.status,
+                "created_at": t.created_at,
+                "mode": t.mode,
+            })
+
+        with open(TRADES_FILE, "w") as f:
+            json.dump(records, f, indent=2)
+
+    def _load_pending_trades(self):
+        """Restore pending trades from disk on startup."""
+        if not TRADES_FILE.exists():
+            return
+
+        try:
+            with open(TRADES_FILE) as f:
+                records = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("weather_trades_load_error", error=str(e))
+            return
+
+        restored = 0
+        for r in records:
+            if r.get("status") not in ("pending", "confirmed"):
+                continue
+            target_date = None
+            if r.get("target_date"):
+                try:
+                    target_date = date.fromisoformat(r["target_date"])
+                except ValueError:
+                    pass
+
+            trade = WeatherTrade(
+                trade_id=r["trade_id"],
+                condition_id=r["condition_id"],
+                question=r.get("question", ""),
+                city=r["city"],
+                outcome=r["outcome"],
+                shares=r["shares"],
+                price=r["price"],
+                cost=r["cost"],
+                forecast_prob=r.get("forecast_prob", 0),
+                edge=r.get("edge", 0),
+                target_date=target_date,
+                outcomes=r.get("outcomes", []),
+                unit=r.get("unit", "C"),
+                status=r["status"],
+                created_at=r.get("created_at", 0),
+                mode=r.get("mode", "paper"),
+            )
+            self._trades.append(trade)
+            restored += 1
+
+        if restored > 0:
+            logger.info("weather_trades_restored", count=restored)
 
     # ── Stats ────────────────────────────────────────────────────────────
 
