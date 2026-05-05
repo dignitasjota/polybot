@@ -37,6 +37,16 @@ CLOB_URL = "https://clob.polymarket.com"
 # Polymarket requires marketable BUY orders to be at least $1 per leg.
 MIN_ORDER_USD = 1.0
 
+# Skip markets within this window of resolution: order book asks become stale
+# (matching engine winding down), and any large gap detected here is almost
+# certainly phantom liquidity priced from a leftover 1¢ ask we'd never fill.
+MIN_SECONDS_TO_CLOSE = 90.0
+
+# When only best_bid_ask is available (no book depth), the fallback sizing
+# `max_cost / price` produces absurd sizes for very cheap legs (e.g. 5000 shares
+# at $0.01). Refuse to trust deep-OTM phantom asks without explicit book depth.
+PHANTOM_ASK_PRICE_THRESHOLD = 0.05
+
 logger = structlog.get_logger("polymarket.completeness")
 
 
@@ -349,22 +359,30 @@ class CompletenessScanner:
         if market.best_ask_yes <= 0 or market.best_ask_no <= 0:
             return None
 
+        # Skip markets too close to resolution: book is unreliable and we
+        # can't redeem before close. Large gaps here are almost always stale.
+        hours_left = market.hours_to_resolution
+        if hours_left is not None and hours_left * 3600 < MIN_SECONDS_TO_CLOSE:
+            return None
+
         # Binary market: 2 outcomes
         prices = [market.best_ask_yes, market.best_ask_no]
         token_ids = [market.yes_token_id, market.no_token_id]
 
-        # Sizes available at best ask
-        # Prefer order book depth, but fall back to a conservative estimate
-        # when only best_bid_ask events have been received (no full book snapshot).
-        # WS sends book snapshots rarely; best_bid_ask events are frequent.
+        # Sizes available at best ask. Prefer real order book depth.
         yes_size = market.asks_yes[0].size if market.asks_yes else 0
         no_size = market.asks_no[0].size if market.asks_no else 0
 
-        # If we have prices but no book depth, assume conservative size
-        # (we'll verify actual liquidity when placing orders)
+        # Fallback when only best_bid_ask is available (no book snapshot yet).
+        # For deep-OTM legs (price < threshold), refuse to fabricate size — those
+        # asks are typically stale 1¢ leftovers, not real fillable liquidity.
         if yes_size == 0 and market.best_ask_yes > 0:
+            if market.best_ask_yes < PHANTOM_ASK_PRICE_THRESHOLD:
+                return None
             yes_size = self._config.max_cost_per_trade / market.best_ask_yes
         if no_size == 0 and market.best_ask_no > 0:
+            if market.best_ask_no < PHANTOM_ASK_PRICE_THRESHOLD:
+                return None
             no_size = self._config.max_cost_per_trade / market.best_ask_no
 
         sizes = [yes_size, no_size]
