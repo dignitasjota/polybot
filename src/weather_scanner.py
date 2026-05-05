@@ -1450,16 +1450,14 @@ class WeatherScanner:
     # ── Trade Persistence ──────────────────────────────────────────────────
 
     def _save_pending_trades(self):
-        """Persist pending/confirmed trades to JSON for crash recovery.
+        """Persist pending trades + cumulative stats to JSON for crash recovery.
 
-        Only saves active trades (pending/confirmed). Resolved trades are
-        removed from the file since Polymarket keeps the history.
+        Saves active trades (pending/confirmed) and lifetime counters.
+        Resolved trades are removed since Polymarket keeps the history.
         """
-        active = [t for t in self._trades if t.status in ("pending", "confirmed")]
-        if not active and not TRADES_FILE.exists():
-            return
-
         TRADES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        active = [t for t in self._trades if t.status in ("pending", "confirmed")]
+
         records = []
         for t in active:
             records.append({
@@ -1481,21 +1479,53 @@ class WeatherScanner:
                 "mode": t.mode,
             })
 
+        payload = {
+            "trades": records,
+            "stats": {
+                "total_scans": self._total_scans,
+                "trades_executed": self._trades_executed,
+                "trades_won": self._trades_won,
+                "trades_lost": self._trades_lost,
+                "total_pnl": round(self._total_pnl, 4),
+                "opportunities_found": self._opportunities_found,
+                "markets_found": self._markets_found,
+            },
+        }
+
         with open(TRADES_FILE, "w") as f:
-            json.dump(records, f, indent=2)
+            json.dump(payload, f, indent=2)
 
     def _load_pending_trades(self):
-        """Restore pending trades from disk on startup."""
+        """Restore pending trades and cumulative stats from disk on startup."""
         if not TRADES_FILE.exists():
             return
 
         try:
             with open(TRADES_FILE) as f:
-                records = json.load(f)
+                payload = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("weather_trades_load_error", error=str(e))
             return
 
+        # Support both old format (list) and new format (dict with trades+stats)
+        if isinstance(payload, list):
+            records = payload
+            stats = {}
+        else:
+            records = payload.get("trades", [])
+            stats = payload.get("stats", {})
+
+        # Restore cumulative stats
+        if stats:
+            self._total_scans = stats.get("total_scans", 0)
+            self._trades_executed = stats.get("trades_executed", 0)
+            self._trades_won = stats.get("trades_won", 0)
+            self._trades_lost = stats.get("trades_lost", 0)
+            self._total_pnl = stats.get("total_pnl", 0.0)
+            self._opportunities_found = stats.get("opportunities_found", 0)
+            self._markets_found = stats.get("markets_found", 0)
+
+        # Restore pending trades
         restored = 0
         for r in records:
             if r.get("status") not in ("pending", "confirmed"):
@@ -1528,8 +1558,14 @@ class WeatherScanner:
             self._trades.append(trade)
             restored += 1
 
-        if restored > 0:
-            logger.info("weather_trades_restored", count=restored)
+        if restored > 0 or stats:
+            logger.info(
+                "weather_state_restored",
+                pending_trades=restored,
+                total_pnl=self._total_pnl,
+                wins=self._trades_won,
+                losses=self._trades_lost,
+            )
 
     # ── Stats ────────────────────────────────────────────────────────────
 
