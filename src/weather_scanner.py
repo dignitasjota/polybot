@@ -236,6 +236,9 @@ class WeatherScanner:
         await scanner.stop()
     """
 
+    # Max concurrent requests to Open-Meteo (avoid 429s on free tier)
+    _FORECAST_CONCURRENCY = 5
+
     def __init__(self, config, credentials: CredentialsConfig | None = None):
         self._config = config
         self._credentials = credentials
@@ -244,6 +247,9 @@ class WeatherScanner:
         self._session = None
         self._client = None  # ClobClient for live mode
         self._initialized = False
+
+        # Rate limiting for Open-Meteo API
+        self._forecast_semaphore = asyncio.Semaphore(self._FORECAST_CONCURRENCY)
 
         # State
         self._running = False
@@ -380,9 +386,11 @@ class WeatherScanner:
         self._markets = markets
         self._markets_found = len(markets)
 
-        # Step 2: For each market, get forecast and evaluate
+        # Step 2: Pre-filter markets where edge is impossible, then fetch forecasts
+        candidates = [m for m in markets if self._has_edge_potential(m)]
+
         opportunities: list[WeatherOpportunity] = []
-        for market in markets:
+        for market in candidates:
             try:
                 forecast = await self._get_forecast(market)
                 if not forecast:
@@ -435,6 +443,16 @@ class WeatherScanner:
                 total_trades=self._trades_executed,
                 total_pnl=round(self._total_pnl, 2),
             )
+
+    def _has_edge_potential(self, market: WeatherMarket) -> bool:
+        """Quick pre-filter: skip markets where no outcome can possibly have edge.
+
+        A market has edge potential if at least one outcome has price ≤ max_price.
+        If all outcomes are priced above max_price, even a 100% forecast prob
+        wouldn't pass the max_price filter in _evaluate_market().
+        """
+        max_price = self._config.max_price
+        return any(p <= max_price for p in market.outcome_prices)
 
     # ── Pruning ──────────────────────────────────────────────────────────
 
@@ -764,7 +782,10 @@ class WeatherScanner:
     async def _fetch_ensemble_forecast(
         self, lat: float, lon: float, tz: str, target_date: date, outcomes: list[str]
     ) -> ForecastDistribution | None:
-        """Fetch ECMWF IFS ensemble forecast from Open-Meteo."""
+        """Fetch ECMWF IFS ensemble forecast from Open-Meteo.
+
+        Uses a semaphore to limit concurrent requests (Open-Meteo free tier).
+        """
         if not self._session:
             return None
 
@@ -784,11 +805,16 @@ class WeatherScanner:
         }
 
         try:
-            async with self._session.get(ENSEMBLE_API, params=params) as resp:
-                if resp.status != 200:
-                    logger.warning("ensemble_api_error", status=resp.status)
-                    return None
-                data = await resp.json()
+            async with self._forecast_semaphore:
+                async with self._session.get(ENSEMBLE_API, params=params) as resp:
+                    if resp.status == 429:
+                        logger.warning("ensemble_api_rate_limited")
+                        await asyncio.sleep(2)
+                        return None
+                    if resp.status != 200:
+                        logger.warning("ensemble_api_error", status=resp.status)
+                        return None
+                    data = await resp.json()
         except Exception as e:
             logger.warning("ensemble_fetch_error", error=str(e))
             return None
