@@ -226,6 +226,7 @@ class WeatherTrade:
     resolved_at: float = 0.0
     pnl: float = 0.0
     mode: str = "paper"
+    lead_days: int = 0            # Days between bet placement and target_date (forecast horizon)
 
 
 # ── Scanner ──────────────────────────────────────────────────────────────
@@ -1176,6 +1177,7 @@ class WeatherScanner:
             unit=market.unit,
             created_at=time.time(),
             mode=self._config.mode,
+            lead_days=max(0, (market.target_date - date.today()).days),
         )
 
         if self.should_simulate:
@@ -1501,6 +1503,7 @@ class WeatherScanner:
                 "status": t.status,
                 "created_at": t.created_at,
                 "mode": t.mode,
+                "lead_days": t.lead_days,
             })
 
         payload = {
@@ -1578,6 +1581,7 @@ class WeatherScanner:
                 status=r["status"],
                 created_at=r.get("created_at", 0),
                 mode=r.get("mode", "paper"),
+                lead_days=r.get("lead_days", 0),
             )
             self._trades.append(trade)
             restored += 1
@@ -1636,6 +1640,7 @@ class WeatherScanner:
                     "pnl": round(t.pnl, 2),
                     "status": t.status,
                     "mode": t.mode,
+                    "lead_days": t.lead_days,
                 }
                 for t in recent_trades
             ],
