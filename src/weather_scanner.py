@@ -1106,6 +1106,11 @@ class WeatherScanner:
         if best_market_price > self._config.max_price:
             return None
 
+        # Don't buy phantom asks (price < 2¢): order book is empty or stale,
+        # the bet wouldn't fill in live trading even though it "executes" in dry_run.
+        if best_market_price < 0.02:
+            return None
+
         # Agreement filter: if models disagree strongly, skip
         if forecast.agreement < self._config.min_agreement:
             return None
@@ -1170,7 +1175,7 @@ class WeatherScanner:
             outcomes=list(market.outcomes),
             unit=market.unit,
             created_at=time.time(),
-            mode="paper" if self.should_simulate else "live",
+            mode=self._config.mode,
         )
 
         if self.should_simulate:

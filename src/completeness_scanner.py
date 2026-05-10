@@ -514,23 +514,59 @@ class CompletenessScanner:
             self._trades.append(trade)
             return
 
-        # Pre-flight: refresh balance and skip if not enough pUSD for the full arb.
-        # Avoids the half-fill scenario where leg 1 consumes balance and leg 2 fails.
+        # Pre-flight: refresh balance. If full notional exceeds free pUSD, downsize
+        # the arb proportionally rather than skipping — small profitable trades
+        # are better than zero. Skip only if the downsized trade can't satisfy
+        # min_shares or the per-leg $1 min-order constraint.
         balance = await self._refresh_balance()
         if balance is not None and balance < trade.cost_total:
-            logger.warning(
-                "arb_skipped_insufficient_balance",
+            cost_per_share = sum(opp.prices)
+            # Use 98% of balance as safety margin (allow for fees/rounding).
+            usable = balance * 0.98
+            if cost_per_share <= 0:
+                trade.cost_total = 0.0
+                trade.status = "failed"
+                self._trades_failed += 1
+                self._trades.append(trade)
+                return
+
+            new_shares = usable / cost_per_share
+            min_price = min(p for p in opp.prices if p > 0)
+
+            # Both constraints must still hold after downsize.
+            if (
+                new_shares < self._config.min_shares
+                or new_shares * min_price < MIN_ORDER_USD
+            ):
+                logger.warning(
+                    "arb_skipped_insufficient_balance",
+                    trade_id=trade.trade_id,
+                    balance=f"${balance:.2f}",
+                    required=f"${trade.cost_total:.2f}",
+                    question=opp.question[:50],
+                )
+                trade.cost_total = 0.0
+                trade.status = "failed"
+                trade.actual_pnl = 0.0
+                self._trades_failed += 1
+                self._trades.append(trade)
+                return
+
+            new_shares = round(new_shares, 2)
+            new_cost = sum(p * new_shares for p in opp.prices)
+            new_fees = opp.total_fees * (new_shares / trade.shares) if trade.shares > 0 else 0.0
+            trade.shares = new_shares
+            trade.cost_total = round(new_cost, 4)
+            trade.fees_paid = round(new_fees, 4)
+            trade.expected_profit = round(new_shares - new_cost - new_fees - GAS_REDEEM_USD, 4)
+            logger.info(
+                "arb_downsized_to_balance",
                 trade_id=trade.trade_id,
                 balance=f"${balance:.2f}",
-                required=f"${trade.cost_total:.2f}",
-                question=opp.question[:50],
+                shares=new_shares,
+                cost=f"${trade.cost_total:.2f}",
+                expected_profit=f"${trade.expected_profit:.4f}",
             )
-            trade.cost_total = 0.0
-            trade.status = "failed"
-            trade.actual_pnl = 0.0
-            self._trades_failed += 1
-            self._trades.append(trade)
-            return
 
         try:
             from py_clob_client_v2 import OrderArgs
