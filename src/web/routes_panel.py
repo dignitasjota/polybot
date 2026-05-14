@@ -506,9 +506,30 @@ async def panel_weather(request: web.Request) -> web.Response:
     ctx = await _base_context(request)
 
     scanner = _get_weather_scanner(request)
+    by_lead = []
     if scanner:
         stats = scanner.get_stats()
         forecasts = stats.get("active_forecasts", [])
+        # Build by_lead breakdown of resolved trades for empirical horizon analysis
+        agg: dict[int, dict] = {}
+        for t in scanner._trades:
+            if t.status not in ("won", "lost"):
+                continue
+            b = agg.setdefault(t.lead_days, {"n": 0, "wins": 0, "pnl": 0.0, "cost": 0.0})
+            b["n"] += 1
+            b["wins"] += 1 if t.status == "won" else 0
+            b["pnl"] += t.pnl
+            b["cost"] += t.cost
+        for ld in sorted(agg.keys()):
+            b = agg[ld]
+            by_lead.append({
+                "lead_days": ld,
+                "n": b["n"],
+                "win_rate": (b["wins"] / b["n"]) if b["n"] else 0,
+                "pnl": b["pnl"],
+                "pnl_per_trade": (b["pnl"] / b["n"]) if b["n"] else 0,
+                "roi": (b["pnl"] / b["cost"]) if b["cost"] > 0 else 0,
+            })
     else:
         stats = {
             "running": False,
@@ -528,6 +549,7 @@ async def panel_weather(request: web.Request) -> web.Response:
         "stats": stats,
         "params": params,
         "forecasts": forecasts,
+        "by_lead": by_lead,
     })
     return aiohttp_jinja2.render_template("panel/weather.html", request, ctx)
 

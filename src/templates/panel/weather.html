@@ -136,6 +136,48 @@
     </form>
 </div>
 
+{# Performance by Forecast Horizon #}
+{% if by_lead %}
+<div class="section">
+    <h3>PERFORMANCE BY LEAD DAYS</h3>
+    <p style="color:#888;font-size:0.85em;margin-top:-8px;">
+        Trades resueltos agrupados por horizonte de pronóstico. ROI = P&amp;L / capital comprometido.
+    </p>
+    <table>
+        <thead>
+            <tr>
+                <th>Lead Days</th>
+                <th>N</th>
+                <th>Win Rate</th>
+                <th>P&amp;L</th>
+                <th>P&amp;L / Trade</th>
+                <th>ROI</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for b in by_lead %}
+            <tr>
+                <td style="font-weight:bold;">{{ b.lead_days }}d</td>
+                <td>{{ b.n }}</td>
+                <td style="color:{{ '#00ff88' if b.win_rate >= 0.30 else '#ffaa00' if b.win_rate >= 0.20 else '#ff4444' }};">
+                    {{ "%.0f"|format(b.win_rate * 100) }}%
+                </td>
+                <td style="color:{{ '#00ff88' if b.pnl >= 0 else '#ff4444' }};">
+                    ${{ "%+.2f"|format(b.pnl) }}
+                </td>
+                <td style="color:{{ '#00ff88' if b.pnl_per_trade >= 0 else '#ff4444' }};">
+                    ${{ "%+.2f"|format(b.pnl_per_trade) }}
+                </td>
+                <td style="color:{{ '#00ff88' if b.roi >= 0 else '#ff4444' }};">
+                    {{ "%+.0f"|format(b.roi * 100) }}%
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
 {# Active Forecasts #}
 {% if forecasts %}
 <div class="section">
