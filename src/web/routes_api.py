@@ -84,6 +84,40 @@ async def handle_account_report(request: web.Request) -> web.Response:
     return web.json_response({"error": "account not found"}, status=404)
 
 
+@routes.get("/api/weather/by_lead")
+async def handle_weather_by_lead(request: web.Request) -> web.Response:
+    """Breakdown of resolved weather trades grouped by forecast horizon (lead_days)."""
+    bot = request.app["bot"]
+    for acc in bot.accounts:
+        if "weather" not in acc.strategies:
+            continue
+        scanner = acc.strategies["weather"].scanner
+        by_lead: dict[int, dict] = {}
+        for t in scanner._trades:
+            if t.status not in ("won", "lost"):
+                continue
+            ld = t.lead_days
+            bucket = by_lead.setdefault(ld, {"n": 0, "wins": 0, "pnl": 0.0, "cost": 0.0})
+            bucket["n"] += 1
+            bucket["wins"] += 1 if t.status == "won" else 0
+            bucket["pnl"] += t.pnl
+            bucket["cost"] += t.cost
+        result = []
+        for ld in sorted(by_lead.keys()):
+            b = by_lead[ld]
+            result.append({
+                "lead_days": ld,
+                "n": b["n"],
+                "wins": b["wins"],
+                "win_rate": round(b["wins"] / b["n"], 3) if b["n"] else 0,
+                "pnl": round(b["pnl"], 2),
+                "pnl_per_trade": round(b["pnl"] / b["n"], 2) if b["n"] else 0,
+                "roi": round(b["pnl"] / b["cost"], 3) if b["cost"] > 0 else 0,
+            })
+        return web.json_response({"by_lead": result, "total_resolved": sum(b["n"] for b in by_lead.values())})
+    return web.json_response({"error": "no weather account"}, status=404)
+
+
 @routes.get("/api/scanner/top-traders")
 async def handle_top_traders(request: web.Request) -> web.Response:
     """Get top profitable traders for copy-trading."""
