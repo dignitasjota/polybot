@@ -1476,16 +1476,22 @@ class WeatherScanner:
     # ── Trade Persistence ──────────────────────────────────────────────────
 
     def _save_pending_trades(self):
-        """Persist pending trades + cumulative stats to JSON for crash recovery.
+        """Persist trades + cumulative stats to JSON for crash recovery.
 
-        Saves active trades (pending/confirmed) and lifetime counters.
-        Resolved trades are removed since Polymarket keeps the history.
+        Saves active trades (pending/confirmed) AND the most recent resolved
+        trades (won/lost/expired) for empirical analysis across restarts.
+        Resolved trades are capped to RESOLVED_HISTORY_CAP (most recent first)
+        to avoid unbounded file growth.
         """
         TRADES_FILE.parent.mkdir(parents=True, exist_ok=True)
         active = [t for t in self._trades if t.status in ("pending", "confirmed")]
+        resolved = [t for t in self._trades if t.status in ("won", "lost", "expired")]
+        # Keep most recent resolved (by resolved_at, fallback to created_at)
+        resolved.sort(key=lambda t: t.resolved_at or t.created_at, reverse=True)
+        resolved = resolved[:500]
 
         records = []
-        for t in active:
+        for t in active + resolved:
             records.append({
                 "trade_id": t.trade_id,
                 "condition_id": t.condition_id,
@@ -1502,6 +1508,8 @@ class WeatherScanner:
                 "unit": t.unit,
                 "status": t.status,
                 "created_at": t.created_at,
+                "resolved_at": t.resolved_at,
+                "pnl": t.pnl,
                 "mode": t.mode,
                 "lead_days": t.lead_days,
             })
@@ -1552,10 +1560,12 @@ class WeatherScanner:
             self._opportunities_found = stats.get("opportunities_found", 0)
             self._markets_found = stats.get("markets_found", 0)
 
-        # Restore pending trades
-        restored = 0
+        # Restore both pending/confirmed and resolved trades
+        restored_pending = 0
+        restored_resolved = 0
         for r in records:
-            if r.get("status") not in ("pending", "confirmed"):
+            status = r.get("status")
+            if status not in ("pending", "confirmed", "won", "lost", "expired"):
                 continue
             target_date = None
             if r.get("target_date"):
@@ -1578,18 +1588,24 @@ class WeatherScanner:
                 target_date=target_date,
                 outcomes=r.get("outcomes", []),
                 unit=r.get("unit", "C"),
-                status=r["status"],
+                status=status,
                 created_at=r.get("created_at", 0),
+                resolved_at=r.get("resolved_at", 0),
+                pnl=r.get("pnl", 0),
                 mode=r.get("mode", "paper"),
                 lead_days=r.get("lead_days", 0),
             )
             self._trades.append(trade)
-            restored += 1
+            if status in ("pending", "confirmed"):
+                restored_pending += 1
+            else:
+                restored_resolved += 1
 
-        if restored > 0 or stats:
+        if restored_pending > 0 or restored_resolved > 0 or stats:
             logger.info(
                 "weather_state_restored",
-                pending_trades=restored,
+                pending_trades=restored_pending,
+                resolved_trades=restored_resolved,
                 total_pnl=self._total_pnl,
                 wins=self._trades_won,
                 losses=self._trades_lost,
