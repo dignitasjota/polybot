@@ -242,7 +242,8 @@ class WeatherScanner:
     """
 
     # Max concurrent requests to Open-Meteo (avoid 429s on free tier)
-    _FORECAST_CONCURRENCY = 5
+    _FORECAST_CONCURRENCY = 2
+    _RATE_LIMIT_BACKOFF_S = 300  # When 429, pause all fetches for 5 minutes
 
     def __init__(self, config, credentials: CredentialsConfig | None = None):
         self._config = config
@@ -255,6 +256,7 @@ class WeatherScanner:
 
         # Rate limiting for Open-Meteo API
         self._forecast_semaphore = asyncio.Semaphore(self._FORECAST_CONCURRENCY)
+        self._rate_limited_until: float = 0.0  # Timestamp; skip fetches until this passes
 
         # State
         self._running = False
@@ -834,12 +836,20 @@ class WeatherScanner:
             "timezone": tz,
         }
 
+        # Global rate-limit short-circuit: if we hit 429 recently, skip all
+        # fetches until the cooldown passes. Prevents wasted retries.
+        if time.time() < self._rate_limited_until:
+            return None
+
         try:
             async with self._forecast_semaphore:
                 async with self._session.get(ENSEMBLE_API, params=params) as resp:
                     if resp.status == 429:
-                        logger.warning("ensemble_api_rate_limited")
-                        await asyncio.sleep(2)
+                        self._rate_limited_until = time.time() + self._RATE_LIMIT_BACKOFF_S
+                        logger.warning(
+                            "ensemble_api_rate_limited",
+                            backoff_s=self._RATE_LIMIT_BACKOFF_S,
+                        )
                         return None
                     if resp.status != 200:
                         logger.warning("ensemble_api_error", status=resp.status)

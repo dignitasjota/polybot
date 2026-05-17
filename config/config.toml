@@ -314,7 +314,7 @@ builder_passphrase_env = "BUILDER_PASSPHRASE"
 
 [accounts.weather]
 scan_interval = 900                  # Cada 15 min (pronósticos no cambian rápido)
-forecast_cache_ttl = 3600            # Cache forecasts 1 hora
+forecast_cache_ttl = 14400           # Cache forecasts 4 horas (forecasts ECMWF no cambian en horas, evita rate limit Open-Meteo)
 max_forecast_days = 2                # Solo mercados a ≤2 días (ensemble más fiable)
 min_edge = 0.15                      # Mínimo 15% edge — modelo sobreestima edges, exigir más
 min_forecast_prob = 0.15             # No apostar en outcomes con <15% prob (ruido)
