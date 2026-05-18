@@ -91,17 +91,20 @@ async def handle_weather_debug_discovery(request: web.Request) -> web.Response:
     base = "https://gamma-api.polymarket.com"
     results = {}
     # Test both deprecated /events and new /events/keyset to diagnose discovery
+    # Use current UTC time for date filter
+    from datetime import datetime, timezone, timedelta
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    max_end = (datetime.now(timezone.utc) + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
     queries = {
-        "legacy_events_103040": (f"{base}/events", {
+        "broken_legacy_events": (f"{base}/events", {
             "tag_id": "103040", "active": "true", "closed": "false", "limit": "20",
-            "order": "startDate", "ascending": "false",
         }),
-        "keyset_events_103040": (f"{base}/events/keyset", {
+        "broken_keyset_active_closed": (f"{base}/events/keyset", {
             "tag_id": "103040", "active": "true", "closed": "false", "limit": "20",
-            "order": "startDate", "ascending": "false",
         }),
-        "keyset_events_no_filters": (f"{base}/events/keyset", {
-            "tag_id": "103040", "limit": "20",
+        "fixed_keyset_end_date_filter": (f"{base}/events/keyset", {
+            "tag_id": "103040", "end_date_min": now_iso, "end_date_max": max_end,
+            "limit": "20", "order": "endDate", "ascending": "true",
         }),
     }
     async with aiohttp.ClientSession() as session:

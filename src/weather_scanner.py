@@ -539,14 +539,22 @@ class WeatherScanner:
         after_cursor: str | None = None
         max_pages = 5  # Safety cap: 5 × 100 = 500 events max per scan
 
+        # Server-side filter: only events ending from now onwards.
+        # `active=true closed=false` was the previous filter pair, but in
+        # /events/keyset (as of May 2026) it returns 0 results because Polymarket
+        # marks historical events as active=true closed=true. Filter by date
+        # bounds instead, then double-check `closed` in Python below.
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        max_end = (datetime.now(timezone.utc) + timedelta(days=self._config.max_forecast_days + 1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         for _ in range(max_pages):
             params: dict[str, str] = {
                 "tag_id": str(self.TEMPERATURE_TAG_ID),
-                "active": "true",
-                "closed": "false",
+                "end_date_min": now_iso,
+                "end_date_max": max_end,
                 "limit": "100",
-                "order": "startDate",
-                "ascending": "false",
+                "order": "endDate",
+                "ascending": "true",
             }
             if after_cursor:
                 params["after_cursor"] = after_cursor
@@ -573,6 +581,10 @@ class WeatherScanner:
                 break
 
             for event in events:
+                # Defensive: skip events Polymarket reports as closed even though
+                # the server-side end_date_min filter should already exclude them.
+                if event.get("closed"):
+                    continue
                 slug = event.get("slug", "")
                 if slug in seen_slugs:
                     continue
