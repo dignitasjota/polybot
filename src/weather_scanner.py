@@ -640,6 +640,7 @@ class WeatherScanner:
             slug,
         )
         if not slug_match:
+            logger.info("weather_parse_reject", reason="slug_regex", slug=slug)
             return None
 
         city_raw = slug_match.group(1)
@@ -650,26 +651,35 @@ class WeatherScanner:
         # Resolve city
         city_slug = self._normalize_city(city_raw)
         if city_slug not in CITY_COORDS:
-            logger.debug("weather_unknown_city", city=city_raw, slug=slug)
+            logger.info("weather_parse_reject", reason="unknown_city", city=city_raw, slug=slug)
             return None
 
         # Parse date
         target_date = self._parse_market_date(month_str, day_str, year_str)
         if not target_date:
+            logger.info("weather_parse_reject", reason="bad_date", month=month_str, day=day_str, year=year_str)
             return None
 
         # Skip markets already resolved (date in the past)
         today = date.today()
         if target_date < today:
+            logger.info("weather_parse_reject", reason="past_date", target=str(target_date), today=str(today))
             return None
 
         # Skip markets too far in future (forecast unreliable)
         if (target_date - today).days > self._config.max_forecast_days:
+            logger.info("weather_parse_reject", reason="too_far", days_ahead=(target_date - today).days)
             return None
 
         # Parse binary markets within this event into outcomes
         event_markets = event.get("markets", [])
         if not event_markets:
+            logger.info(
+                "weather_parse_reject",
+                reason="no_markets_in_event",
+                slug=slug,
+                event_keys=list(event.keys())[:15],
+            )
             return None
 
         outcomes: list[str] = []
