@@ -577,9 +577,18 @@ class WeatherScanner:
                 events = data if isinstance(data, list) else []
                 next_cursor = None
 
+            logger.info(
+                "weather_discovery_page",
+                events_received=len(events),
+                data_type=type(data).__name__,
+                has_cursor=bool(next_cursor),
+            )
+
             if not events:
                 break
 
+            parse_failures = 0
+            duplicates = 0
             for event in events:
                 # NOTE: do NOT filter by event.closed here. As of May 2026 Polymarket
                 # marks all recurring/hide-from-new weather events as closed=true at
@@ -588,12 +597,24 @@ class WeatherScanner:
                 # validated downstream when fetching prices.
                 slug = event.get("slug", "")
                 if slug in seen_slugs:
+                    duplicates += 1
                     continue
                 seen_slugs.add(slug)
 
                 parsed = self._parse_temperature_event(event)
                 if parsed:
                     markets.append(parsed)
+                else:
+                    parse_failures += 1
+
+            logger.info(
+                "weather_discovery_page_parsed",
+                in_page=len(events),
+                parsed_ok=len(events) - parse_failures - duplicates,
+                parse_failures=parse_failures,
+                duplicates=duplicates,
+                running_total=len(markets),
+            )
 
             if not next_cursor:
                 break
