@@ -577,18 +577,9 @@ class WeatherScanner:
                 events = data if isinstance(data, list) else []
                 next_cursor = None
 
-            logger.info(
-                "weather_discovery_page",
-                events_received=len(events),
-                data_type=type(data).__name__,
-                has_cursor=bool(next_cursor),
-            )
-
             if not events:
                 break
 
-            parse_failures = 0
-            duplicates = 0
             for event in events:
                 # NOTE: do NOT filter by event.closed here. As of May 2026 Polymarket
                 # marks all recurring/hide-from-new weather events as closed=true at
@@ -597,24 +588,12 @@ class WeatherScanner:
                 # validated downstream when fetching prices.
                 slug = event.get("slug", "")
                 if slug in seen_slugs:
-                    duplicates += 1
                     continue
                 seen_slugs.add(slug)
 
                 parsed = self._parse_temperature_event(event)
                 if parsed:
                     markets.append(parsed)
-                else:
-                    parse_failures += 1
-
-            logger.info(
-                "weather_discovery_page_parsed",
-                in_page=len(events),
-                parsed_ok=len(events) - parse_failures - duplicates,
-                parse_failures=parse_failures,
-                duplicates=duplicates,
-                running_total=len(markets),
-            )
 
             if not next_cursor:
                 break
@@ -640,7 +619,6 @@ class WeatherScanner:
             slug,
         )
         if not slug_match:
-            logger.info("weather_parse_reject", reason="slug_regex", slug=slug)
             return None
 
         city_raw = slug_match.group(1)
@@ -651,35 +629,26 @@ class WeatherScanner:
         # Resolve city
         city_slug = self._normalize_city(city_raw)
         if city_slug not in CITY_COORDS:
-            logger.info("weather_parse_reject", reason="unknown_city", city=city_raw, slug=slug)
+            logger.debug("weather_unknown_city", city=city_raw, slug=slug)
             return None
 
         # Parse date
         target_date = self._parse_market_date(month_str, day_str, year_str)
         if not target_date:
-            logger.info("weather_parse_reject", reason="bad_date", month=month_str, day=day_str, year=year_str)
             return None
 
         # Skip markets already resolved (date in the past)
         today = date.today()
         if target_date < today:
-            logger.info("weather_parse_reject", reason="past_date", target=str(target_date), today=str(today))
             return None
 
         # Skip markets too far in future (forecast unreliable)
         if (target_date - today).days > self._config.max_forecast_days:
-            logger.info("weather_parse_reject", reason="too_far", days_ahead=(target_date - today).days)
             return None
 
         # Parse binary markets within this event into outcomes
         event_markets = event.get("markets", [])
         if not event_markets:
-            logger.info(
-                "weather_parse_reject",
-                reason="no_markets_in_event",
-                slug=slug,
-                event_keys=list(event.keys())[:15],
-            )
             return None
 
         outcomes: list[str] = []
@@ -691,11 +660,6 @@ class WeatherScanner:
         fee_rate = 0.05
         end_date = ""
         unit = "C"
-
-        # Diagnostic counters for inner loop
-        rej_no_ids = 0
-        rej_no_label = 0
-        rej_no_price = 0
 
         for mkt in event_markets:
             # NOTE: don't filter by active/closed flags. As of May 2026 Polymarket
@@ -726,7 +690,6 @@ class WeatherScanner:
                 prices_raw = prices_str or []
 
             if not cid or not clob_tokens or not prices_raw:
-                rej_no_ids += 1
                 continue
 
             # Extract outcome label from question
@@ -737,7 +700,6 @@ class WeatherScanner:
                 # Fallback: use groupItemTitle if available
                 label = mkt.get("groupItemTitle")
             if not label:
-                rej_no_label += 1
                 continue
 
             # Detect unit
@@ -748,7 +710,6 @@ class WeatherScanner:
             try:
                 yes_price = float(prices_raw[0])
             except (ValueError, TypeError, IndexError):
-                rej_no_price += 1
                 continue
 
             # YES token is first in clobTokenIds
@@ -765,19 +726,6 @@ class WeatherScanner:
                 end_date = mkt.get("endDate", "")
 
         if len(outcomes) < 3:
-            # Sample first market keys to diagnose what's missing
-            sample_keys = list(event_markets[0].keys())[:20] if event_markets else []
-            logger.info(
-                "weather_parse_reject",
-                reason="too_few_outcomes",
-                slug=slug,
-                total_markets=len(event_markets),
-                outcomes_collected=len(outcomes),
-                rej_no_ids=rej_no_ids,
-                rej_no_label=rej_no_label,
-                rej_no_price=rej_no_price,
-                sample_market_keys=sample_keys,
-            )
             return None
 
         # Sort outcomes by temperature (ascending)
