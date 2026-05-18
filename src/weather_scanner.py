@@ -692,10 +692,17 @@ class WeatherScanner:
         end_date = ""
         unit = "C"
 
+        # Diagnostic counters for inner loop
+        rej_inactive = 0
+        rej_no_ids = 0
+        rej_no_label = 0
+        rej_no_price = 0
+
         for mkt in event_markets:
             # NOTE: don't filter by closed flag (see _discover_markets comment).
             # `active` is still a useful negative signal for genuinely-inactive markets.
             if not mkt.get("active"):
+                rej_inactive += 1
                 continue
 
             question = mkt.get("question", "")
@@ -722,6 +729,7 @@ class WeatherScanner:
                 prices_raw = prices_str or []
 
             if not cid or not clob_tokens or not prices_raw:
+                rej_no_ids += 1
                 continue
 
             # Extract outcome label from question
@@ -732,6 +740,7 @@ class WeatherScanner:
                 # Fallback: use groupItemTitle if available
                 label = mkt.get("groupItemTitle")
             if not label:
+                rej_no_label += 1
                 continue
 
             # Detect unit
@@ -742,6 +751,7 @@ class WeatherScanner:
             try:
                 yes_price = float(prices_raw[0])
             except (ValueError, TypeError, IndexError):
+                rej_no_price += 1
                 continue
 
             # YES token is first in clobTokenIds
@@ -758,6 +768,20 @@ class WeatherScanner:
                 end_date = mkt.get("endDate", "")
 
         if len(outcomes) < 3:
+            # Sample first market keys to diagnose what's missing
+            sample_keys = list(event_markets[0].keys())[:20] if event_markets else []
+            logger.info(
+                "weather_parse_reject",
+                reason="too_few_outcomes",
+                slug=slug,
+                total_markets=len(event_markets),
+                outcomes_collected=len(outcomes),
+                rej_inactive=rej_inactive,
+                rej_no_ids=rej_no_ids,
+                rej_no_label=rej_no_label,
+                rej_no_price=rej_no_price,
+                sample_market_keys=sample_keys,
+            )
             return None
 
         # Sort outcomes by temperature (ascending)
