@@ -84,6 +84,46 @@ async def handle_account_report(request: web.Request) -> web.Response:
     return web.json_response({"error": "account not found"}, status=404)
 
 
+@routes.get("/api/weather/debug/discovery")
+async def handle_weather_debug_discovery(request: web.Request) -> web.Response:
+    """Raw Gamma API query that weather discovery uses. Diagnoses why no markets are found."""
+    import aiohttp
+    base_url = "https://gamma-api.polymarket.com/events"
+    results = {}
+    # Test multiple tag/filter combos to identify what changed
+    queries = {
+        "current_103040_active_open": {
+            "tag_id": "103040", "active": "true", "closed": "false", "limit": "20", "order": "startDate", "ascending": "false",
+        },
+        "tag_103040_no_filters": {"tag_id": "103040", "limit": "20"},
+        "tag_103040_active_only": {"tag_id": "103040", "active": "true", "limit": "20"},
+    }
+    async with aiohttp.ClientSession() as session:
+        for name, params in queries.items():
+            try:
+                async with session.get(base_url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    status = resp.status
+                    data = await resp.json() if status == 200 else None
+                    if isinstance(data, list):
+                        sample = []
+                        for e in data[:5]:
+                            sample.append({
+                                "slug": e.get("slug"),
+                                "title": (e.get("title") or "")[:80],
+                                "active": e.get("active"),
+                                "closed": e.get("closed"),
+                                "start_date": e.get("startDate"),
+                                "end_date": e.get("endDate"),
+                                "tags": [t.get("slug") for t in (e.get("tags") or [])][:8],
+                            })
+                        results[name] = {"status": status, "count": len(data), "sample": sample}
+                    else:
+                        results[name] = {"status": status, "data": str(data)[:200]}
+            except Exception as e:
+                results[name] = {"error": str(e)}
+    return web.json_response(results, dumps=lambda x: __import__('json').dumps(x, indent=2))
+
+
 @routes.get("/api/weather/by_lead")
 async def handle_weather_by_lead(request: web.Request) -> web.Response:
     """Breakdown of resolved weather trades grouped by forecast horizon (lead_days)."""
