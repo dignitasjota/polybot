@@ -693,18 +693,15 @@ class WeatherScanner:
         unit = "C"
 
         # Diagnostic counters for inner loop
-        rej_inactive = 0
         rej_no_ids = 0
         rej_no_label = 0
         rej_no_price = 0
 
         for mkt in event_markets:
-            # NOTE: don't filter by closed flag (see _discover_markets comment).
-            # `active` is still a useful negative signal for genuinely-inactive markets.
-            if not mkt.get("active"):
-                rej_inactive += 1
-                continue
-
+            # NOTE: don't filter by active/closed flags. As of May 2026 Polymarket
+            # marks recurring weather markets as active=false closed=true even when
+            # they're tradeable. Real tradability signal is conditionId +
+            # clobTokenIds + outcomePrices being non-empty (checked below).
             question = mkt.get("question", "")
             cid = mkt.get("conditionId", "")
 
@@ -776,7 +773,6 @@ class WeatherScanner:
                 slug=slug,
                 total_markets=len(event_markets),
                 outcomes_collected=len(outcomes),
-                rej_inactive=rej_inactive,
                 rej_no_ids=rej_no_ids,
                 rej_no_label=rej_no_label,
                 rej_no_price=rej_no_price,
