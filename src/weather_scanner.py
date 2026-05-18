@@ -526,16 +526,21 @@ class WeatherScanner:
         Temperature markets are structured as EVENTS, each containing N binary
         markets (one per temperature bucket). We use tag_id=103040 (Daily Temperature)
         to discover them.
+
+        Uses keyset pagination (/events/keyset). The legacy /events endpoint was
+        deprecated on Apr 10, 2026 and returns empty arrays silently.
         """
         if not self._session:
             return []
 
         markets: list[WeatherMarket] = []
         seen_slugs: set[str] = set()
+        url = f"{GAMMA_API}/events/keyset"
+        after_cursor: str | None = None
+        max_pages = 5  # Safety cap: 5 × 100 = 500 events max per scan
 
-        try:
-            url = f"{GAMMA_API}/events"
-            params = {
+        for _ in range(max_pages):
+            params: dict[str, str] = {
                 "tag_id": str(self.TEMPERATURE_TAG_ID),
                 "active": "true",
                 "closed": "false",
@@ -543,11 +548,29 @@ class WeatherScanner:
                 "order": "startDate",
                 "ascending": "false",
             }
-            async with self._session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    logger.warning("weather_discovery_http_error", status=resp.status)
-                    return []
-                events = await resp.json()
+            if after_cursor:
+                params["after_cursor"] = after_cursor
+
+            try:
+                async with self._session.get(url, params=params) as resp:
+                    if resp.status != 200:
+                        logger.warning("weather_discovery_http_error", status=resp.status)
+                        break
+                    data = await resp.json()
+            except Exception as e:
+                logger.warning("weather_discovery_error", error=str(e))
+                break
+
+            # Keyset response: {"events": [...], "next_cursor": "..."} OR plain list (legacy)
+            if isinstance(data, dict):
+                events = data.get("events", []) or data.get("data", [])
+                next_cursor = data.get("next_cursor")
+            else:
+                events = data if isinstance(data, list) else []
+                next_cursor = None
+
+            if not events:
+                break
 
             for event in events:
                 slug = event.get("slug", "")
@@ -559,8 +582,9 @@ class WeatherScanner:
                 if parsed:
                     markets.append(parsed)
 
-        except Exception as e:
-            logger.warning("weather_discovery_error", error=str(e))
+            if not next_cursor:
+                break
+            after_cursor = next_cursor
 
         return markets
 

@@ -552,7 +552,7 @@ Los mercados de temperatura son **eventos** que contienen N **mercados binarios*
 - Mercado 2: "Will it be between 58-59°F?" → Yes/No
 - Mercado N: "Will it be 76°F or higher?" → Yes/No
 
-**Descubrimiento**: `tag_id=103040` (Daily Temperature) en endpoint `/events` de Gamma API. El parámetro `tag=weather` NO funciona.
+**Descubrimiento**: `tag_id=103040` (Daily Temperature) en endpoint `/events/keyset` de Gamma API (con cursor pagination). El parámetro `tag=weather` NO funciona. El endpoint legacy `/events` fue deprecado el 10 abr 2026 — devuelve HTTP 200 con array vacío silenciosamente.
 
 ### Arquitectura de archivos
 
@@ -567,7 +567,7 @@ src/
 - `WeatherConfig.from_dict()` parsea la sección `[accounts.weather]` del TOML
 
 ### Flujo completo
-1. `_discover_markets()`: Busca eventos con `tag_id=103040` en Gamma API `/events`, parsea slug para extraer ciudad+fecha
+1. `_discover_markets()`: Busca eventos con `tag_id=103040` en Gamma API `/events/keyset` (con cursor pagination), parsea slug para extraer ciudad+fecha
 2. `_parse_temperature_event()`: Para cada evento, extrae los mercados binarios individuales con sus `clobTokenIds`, `outcomePrices`, `condition_id`, y el label del outcome (via `_extract_outcome_label()` o fallback a `groupItemTitle`)
 3. `_get_forecast()`: Consulta Open-Meteo ensemble API (50 miembros ECMWF IFS), cachea 1h. Usa datos **hourly** (`temperature_2m`) y calcula el **max diario** por miembro
 4. `_build_distribution()`: Convierte 50 predicciones de max_temp → distribución de probabilidad sobre los buckets del mercado

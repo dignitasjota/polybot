@@ -88,37 +88,50 @@ async def handle_account_report(request: web.Request) -> web.Response:
 async def handle_weather_debug_discovery(request: web.Request) -> web.Response:
     """Raw Gamma API query that weather discovery uses. Diagnoses why no markets are found."""
     import aiohttp
-    base_url = "https://gamma-api.polymarket.com/events"
+    base = "https://gamma-api.polymarket.com"
     results = {}
-    # Test multiple tag/filter combos to identify what changed
+    # Test both deprecated /events and new /events/keyset to diagnose discovery
     queries = {
-        "current_103040_active_open": {
-            "tag_id": "103040", "active": "true", "closed": "false", "limit": "20", "order": "startDate", "ascending": "false",
-        },
-        "tag_103040_no_filters": {"tag_id": "103040", "limit": "20"},
-        "tag_103040_active_only": {"tag_id": "103040", "active": "true", "limit": "20"},
+        "legacy_events_103040": (f"{base}/events", {
+            "tag_id": "103040", "active": "true", "closed": "false", "limit": "20",
+            "order": "startDate", "ascending": "false",
+        }),
+        "keyset_events_103040": (f"{base}/events/keyset", {
+            "tag_id": "103040", "active": "true", "closed": "false", "limit": "20",
+            "order": "startDate", "ascending": "false",
+        }),
+        "keyset_events_no_filters": (f"{base}/events/keyset", {
+            "tag_id": "103040", "limit": "20",
+        }),
     }
     async with aiohttp.ClientSession() as session:
-        for name, params in queries.items():
+        for name, (url, params) in queries.items():
             try:
-                async with session.get(base_url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     status = resp.status
-                    data = await resp.json() if status == 200 else None
-                    if isinstance(data, list):
-                        sample = []
-                        for e in data[:5]:
-                            sample.append({
-                                "slug": e.get("slug"),
-                                "title": (e.get("title") or "")[:80],
-                                "active": e.get("active"),
-                                "closed": e.get("closed"),
-                                "start_date": e.get("startDate"),
-                                "end_date": e.get("endDate"),
-                                "tags": [t.get("slug") for t in (e.get("tags") or [])][:8],
-                            })
-                        results[name] = {"status": status, "count": len(data), "sample": sample}
+                    raw = await resp.json() if status == 200 else None
+                    # New keyset returns {"events": [...], "next_cursor": "..."}; legacy returns plain list
+                    if isinstance(raw, dict):
+                        items = raw.get("events") or raw.get("data") or []
+                        meta = {"next_cursor": raw.get("next_cursor")}
+                    elif isinstance(raw, list):
+                        items = raw
+                        meta = {"response_type": "legacy_list"}
                     else:
-                        results[name] = {"status": status, "data": str(data)[:200]}
+                        items = []
+                        meta = {"raw": str(raw)[:200]}
+                    sample = []
+                    for e in items[:5]:
+                        sample.append({
+                            "slug": e.get("slug"),
+                            "title": (e.get("title") or "")[:80],
+                            "active": e.get("active"),
+                            "closed": e.get("closed"),
+                            "start_date": e.get("startDate"),
+                            "end_date": e.get("endDate"),
+                            "tags": [t.get("slug") for t in (e.get("tags") or [])][:8],
+                        })
+                    results[name] = {"status": status, "count": len(items), "meta": meta, "sample": sample}
             except Exception as e:
                 results[name] = {"error": str(e)}
     return web.json_response(results, dumps=lambda x: __import__('json').dumps(x, indent=2))
