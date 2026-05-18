@@ -581,10 +581,11 @@ class WeatherScanner:
                 break
 
             for event in events:
-                # Defensive: skip events Polymarket reports as closed even though
-                # the server-side end_date_min filter should already exclude them.
-                if event.get("closed"):
-                    continue
+                # NOTE: do NOT filter by event.closed here. As of May 2026 Polymarket
+                # marks all recurring/hide-from-new weather events as closed=true at
+                # the event level even when end_date is in the future and the
+                # underlying binary markets are still tradeable. Tradability is
+                # validated downstream when fetching prices.
                 slug = event.get("slug", "")
                 if slug in seen_slugs:
                     continue
@@ -661,7 +662,9 @@ class WeatherScanner:
         unit = "C"
 
         for mkt in event_markets:
-            if not mkt.get("active") or mkt.get("closed"):
+            # NOTE: don't filter by closed flag (see _discover_markets comment).
+            # `active` is still a useful negative signal for genuinely-inactive markets.
+            if not mkt.get("active"):
                 continue
 
             question = mkt.get("question", "")
