@@ -1379,6 +1379,13 @@ class WeatherScanner:
         now = time.time()
         pending = [t for t in self._trades if t.status in ("pending", "confirmed")]
 
+        today = date.today()
+        eligible = 0
+        future = 0
+        no_coords = 0
+        fetch_failed = 0
+        winner_undetermined = 0
+
         for trade in pending:
             # Use target_date stored in the trade itself
             if trade.target_date is None:
@@ -1388,12 +1395,16 @@ class WeatherScanner:
                     trade.resolved_at = now
                 continue
 
-            if trade.target_date >= date.today():
+            if trade.target_date >= today:
+                future += 1
                 continue  # Market not yet resolved
+
+            eligible += 1
 
             # Fetch actual temperature
             coords = CITY_COORDS.get(trade.city)
             if not coords:
+                no_coords += 1
                 if now - trade.created_at > 172800:
                     trade.status = "expired"
                     trade.resolved_at = now
@@ -1403,11 +1414,13 @@ class WeatherScanner:
                 coords[0], coords[1], coords[2], trade.target_date
             )
             if actual_temp is None:
+                fetch_failed += 1
                 continue
 
             # Determine which outcome won using trade's stored outcomes
             winning_outcome = self._determine_winner(actual_temp, trade.outcomes)
             if winning_outcome is None:
+                winner_undetermined += 1
                 # If we can't determine winner and it's been >48h, expire
                 if now - trade.created_at > 172800:
                     trade.status = "expired"
@@ -1436,6 +1449,18 @@ class WeatherScanner:
                 status=trade.status,
                 pnl=f"${trade.pnl:.2f}",
             )
+
+        logger.info(
+            "weather_resolution_cycle",
+            pending_total=len(pending),
+            future_target=future,
+            eligible_for_resolution=eligible,
+            fetch_failed=fetch_failed,
+            no_coords=no_coords,
+            winner_undetermined=winner_undetermined,
+            wins=self._trades_won,
+            losses=self._trades_lost,
+        )
 
         # Persist: resolved trades removed from file, pending ones kept
         self._save_pending_trades()

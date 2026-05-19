@@ -103,6 +103,10 @@ class WeatherStrategy(Strategy):
     async def _resolution_loop(self):
         """Periodically check if pending trades resolved."""
         import asyncio
+        logger.info(
+            "weather_resolution_loop_started",
+            interval_s=self.config.resolution_check_interval,
+        )
         while True:
             try:
                 await asyncio.sleep(self.config.resolution_check_interval)
