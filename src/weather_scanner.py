@@ -1450,6 +1450,12 @@ class WeatherScanner:
                 pnl=f"${trade.pnl:.2f}",
             )
 
+        # Sample target_date distribution for diagnostic
+        target_date_dist: dict[str, int] = {}
+        for t in pending:
+            key = str(t.target_date) if t.target_date else "none"
+            target_date_dist[key] = target_date_dist.get(key, 0) + 1
+
         logger.info(
             "weather_resolution_cycle",
             pending_total=len(pending),
@@ -1460,6 +1466,8 @@ class WeatherScanner:
             winner_undetermined=winner_undetermined,
             wins=self._trades_won,
             losses=self._trades_lost,
+            today=str(today),
+            target_date_distribution=target_date_dist,
         )
 
         # Persist: resolved trades removed from file, pending ones kept
