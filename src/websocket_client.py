@@ -92,7 +92,16 @@ class WebSocketClient:
 
         logger.info("ws_connecting", url=WS_MARKET_URL, tokens=len(token_ids))
 
-        async with connect(WS_MARKET_URL, ping_interval=None, close_timeout=5) as ws:
+        # max_size: Polymarket may send full-book snapshots >1 MB when subscribed to
+        # many tokens (default websockets limit is 1 MiB). Raise to 16 MiB to prevent
+        # disconnect loops with code 1009 (message too big). May 2026: with ~700 tokens,
+        # initial snapshot ~1.05 MB; we allow up to 16x headroom.
+        async with connect(
+            WS_MARKET_URL,
+            ping_interval=None,
+            close_timeout=5,
+            max_size=16 * 1024 * 1024,
+        ) as ws:
             self._ws = ws
             self._connected = True
             self._reconnect_attempt = 0
