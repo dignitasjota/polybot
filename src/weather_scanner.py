@@ -1347,7 +1347,12 @@ class WeatherScanner:
         self._save_pending_trades()
 
     async def _get_current_price(self, token_id: str) -> float | None:
-        """Fetch current best ask price from CLOB for a token."""
+        """Fetch current best ask price from CLOB for a token.
+
+        The CLOB REST /book endpoint returns asks ordered worst-first (descending
+        price), unlike the WebSocket which uses best-first. Compute min explicitly
+        to be robust to either convention.
+        """
         if not self._session:
             return None
         try:
@@ -1358,8 +1363,9 @@ class WeatherScanner:
                     return None
                 data = await resp.json()
             asks = data.get("asks", [])
-            if asks:
-                return float(asks[0].get("price", 0))
+            prices = [float(a.get("price", 0)) for a in asks if float(a.get("price", 0)) > 0]
+            if prices:
+                return min(prices)
         except Exception:
             pass
         return None
