@@ -1363,9 +1363,22 @@ class WeatherScanner:
                     return None
                 data = await resp.json()
             asks = data.get("asks", [])
+            bids = data.get("bids", [])
             prices = [float(a.get("price", 0)) for a in asks if float(a.get("price", 0)) > 0]
-            if prices:
-                return min(prices)
+            best_ask = min(prices) if prices else None
+            # Diagnostic: log when book is suspicious (only one ask at $0.99+, no real liquidity)
+            if best_ask is not None and best_ask > 0.95:
+                bid_prices = [float(b.get("price", 0)) for b in bids if float(b.get("price", 0)) > 0]
+                logger.info(
+                    "weather_book_no_liquidity",
+                    token=token_id[:12],
+                    ask_count=len(asks),
+                    bid_count=len(bids),
+                    best_ask=best_ask,
+                    best_bid=max(bid_prices) if bid_prices else None,
+                    ask_sample=[float(a.get("price", 0)) for a in asks[:3]],
+                )
+            return best_ask
         except Exception:
             pass
         return None
