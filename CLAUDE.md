@@ -568,12 +568,12 @@ src/
 
 ### Flujo completo
 1. `_discover_markets()`: Busca eventos con `tag_id=103040` en Gamma API `/events/keyset` (con cursor pagination), parsea slug para extraer ciudad+fecha
-2. `_parse_temperature_event()`: Para cada evento, extrae los mercados binarios individuales con sus `clobTokenIds`, `outcomePrices`, `condition_id`, y el label del outcome (via `_extract_outcome_label()` o fallback a `groupItemTitle`)
-3. `_get_forecast()`: Consulta Open-Meteo ensemble API (50 miembros ECMWF IFS), cachea 1h. Usa datos **hourly** (`temperature_2m`) y calcula el **max diario** por miembro
-4. `_build_distribution()`: Convierte 50 predicciones de max_temp → distribución de probabilidad sobre los buckets del mercado
+2. `_parse_temperature_event()`: Para cada evento, extrae los mercados binarios individuales con sus `clobTokenIds`, `outcomePrices`, `condition_id`, el label del outcome (via `_extract_outcome_label()` o fallback a `groupItemTitle`) y el **ICAO de la estación de resolución** (via `_extract_station_icao()` sobre `resolutionSource`)
+3. `_get_forecast()`: Consulta Open-Meteo ensemble API (50 miembros ECMWF IFS) **en las coordenadas de la estación de aeropuerto** (no del centro de ciudad), cachea 1h. Usa datos **hourly** (`temperature_2m`) y calcula el **max diario** por miembro
+4. `_build_distribution()`: Convierte 50 predicciones de max_temp → distribución de probabilidad sobre los buckets del mercado, aplicando **kernel dressing** gaussiano (σ_cal) para reflejar la incertidumbre real (ver sección dedicada)
 5. `_evaluate_market()`: Compara distribución forecast vs precios de mercado → detecta edge (`forecast_prob - market_price`)
 6. `_execute_trade()`: Si edge > 8%, ejecuta con Kelly sizing (quarter-Kelly). Paper/dry_run simula, live usa ClobClient
-7. `check_resolutions()`: Loop periódico (cada `resolution_check_interval`) que resuelve trades pendientes consultando la temperatura real via Open-Meteo daily API
+7. `check_resolutions()`: Loop periódico (cada `resolution_check_interval`) que resuelve trades pendientes consultando la temperatura real via Open-Meteo daily API **en la estación de aeropuerto del trade** (misma fuente que liquida Polymarket)
 
 ### Open-Meteo Ensemble API
 - **Endpoint**: `https://ensemble-api.open-meteo.com/v1/ensemble`
@@ -606,17 +606,31 @@ Cada outcome se parsea a un rango `[low_incl, high_excl)`:
 
 **Importante**: Los campos `clobTokenIds`, `outcomePrices`, `outcomes` de Gamma API vienen como **JSON strings** (no arrays nativos). Requieren `json.loads()` para parsear.
 
-### Protección contra fallback de temperatura fuera de rango
+### Kernel dressing: calibración de la incertidumbre (CRÍTICO)
 
-Si la temperatura predicha está **fuera de todos los buckets**, solo se asigna si existe un bucket edge apropiado:
-- Temp por debajo de todos → solo si el primer bucket es tipo "or below" (bound -999)
-- Temp por encima de todos → solo si el último bucket es tipo "or higher" (bound 999)
-- Si no existe edge bucket apropiado → el miembro queda como `unmatched` y no infla ningún bucket
+`_build_distribution()` **no hace asignación dura** (un miembro → un bucket). En su lugar reparte la masa de cada miembro entre todos los buckets con un kernel gaussiano de ancho `σ_cal = forecast_uncertainty_c` (default 2.0°C), usando la CDF normal: `mass(bucket) = Φ((high - m)/σ) - Φ((low - m)/σ)`. Los centinelas ±999 de los buckets edge actúan como ±∞, así que una única fórmula cubre rangos y buckets abiertos ("or higher"/"or below").
 
-**Motivación**: Sin esta protección, si el bucket "29°C or higher" no se parsea correctamente (formato no reconocido), los 50 miembros a ~30°C se asignarían al último bucket regular ("28°C") dando una probabilidad falsa del 100% y un edge ficticio del 86%.
+**Motivación**: el ensemble ECMWF a +1 día es **underdispersivo** — std de solo ~0.25°C, mete 84-88% de los 50 miembros en un único bucket de 1°C. Tomar esa dispersión como toda la incertidumbre producía distribuciones sobre-confiadas (forecast_prob 76-90%) y **edges ficticios del 60-76%** contra mercados que reparten bien la probabilidad. El error real del ensemble frente a la fuente de resolución es de ~1-1.5°C (medido: 2.8-3.2× la std del ensemble), no 0.25°C. El dressing infla σ para reflejar ese error (sesgo del modelo + representatividad celda-vs-estación + underdispersión).
+
+**Efecto**: Madrid "34°C" pasa de 84% → ~19%; el edge cae bajo `min_edge` y el `agreement` (= prob del bucket pico) bajo `min_agreement`, filtrando casi todos los falsos positivos. Si los buckets edge cubren las colas, la masa suma ~1 (pequeña fuga <10% por el hueco de medio grado entre buckets de 1° y el borde "or higher").
+
+> El dressing ensancha pero **no recentra**: un sesgo sistemático del modelo por ciudad (e.g. Miami ensemble 83°F vs resolución 86°F) requeriría corrección de bias con histórico de verificación, aún pendiente.
 
 ### Ciudades soportadas
-75+ ciudades con coordenadas hardcodeadas en `CITY_COORDS`. Incluye: ciudades EEUU (NYC, LA, Chicago, Miami, Atlanta, Phoenix, etc.), Europa (London, Paris, Madrid, Berlin, Rome, etc.), Asia (Tokyo, Shanghai, Singapore, Seoul, Wuhan, Qingdao, etc.), Oceanía (Sydney, Melbourne, Wellington), Medio Oriente (Dubai, Tel-Aviv, Cairo), Sudamérica (São Paulo, Buenos Aires, Lima, Bogotá). Si aparece una ciudad no reconocida, se loguea como `weather_unknown_city` y se ignora.
+75+ ciudades con coordenadas hardcodeadas en `CITY_COORDS`. Incluye: ciudades EEUU (NYC, LA, Chicago, Miami, Atlanta, Phoenix, etc.), Europa (London, Paris, Madrid, Berlin, Rome, etc.), Asia (Tokyo, Shanghai, Singapore, Seoul, Wuhan, Qingdao, Jinan, Zhengzhou, etc.), Oceanía (Sydney, Melbourne, Wellington), Medio Oriente (Dubai, Tel-Aviv, Cairo), Sudamérica (São Paulo, Buenos Aires, Lima, Bogotá). Si aparece una ciudad no reconocida, se loguea como `weather_unknown_city` y se ignora.
+
+### Resolución por estación de aeropuerto (CRÍTICO)
+
+Polymarket **no resuelve contra el centro de la ciudad** sino contra la máxima registrada en una **estación de aeropuerto específica** (Weather Underground, código ICAO en el campo `resolutionSource` del mercado — e.g. Dallas→KDAL Love Field, Denver→KBKF Buckley, London→EGLC City, Chicago→KORD, NYC→KLGA), a grado entero. El centro de ciudad puede estar 10-21 km y **hasta 2-3°C** (varios buckets) de distancia → sesgo sistemático que causaba apuestas en buckets equivocados.
+
+El bot replica esa fuente:
+- `STATION_COORDS` (ICAO → lat, lon): 47 estaciones extraídas de los mercados activos + dataset OurAirports.
+- `CITY_STATION` (ciudad → ICAO): fallback para mercados sin `resolutionSource` o trades restaurados sin ICAO.
+- `_extract_station_icao(resolutionSource)`: parsea el ICAO de la URL al descubrir el mercado; se guarda en `WeatherMarket.station_icao` y se propaga a `WeatherTrade` (+ persistencia).
+- `_station_coords(city, icao)`: resuelve (lat, lon, tz) con prioridad **ICAO del mercado → ICAO mapeado de ciudad → centro de ciudad** (con log `weather_station_unmapped`). El **timezone** siempre viene de la ciudad.
+- `_get_forecast()` y `check_resolutions()` consultan Open-Meteo en el punto del aeropuerto, no del centro.
+
+> **Residual no cubierto**: la diferencia entre el grid de Open-Meteo *en el aeropuerto* y la observación METAR real de Wunderground (sesgo modelo-vs-estación), más el ruido irreducible de ±1°F entre fuentes a grado entero. El kernel dressing (σ=2.0°C) absorbe parte; una corrección de bias por estación con histórico sería el siguiente paso.
 
 ### Edge y bet sizing
 
@@ -669,6 +683,7 @@ La cuenta weather se muestra en el dashboard principal con:
 | min_forecast_prob | 0.15 | Ignora outcomes con <15% prob (ruido) |
 | min_agreement | 0.30 | Al menos 30% de modelos (15/50) deben coincidir |
 | max_price | 0.65 | No comprar outcomes >65¢ (más upside) |
+| forecast_uncertainty_c | 2.0 | σ del kernel dressing (°C): infla la dispersión del ensemble para cubrir sesgo + error de representatividad. Subir = más conservador (menos trades) |
 | max_bet_per_trade | 15.0 | $15 max por trade (Kelly sizing es el driver real) |
 | bankroll | 300.0 | Capital total weather |
 | kelly_multiplier | 0.30 | 30% Kelly (ligeramente más agresivo) |
@@ -1121,6 +1136,22 @@ Nueva estrategia que predice temperatura máxima diaria usando ensemble ECMWF IF
 - Restaura al inicio → deduplicación, bankroll efectivo y dashboard sobreviven reinicios
 - Compatible con formato anterior (lista plana de trades)
 - Al cambiar de modo (paper→live): `reset_stats()` borra trades, contadores y cache. Live empieza de cero con datos 100% reales
+
+### Weather: análisis de fallo en live y tres fixes (Mayo 2026)
+
+Un run en live (56h) acumuló `total_pnl = -$75.5` con **0 trades ganados de 6 resueltos** y 1592 "trades" ejecutados, casi todos en `status: "failed"`. Auditoría reveló tres problemas independientes:
+
+**#2 — Sin deduplicación en live**: El set de dedup en `run_scan` solo recogía `status == "pending"`, pero en live las órdenes filleadas son `"confirmed"` y las fallidas `"failed"` (nunca `"pending"`). El set quedaba vacío → cada ciclo reatacaba los mismos mercados (de ahí los 1592 = ~7/ciclo). **Solución**: `blocked_cids` incluye posiciones activas (`pending`+`confirmed`) más un cooldown de reintentos (`self._retry_cooldown`, condition_id → timestamp, `_RETRY_COOLDOWN_S = 6h`) que se puebla en cada fallo o skip por iliquidez. Se limpia en `reset_stats()`.
+
+**#3 — Órdenes sobre books fantasma**: Si `_get_current_price()` devolvía `None` (book vacío/ilíquido), `_live_execute` seguía adelante con el precio cacheado stale (e.g. $0.04 fantasma) y la orden fallaba. **Solución**: abortar (log `weather_no_liquidity_skip` + cooldown) cuando no hay precio confirmable; los caminos de fallo de orden (sin `orderID`/excepción) también registran cooldown.
+
+**#1 — Edges ficticios por sobre-confianza (causa de las pérdidas)**: No era un bug de código. El ensemble ECMWF a +1 día es underdispersivo (std ~0.25°C) y metía 76-90% en un bucket de 1°C; el error real vs la fuente de resolución es ~1-1.5°C. Esto generaba edges falsos del 60-76% en cada trade y 0/6 al resolverse. **Solución**: **kernel dressing** gaussiano en `_build_distribution()` con `forecast_uncertainty_c` (default 2.0°C) — ver sección "Kernel dressing". Verificado empíricamente: Madrid "34°C" 84% → ~19%, edge colapsa bajo `min_edge`. Pendientes: corrección de sesgo por ciudad y confirmar la fuente oficial de resolución de Polymarket.
+
+### Weather: resolución por estación de aeropuerto (Mayo 2026)
+
+Investigación de cómo liquida Polymarket (reglas en `resolutionSource` de cada mercado, vía Gamma API): resuelve contra la máxima de una **estación de aeropuerto específica** en **Weather Underground** (ICAO), a grado entero — **no** el centro de ciudad que usaba el bot. El desajuste era grande: centro vs aeropuerto difiere hasta **21 km** y **2-3°C** (Denver→KBKF: −2.3°C ≈ 4°F = 2 buckets; Toronto→CYYZ; London→EGLC City, no Heathrow; Dallas→KDAL Love Field). Ese sesgo de ubicación contribuía a apostar buckets equivocados.
+
+**Solución**: el bot ahora predice y resuelve en las coordenadas exactas de la estación de resolución. Nuevos `STATION_COORDS` (47 ICAO→coords, de mercados activos + OurAirports) y `CITY_STATION` (ciudad→ICAO fallback); `_extract_station_icao()` parsea el ICAO del `resolutionSource`, propagado por `WeatherMarket`→`WeatherTrade`→persistencia; `_station_coords()` resuelve (lat, lon, tz) con prioridad ICAO-mercado → ICAO-ciudad → centro (fallback con log `weather_station_unmapped`, tz siempre de la ciudad). Añadidas `jinan` y `zhengzhou` a `CITY_COORDS` (tenían mercado pero se descartaban). Ver sección "Resolución por estación de aeropuerto". 8 tests nuevos (`TestStationCoords`). **Residual**: grid-en-aeropuerto vs observación METAR de Wunderground + ruido ±1°F a grado entero (mitigado por el dressing).
 
 ---
 

@@ -33,6 +33,10 @@ class WeatherConfig(StrategyConfig):
     min_forecast_prob: float = 0.15    # Don't bet on outcomes with <15% forecast prob (noisy)
     min_agreement: float = 0.30        # Minimum model agreement (30% = at least 15/50 agree)
     max_price: float = 0.65            # Don't buy outcomes priced above 65¢ (more upside)
+    forecast_uncertainty_c: float = 2.0  # Calibration σ (°C) for kernel dressing: inflates the
+                                          # ensemble spread to cover model bias + grid-vs-station
+                                          # error. Ensemble alone is underdispersive (~0.25°C),
+                                          # real error vs the resolution source is ~1-1.5°C.
 
     # Bet sizing
     max_bet_per_trade: float = 15.0    # Max $ per trade (Kelly sizing is the real driver)
@@ -55,6 +59,7 @@ class WeatherConfig(StrategyConfig):
             min_forecast_prob=float(raw.get("min_forecast_prob", 0.15)),
             min_agreement=float(raw.get("min_agreement", 0.30)),
             max_price=float(raw.get("max_price", 0.65)),
+            forecast_uncertainty_c=float(raw.get("forecast_uncertainty_c", 2.0)),
             max_bet_per_trade=float(raw.get("max_bet_per_trade", 15.0)),
             bankroll=float(raw.get("bankroll", 300.0)),
             kelly_multiplier=float(raw.get("kelly_multiplier", 0.30)),
@@ -140,6 +145,7 @@ class WeatherStrategy(Strategy):
             "min_forecast_prob": cfg.min_forecast_prob,
             "min_agreement": cfg.min_agreement,
             "max_price": cfg.max_price,
+            "forecast_uncertainty_c": cfg.forecast_uncertainty_c,
             "max_bet_per_trade": cfg.max_bet_per_trade,
             "bankroll": cfg.bankroll,
             "kelly_multiplier": cfg.kelly_multiplier,

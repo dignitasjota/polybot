@@ -149,6 +149,83 @@ CITY_COORDS: dict[str, tuple[float, float, str]] = {
     "shenzhen": (22.54, 114.06, "Asia/Shanghai"),
     "wellington": (-41.29, 174.78, "Pacific/Auckland"),
     "tel-aviv": (32.08, 34.78, "Asia/Jerusalem"),
+    "jinan": (36.65, 117.12, "Asia/Shanghai"),
+    "zhengzhou": (34.75, 113.62, "Asia/Shanghai"),
+}
+
+
+# Airport station coordinates (ICAO → lat, lon). Polymarket resolves temperature
+# markets against the high recorded at a SPECIFIC airport station (the ICAO in
+# each market's resolutionSource), NOT the city center — which can be 10-21 km
+# and several °C away (e.g. Denver→KBKF Buckley, London→EGLC City, Dallas→KDAL
+# Love Field). Forecasting/resolving at the station's exact point removes that
+# systematic bias. Harvested from live markets + OurAirports dataset.
+STATION_COORDS: dict[str, tuple[float, float]] = {
+    "CYYZ": (43.676, -79.629),   # Toronto Pearson
+    "EDDM": (48.354, 11.786),    # Munich
+    "EFHK": (60.318, 24.963),    # Helsinki Vantaa
+    "EGLC": (51.505, 0.055),     # London City
+    "EHAM": (52.309, 4.764),     # Amsterdam Schiphol
+    "EPWA": (52.166, 20.967),    # Warsaw Chopin
+    "FACT": (-33.974, 18.604),   # Cape Town
+    "KATL": (33.637, -84.428),   # Atlanta Hartsfield-Jackson
+    "KAUS": (30.198, -97.662),   # Austin-Bergstrom
+    "KBKF": (39.702, -104.752),  # Denver / Buckley SFB
+    "KDAL": (32.845, -96.848),   # Dallas Love Field
+    "KHOU": (29.645, -95.277),   # Houston Hobby
+    "KLAX": (33.943, -118.408),  # Los Angeles
+    "KLGA": (40.777, -73.873),   # New York LaGuardia
+    "KMIA": (25.796, -80.290),   # Miami
+    "KORD": (41.979, -87.905),   # Chicago O'Hare
+    "KSEA": (47.448, -122.310),  # Seattle-Tacoma
+    "KSFO": (37.620, -122.375),  # San Francisco
+    "LEMD": (40.493, -3.572),    # Madrid Barajas
+    "LFPB": (48.962, 2.437),     # Paris Le Bourget
+    "LIMC": (45.631, 8.728),     # Milan Malpensa
+    "LTAC": (40.128, 32.995),    # Ankara Esenboğa
+    "MMMX": (19.436, -99.070),   # Mexico City Benito Juárez
+    "MPMG": (8.973, -79.556),    # Panama City Albrook
+    "NZWN": (-41.327, 174.807),  # Wellington
+    "OEJN": (21.680, 39.157),    # Jeddah
+    "OPKC": (24.907, 67.161),    # Karachi Jinnah
+    "RCSS": (25.067, 121.553),   # Taipei Songshan
+    "RJTT": (35.550, 139.787),   # Tokyo Haneda
+    "RKPK": (35.180, 128.938),   # Busan Gimhae
+    "RKSI": (37.469, 126.451),   # Seoul Incheon
+    "RPLL": (14.509, 121.020),   # Manila Ninoy Aquino
+    "SAEZ": (-34.822, -58.536),  # Buenos Aires Ezeiza
+    "SBGR": (-23.431, -46.470),  # São Paulo Guarulhos
+    "VILK": (26.761, 80.889),    # Lucknow
+    "WMKK": (2.746, 101.710),    # Kuala Lumpur
+    "WSSS": (1.350, 103.994),    # Singapore Changi
+    "ZBAA": (40.077, 116.597),   # Beijing Capital
+    "ZGGG": (23.392, 113.299),   # Guangzhou Baiyun
+    "ZGSZ": (22.639, 113.803),   # Shenzhen Bao'an
+    "ZHCC": (34.526, 113.849),   # Zhengzhou Xinzheng
+    "ZHHH": (30.775, 114.214),   # Wuhan Tianhe
+    "ZSJN": (36.857, 117.216),   # Jinan Yaoqiang
+    "ZSPD": (31.143, 121.805),   # Shanghai Pudong
+    "ZSQD": (36.362, 120.088),   # Qingdao Jiaodong
+    "ZUCK": (29.712, 106.652),   # Chongqing Jiangbei
+    "ZUUU": (30.558, 103.946),   # Chengdu Shuangliu
+}
+
+# Fallback city_slug → ICAO, used when a market's resolutionSource is missing
+# or for trades restored from disk without a stored ICAO. The live ICAO parsed
+# from resolutionSource always takes precedence.
+CITY_STATION: dict[str, str] = {
+    "amsterdam": "EHAM", "ankara": "LTAC", "atlanta": "KATL", "austin": "KAUS",
+    "beijing": "ZBAA", "buenos-aires": "SAEZ", "busan": "RKPK", "cape-town": "FACT",
+    "chengdu": "ZUUU", "chicago": "KORD", "chongqing": "ZUCK", "dallas": "KDAL",
+    "denver": "KBKF", "guangzhou": "ZGGG", "helsinki": "EFHK", "houston": "KHOU",
+    "jeddah": "OEJN", "jinan": "ZSJN", "karachi": "OPKC", "kuala-lumpur": "WMKK",
+    "london": "EGLC", "los-angeles": "KLAX", "lucknow": "VILK", "madrid": "LEMD",
+    "manila": "RPLL", "mexico-city": "MMMX", "miami": "KMIA", "milan": "LIMC",
+    "munich": "EDDM", "new-york": "KLGA", "nyc": "KLGA", "panama-city": "MPMG",
+    "paris": "LFPB", "qingdao": "ZSQD", "san-francisco": "KSFO", "sao-paulo": "SBGR",
+    "seattle": "KSEA", "seoul": "RKSI", "shanghai": "ZSPD", "shenzhen": "ZGSZ",
+    "singapore": "WSSS", "taipei": "RCSS", "tokyo": "RJTT", "toronto": "CYYZ",
+    "warsaw": "EPWA", "wellington": "NZWN", "wuhan": "ZHHH", "zhengzhou": "ZHCC",
 }
 
 
@@ -177,6 +254,7 @@ class WeatherMarket:
     end_date: str = ""
     fee_rate: float = 0.05        # weather_fees default
     unit: str = "C"               # "C" or "F" — detected from outcome labels
+    station_icao: str = ""        # Airport station Polymarket resolves against (from resolutionSource)
 
 
 @dataclass
@@ -227,6 +305,7 @@ class WeatherTrade:
     pnl: float = 0.0
     mode: str = "paper"
     lead_days: int = 0            # Days between bet placement and target_date (forecast horizon)
+    station_icao: str = ""        # Airport station for resolution (matches Polymarket's source)
 
 
 # ── Scanner ──────────────────────────────────────────────────────────────
@@ -264,6 +343,8 @@ class WeatherScanner:
         self._markets: list[WeatherMarket] = []
         self._trades: list[WeatherTrade] = []
         self._forecast_cache: dict[str, ForecastDistribution] = {}  # "city:date" → forecast
+        # condition_id → timestamp of last failed/illiquid attempt (retry cooldown)
+        self._retry_cooldown: dict[str, float] = {}
 
         # Stats
         self._total_scans = 0
@@ -282,6 +363,7 @@ class WeatherScanner:
         the new mode starts with a clean slate (e.g. live only shows live data).
         """
         self._trades.clear()
+        self._retry_cooldown.clear()
         self._total_scans = 0
         self._markets_found = 0
         self._opportunities_found = 0
@@ -440,11 +522,19 @@ class WeatherScanner:
 
         # Step 3: Execute best opportunities (deduplicated)
         if opportunities:
-            # Build set of condition_ids with pending trades to avoid duplicates
-            pending_cids = {
-                t.condition_id for t in self._trades
-                if t.status == "pending"
+            now = time.time()
+            # Block condition_ids where we already hold an active position OR
+            # had a recent failed/illiquid attempt. In live mode a filled order
+            # is "confirmed" (never "pending"), so checking only "pending" left
+            # dedup disabled and re-attempted the same markets every cycle.
+            self._retry_cooldown = {
+                cid: ts for cid, ts in self._retry_cooldown.items()
+                if now - ts < self._RETRY_COOLDOWN_S
             }
+            blocked_cids = {
+                t.condition_id for t in self._trades
+                if t.status in ("pending", "confirmed")
+            } | set(self._retry_cooldown)
 
             # Sort by edge (highest first)
             opportunities.sort(key=lambda o: o.edge, reverse=True)
@@ -452,13 +542,13 @@ class WeatherScanner:
             for opp in opportunities:
                 if executed_this_cycle >= self._config.max_bets_per_cycle:
                     break
-                # Skip if we already have a pending trade on this condition
+                # Skip if we already have an active/cooling-down trade here
                 cid = opp.market.condition_ids[opp.best_outcome_idx]
-                if cid in pending_cids:
+                if cid in blocked_cids:
                     continue
                 self._opportunities_found += 1
                 await self._execute_trade(opp)
-                pending_cids.add(cid)
+                blocked_cids.add(cid)
                 executed_this_cycle += 1
 
         # Prune resolved trades older than 7 days to limit memory growth
@@ -490,6 +580,7 @@ class WeatherScanner:
 
     _MAX_RESOLVED_AGE = 7 * 86400  # 7 days in seconds
     _MAX_TRADES_KEPT = 500         # Hard cap on list size
+    _RETRY_COOLDOWN_S = 6 * 3600   # Back off this long after a failed/illiquid attempt
 
     def _prune_old_trades(self):
         """Remove resolved trades older than 7 days to prevent unbounded memory growth.
@@ -660,6 +751,7 @@ class WeatherScanner:
         fee_rate = 0.05
         end_date = ""
         unit = "C"
+        station_icao = ""
 
         for mkt in event_markets:
             # NOTE: don't filter by active/closed flags. As of May 2026 Polymarket
@@ -724,6 +816,8 @@ class WeatherScanner:
             fee_rate = self._extract_fee_rate(mkt)
             if not end_date:
                 end_date = mkt.get("endDate", "")
+            if not station_icao:
+                station_icao = self._extract_station_icao(mkt.get("resolutionSource", ""))
 
         if len(outcomes) < 3:
             return None
@@ -747,6 +841,7 @@ class WeatherScanner:
             end_date=end_date,
             fee_rate=fee_rate,
             unit=unit,
+            station_icao=station_icao,
         )
 
     def _extract_outcome_label(self, question: str) -> str | None:
@@ -826,6 +921,37 @@ class WeatherScanner:
 
     # ── Forecast ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _extract_station_icao(source: str) -> str:
+        """Extract the airport ICAO code from a market resolutionSource URL.
+
+        e.g. "https://www.wunderground.com/history/daily/us/tx/dallas/KDAL" → "KDAL"
+        """
+        m = re.search(r"/([A-Z]{4})\b", source or "")
+        return m.group(1) if m else ""
+
+    def _station_coords(
+        self, city_slug: str, icao: str = ""
+    ) -> tuple[float, float, str] | None:
+        """Resolve (lat, lon, tz) for forecasting/resolution.
+
+        Prefers the airport station Polymarket resolves against (so our forecast
+        and resolution match the settlement source). Falls back to the mapped
+        station for the city, then to city-center coords (with a warning) so
+        unmapped stations still function. Timezone always comes from the city.
+        """
+        city = CITY_COORDS.get(city_slug)
+        tz = city[2] if city else "UTC"
+        icao = icao or CITY_STATION.get(city_slug, "")
+        if icao and icao in STATION_COORDS:
+            lat, lon = STATION_COORDS[icao]
+            return lat, lon, tz
+        if city:
+            if icao:
+                logger.info("weather_station_unmapped", icao=icao, city=city_slug)
+            return city[0], city[1], tz
+        return None
+
     async def _get_forecast(self, market: WeatherMarket) -> ForecastDistribution | None:
         """Get ensemble forecast for a market, using cache if fresh."""
         cache_key = f"{market.city_slug}:{market.target_date.isoformat()}"
@@ -835,8 +961,9 @@ class WeatherScanner:
         if cached and (time.time() - cached.fetched_at) < self._config.forecast_cache_ttl:
             return cached
 
-        # Fetch from Open-Meteo
-        coords = CITY_COORDS.get(market.city_slug)
+        # Forecast at the airport station Polymarket resolves against, not the
+        # city center (can be 10-21 km / several °C away).
+        coords = self._station_coords(market.city_slug, market.station_icao)
         if not coords:
             return None
 
@@ -1033,42 +1160,32 @@ class WeatherScanner:
         if not parsed_buckets:
             return {}
 
-        # Identify edge buckets (those with -999 or 999 bounds)
-        first_is_edge = parsed_buckets[0][1] == -999  # "X or below"
-        last_is_edge = parsed_buckets[-1][2] == 999   # "X or higher"
+        # Kernel dressing: instead of hard-assigning each member to one bucket,
+        # spread its mass across buckets with a Gaussian of width σ_cal. The raw
+        # ensemble is underdispersive (std ~0.25°C at +1 day), so hard counting
+        # produced overconfident distributions (76-90% in one 1°C bucket) and
+        # fake edges. σ_cal inflates uncertainty to cover model bias + grid-vs-
+        # station representativeness error (~1-1.5°C measured vs the resolution
+        # source). Each member then contributes a realistic spread of mass.
+        sigma = max(self._config.forecast_uncertainty_c, 0.01)
+        if unit == "F":
+            sigma *= 9 / 5  # °C uncertainty → °F scale (difference, no +32 offset)
+        denom = sigma * math.sqrt(2)
 
-        # Count members falling into each bucket
-        counts: dict[str, int] = {label: 0 for label, _, _ in parsed_buckets}
-        unmatched = 0
+        def _phi(x: float) -> float:
+            """Standard normal CDF via erf."""
+            return 0.5 * (1.0 + math.erf(x / denom))
+
+        # The -999/999 edge-bucket sentinels are effectively ±∞ relative to σ,
+        # so a single formula handles both ranges and open-ended buckets.
+        probs: dict[str, float] = {label: 0.0 for label, _, _ in parsed_buckets}
         for temp in member_temps:
             for label, low, high in parsed_buckets:
-                if low <= temp < high:
-                    counts[label] += 1
-                    break
-            else:
-                # Temp outside all buckets — only assign to edge buckets
-                if temp < parsed_buckets[0][1] and first_is_edge:
-                    counts[parsed_buckets[0][0]] += 1
-                elif temp >= parsed_buckets[-1][2] and last_is_edge:
-                    counts[parsed_buckets[-1][0]] += 1
-                else:
-                    # No matching bucket and no appropriate edge bucket
-                    # This means the market buckets don't cover this temperature
-                    unmatched += 1
+                probs[label] += _phi(high - temp) - _phi(low - temp)
 
-        if unmatched > 0:
-            logger.warning(
-                "weather_unmatched_temps",
-                unmatched=unmatched,
-                total=n_members,
-                temp_range=f"{min(member_temps):.1f}-{max(member_temps):.1f}",
-                bucket_range=f"{parsed_buckets[0][1]}-{parsed_buckets[-1][2]}",
-                first_is_edge=first_is_edge,
-                last_is_edge=last_is_edge,
-            )
-
-        # Convert to probabilities (use total members, unmatched get 0 prob)
-        return {label: count / n_members for label, count in counts.items()}
+        # Average over members. Mass that leaks outside all offered buckets is
+        # simply not counted (conservative: lowers forecast_prob → fewer trades).
+        return {label: p / n_members for label, p in probs.items()}
 
     def _parse_outcome_temp(self, outcome: str) -> float | None:
         """Extract representative temperature from outcome label.
@@ -1226,6 +1343,7 @@ class WeatherScanner:
             created_at=time.time(),
             mode=self._config.mode,
             lead_days=max(0, (market.target_date - date.today()).days),
+            station_icao=market.station_icao,
         )
 
         if self.should_simulate:
@@ -1289,26 +1407,39 @@ class WeatherScanner:
             from py_clob_client_v2.order_builder.constants import BUY
 
             token_id = opp.market.token_ids[opp.best_outcome_idx]
+            cid = opp.market.condition_ids[opp.best_outcome_idx]
 
-            # Re-check current price before executing
+            # Re-check current price before executing. If the book has no real
+            # ask (empty/illiquid), abort: the cached opp price is a phantom
+            # (stale last trade) and the order would fail or fill at a fake
+            # price. Cooling down avoids re-attempting it every cycle.
             current_price = await self._get_current_price(token_id)
-            if current_price is not None:
-                actual_edge = opp.forecast_prob - current_price
-                if actual_edge < self._config.min_edge:
-                    logger.info(
-                        "weather_edge_vanished",
-                        trade_id=trade.trade_id,
-                        city=trade.city,
-                        original_edge=f"{opp.edge:.1%}",
-                        current_edge=f"{actual_edge:.1%}",
-                        original_price=f"${opp.market_price:.3f}",
-                        current_price=f"${current_price:.3f}",
-                    )
-                    return  # Don't append to trades — edge is gone
-                # Update trade with actual execution price
-                trade.price = current_price
-                trade.cost = round(trade.shares * current_price, 4)
-                trade.edge = actual_edge
+            if current_price is None:
+                self._retry_cooldown[cid] = time.time()
+                logger.info(
+                    "weather_no_liquidity_skip",
+                    trade_id=trade.trade_id,
+                    city=trade.city,
+                    outcome=trade.outcome,
+                    cached_price=f"${opp.market_price:.3f}",
+                )
+                return  # Don't append to trades — no tradeable price
+            actual_edge = opp.forecast_prob - current_price
+            if actual_edge < self._config.min_edge:
+                logger.info(
+                    "weather_edge_vanished",
+                    trade_id=trade.trade_id,
+                    city=trade.city,
+                    original_edge=f"{opp.edge:.1%}",
+                    current_edge=f"{actual_edge:.1%}",
+                    original_price=f"${opp.market_price:.3f}",
+                    current_price=f"${current_price:.3f}",
+                )
+                return  # Don't append to trades — edge is gone
+            # Update trade with actual execution price
+            trade.price = current_price
+            trade.cost = round(trade.shares * current_price, 4)
+            trade.edge = actual_edge
 
             order_args = OrderArgs(
                 price=trade.price,
@@ -1336,10 +1467,12 @@ class WeatherScanner:
                 )
             else:
                 trade.status = "failed"
+                self._retry_cooldown[cid] = time.time()
                 logger.error("weather_order_no_id", response=str(result)[:200])
 
         except Exception as e:
             trade.status = "failed"
+            self._retry_cooldown[trade.condition_id] = time.time()
             logger.error("weather_live_error", error=str(e))
 
         self._trades.append(trade)
@@ -1411,8 +1544,9 @@ class WeatherScanner:
             if trade.target_date >= today:
                 continue  # Market not yet resolved
 
-            # Fetch actual temperature
-            coords = CITY_COORDS.get(trade.city)
+            # Fetch actual temperature at the resolution station (same point
+            # Polymarket settles against), not the city center.
+            coords = self._station_coords(trade.city, trade.station_icao)
             if not coords:
                 if now - trade.created_at > 172800:
                     trade.status = "expired"
@@ -1580,6 +1714,7 @@ class WeatherScanner:
                 "pnl": t.pnl,
                 "mode": t.mode,
                 "lead_days": t.lead_days,
+                "station_icao": t.station_icao,
             })
 
         payload = {
@@ -1662,6 +1797,7 @@ class WeatherScanner:
                 pnl=r.get("pnl", 0),
                 mode=r.get("mode", "paper"),
                 lead_days=r.get("lead_days", 0),
+                station_icao=r.get("station_icao", ""),
             )
             self._trades.append(trade)
             if status in ("pending", "confirmed"):

@@ -10,6 +10,8 @@ from src.weather_scanner import (
     WeatherMarket,
     ForecastDistribution,
     CITY_COORDS,
+    STATION_COORDS,
+    CITY_STATION,
 )
 
 
@@ -23,6 +25,7 @@ class MockWeatherConfig:
     min_forecast_prob: float = 0.15
     min_agreement: float = 0.20
     max_price: float = 0.75
+    forecast_uncertainty_c: float = 0.01  # ~0 dressing: bucketing tests assert hard assignment
     max_bet_per_trade: float = 10.0
     bankroll: float = 200.0
     kelly_multiplier: float = 0.25
@@ -210,6 +213,100 @@ class TestBuildDistribution:
 
         dist = scanner._build_distribution(max_temps, outcomes)
         assert dist["20°C or above"] == pytest.approx(1.0)
+
+
+class TestStationCoords:
+    """Airport-station resolution: forecast/resolve at the station Polymarket
+    settles against (ICAO from resolutionSource), not the city center."""
+
+    def test_extract_icao_us_url(self, scanner):
+        url = "https://www.wunderground.com/history/daily/us/tx/dallas/KDAL"
+        assert scanner._extract_station_icao(url) == "KDAL"
+
+    def test_extract_icao_intl_url(self, scanner):
+        url = "https://www.wunderground.com/history/daily/cn/jinan/ZSJN"
+        assert scanner._extract_station_icao(url) == "ZSJN"
+
+    def test_extract_icao_empty(self, scanner):
+        assert scanner._extract_station_icao("") == ""
+        assert scanner._extract_station_icao("https://example.com/no/code") == ""
+
+    def test_station_coords_uses_airport(self, scanner):
+        """An explicit ICAO returns the airport coords, not the city center."""
+        lat, lon, tz = scanner._station_coords("denver", "KBKF")
+        assert (round(lat, 3), round(lon, 3)) == STATION_COORDS["KBKF"]
+        # Must differ from the city-center coords
+        assert (lat, lon) != CITY_COORDS["denver"][:2]
+        assert tz == CITY_COORDS["denver"][2]  # timezone still from the city
+
+    def test_station_coords_fallback_to_city_station(self, scanner):
+        """No ICAO given → use the mapped station for the city."""
+        lat, lon, tz = scanner._station_coords("london")
+        assert (round(lat, 3), round(lon, 3)) == STATION_COORDS[CITY_STATION["london"]]
+
+    def test_station_coords_unmapped_icao_falls_back_to_center(self, scanner):
+        """Unknown ICAO but known city → city-center coords (graceful)."""
+        lat, lon, tz = scanner._station_coords("madrid", "XXXX")
+        assert (lat, lon) == CITY_COORDS["madrid"][:2]
+
+    def test_station_coords_unknown_city(self, scanner):
+        assert scanner._station_coords("atlantis", "") is None
+
+    def test_every_city_station_has_coords(self):
+        """Integrity: each CITY_STATION ICAO must be in STATION_COORDS."""
+        for city, icao in CITY_STATION.items():
+            assert icao in STATION_COORDS, f"{city} → {icao} missing coords"
+
+
+class TestKernelDressing:
+    """Validate that calibration σ widens an underdispersive ensemble.
+
+    Without dressing, a tight ensemble (the real case at +1 day, std ~0.25°C)
+    puts ~85% in one 1°C bucket → fake 60-90% edges. Dressing spreads the mass.
+    """
+
+    @pytest.fixture
+    def dressed_scanner(self):
+        cfg = MockWeatherConfig()
+        cfg.forecast_uncertainty_c = 2.0  # realistic calibration σ
+        return WeatherScanner(config=cfg)
+
+    def test_tight_ensemble_is_spread_out(self, dressed_scanner):
+        """A near-unanimous ensemble must NOT yield ~100% on one 1°C bucket."""
+        outcomes = ["30°C or below", "31°C", "32°C", "33°C", "34°C or higher"]
+        max_temps = [32.1] * 50  # extremely tight, like Madrid/Shenzhen at +1d
+
+        dist = dressed_scanner._build_distribution(max_temps, outcomes)
+        # The peak bucket should be well below the undressed ~1.0
+        assert dist["32°C"] < 0.45
+        # Neighbors must carry meaningful mass (uncertainty is real)
+        assert dist["31°C"] > 0.10
+        assert dist["33°C"] > 0.10
+
+    def test_dressing_collapses_fake_edge(self, dressed_scanner):
+        """The Miami case: ensemble ~83°F, narrow bucket priced cheap.
+
+        Undressed gave forecast_prob ~0.78 → edge 0.74. Dressed must be far
+        lower so it no longer clears a realistic min_edge.
+        """
+        outcomes = ["81-82°F", "83-84°F", "85-86°F", "87°F or higher"]
+        max_temps = [28.3] * 50  # 28.3°C ≈ 82.9°F → peak near "83-84°F"
+
+        dist = dressed_scanner._build_distribution(max_temps, outcomes)
+        assert dist["83-84°F"] < 0.45  # was ~0.78 with hard assignment
+
+    def test_mass_mostly_conserved_with_open_edges(self, dressed_scanner):
+        """With open-ended edge buckets covering the tails, mass stays ~1.
+
+        A small leak (<10%) comes from the half-degree gap between single-degree
+        buckets ([32.5,33.5) for "33°C") and the "X or higher" boundary (34) —
+        a pre-existing contiguity quirk, harmless and conservative here.
+        """
+        outcomes = ["30°C or below", "31°C", "32°C", "33°C", "34°C or higher"]
+        max_temps = [32.0] * 50
+
+        dist = dressed_scanner._build_distribution(max_temps, outcomes)
+        assert 0.90 < sum(dist.values()) <= 1.0
 
 
 # ── Market evaluation ────────────────────────────────────────────────────
