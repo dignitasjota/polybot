@@ -258,6 +258,80 @@ class TestStationCoords:
             assert icao in STATION_COORDS, f"{city} → {icao} missing coords"
 
 
+class TestFillDetection:
+    """Nivel A — Detección robusta de fills en post_order V2.
+
+    El bug original: leíamos solo `orderID` y perdíamos ~$45 en fills que
+    llegaban con orderID="" pero success=True o tradeIDs poblados.
+    """
+
+    def test_classic_resting_order(self, scanner):
+        r = {"success": True, "orderID": "0xabc", "tradeIDs": [], "status": "live", "errorMsg": ""}
+        filled, oid, tids, ok, _, _ = scanner._parse_post_order_response(r)
+        assert filled is True and oid == "0xabc"
+
+    def test_fak_matched_no_resting_order(self, scanner):
+        """FAK matched al instante: sin orderID pero CON tradeIDs → es un fill."""
+        r = {"success": True, "orderID": "", "tradeIDs": ["t1", "t2"], "status": "matched"}
+        filled, oid, tids, *_ = scanner._parse_post_order_response(r)
+        assert filled is True and oid == "" and len(tids) == 2
+
+    def test_success_true_without_ids(self, scanner):
+        """Algunas respuestas V2 marcan success=True sin IDs poblados todavía."""
+        r = {"success": True, "orderID": "", "tradeIDs": [], "status": "delayed"}
+        filled, *_ = scanner._parse_post_order_response(r)
+        assert filled is True
+
+    def test_rejected_order(self, scanner):
+        r = {"success": False, "orderID": "", "tradeIDs": [], "errorMsg": "insufficient balance"}
+        filled, _, _, ok, err, _ = scanner._parse_post_order_response(r)
+        assert filled is False and ok is False and "insufficient" in err
+
+    def test_non_dict_response(self, scanner):
+        """post_order ocasionalmente puede devolver None u otro tipo."""
+        assert scanner._parse_post_order_response(None)[0] is False
+        assert scanner._parse_post_order_response("oops")[0] is False
+
+
+class TestOrphanReconciliation:
+    """Nivel B — El sweep periódico rescata fills que el bot marcó failed."""
+
+    def test_synthetic_orphan_built_from_fill(self, scanner):
+        """Un fill de la Data API sin trade local se materializa con sus campos."""
+        from src.weather_scanner import WeatherMarket
+        from datetime import date
+
+        market = WeatherMarket(
+            event_slug="highest-temperature-in-madrid-on-may-28-2026",
+            event_title="Highest temperature in Madrid on May 28?",
+            city_slug="madrid",
+            target_date=date(2026, 5, 28),
+            outcomes=["33°C", "34°C", "35°C"],
+            outcome_prices=[0.2, 0.5, 0.2],
+            condition_ids=["cidA", "cidB", "cidC"],
+            token_ids=["tA", "tB", "tC"],
+            station_icao="LEMD",
+        )
+        scanner._markets = [market]
+        before = len(scanner._trades)
+        scanner._record_synthetic_orphan({
+            "conditionId": "cidB",
+            "price": 0.42,
+            "size": 10,
+            "timestamp": 1748000000,
+            "transactionHash": "0xdead",
+        })
+        assert len(scanner._trades) == before + 1
+        t = scanner._trades[-1]
+        assert t.condition_id == "cidB"
+        assert t.outcome == "34°C"
+        assert t.city == "madrid"
+        assert t.station_icao == "LEMD"
+        assert t.status == "confirmed"
+        assert t.cost == pytest.approx(4.20, abs=0.01)
+        assert t.trade_id.startswith("wx_orphan_")
+
+
 class TestKernelDressing:
     """Validate that calibration σ widens an underdispersive ensemble.
 

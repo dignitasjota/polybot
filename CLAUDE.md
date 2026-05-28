@@ -1153,6 +1153,29 @@ Investigación de cómo liquida Polymarket (reglas en `resolutionSource` de cada
 
 **Solución**: el bot ahora predice y resuelve en las coordenadas exactas de la estación de resolución. Nuevos `STATION_COORDS` (47 ICAO→coords, de mercados activos + OurAirports) y `CITY_STATION` (ciudad→ICAO fallback); `_extract_station_icao()` parsea el ICAO del `resolutionSource`, propagado por `WeatherMarket`→`WeatherTrade`→persistencia; `_station_coords()` resuelve (lat, lon, tz) con prioridad ICAO-mercado → ICAO-ciudad → centro (fallback con log `weather_station_unmapped`, tz siempre de la ciudad). Añadidas `jinan` y `zhengzhou` a `CITY_COORDS` (tenían mercado pero se descartaban). Ver sección "Resolución por estación de aeropuerto". 8 tests nuevos (`TestStationCoords`). **Residual**: grid-en-aeropuerto vs observación METAR de Wunderground + ruido ±1°F a grado entero (mitigado por el dressing).
 
+### Weather: detector-de-fill robusto + sweep de reconciliación (Mayo 28, 2026)
+
+**Problema**: el run live perdió **−$120 reales pero el bot solo reportó −$75.5** — **$44.5 (37%) de fills invisibles**. La causa: el response de CLOB V2 `post_order` puede llegar de tres formas que el bot ignoraba, marcándolas todas como `failed` pese a haber fill real on-chain:
+1. Excepción de red **después** de enviar la orden → la orden vive en el CLOB, perdemos el ID.
+2. `success: true, orderID: "", tradeIDs: ["..."]` — orden FAK que matched al instante (no queda resting order, el fill viene en `tradeIDs`).
+3. `success: true` sin IDs poblados todavía (response asíncrono / status `delayed`).
+
+Solo leíamos `result.get("orderID", "")` → vacío → `status: "failed"`, pero el dinero ya estaba comprometido y la posición se resolvía contra nosotros sin contabilizarla.
+
+**Solución — tres niveles** en `src/weather_scanner.py`:
+
+| Nivel | Mecanismo | Captura |
+|-------|-----------|---------|
+| **A — parseo enriquecido** | `_parse_post_order_response()` (helper estático): considera fill si CUALQUIERA de `orderID` poblado, `tradeIDs` no vacío, o `success=true` | Casos 2 y 3 al instante |
+| **B — sweep de reconciliación** | `_reconciliation_loop()` cada 10 min (`_RECONCILE_INTERVAL_S=600`) consulta `GET data-api.polymarket.com/activity?user=<funder>&type=TRADE` y cruza con `self._trades` | Reclasifica `failed`→`confirmed` cuando hay match, y sintetiza `wx_orphan_*` para fills en mercados weather conocidos sin registro local |
+| **C — verificación post-excepción** | Dentro del `except` de `_live_execute`, ANTES de marcar `failed`, `_verify_fill_via_api()` poll 3×2s a la Data API filtrado por `conditionId` | Caso 1 (excepciones de red tras envío) |
+
+**Infraestructura**: `self._funder` persistido al inicializar el cliente; `self._reconcile_task` arranca solo en live (`should_simulate=False`); constante `DATA_API`; `sent_at = time.time()` estampado ANTES del `try` para que el except pueda buscar fills aunque la excepción ocurra antes de `post_order`.
+
+**Limitación honesta**: esto **visibiliza** las pérdidas, no las evita. Si la Data API tarda >10 min en indexar o está caída, hay gap residual. La defensa contra **perder** dinero sigue siendo el kernel dressing + estación correcta; este fix asegura que cuando se pierde, el bot lo sabe.
+
+**Tests**: +`TestFillDetection` (5: clásico, FAK matched, success-sin-IDs, rechazado, response no-dict) y +`TestOrphanReconciliation` (1: huérfano construido desde fill de la Data API). **67 pasando**.
+
 ---
 
 ## Idioma

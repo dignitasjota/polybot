@@ -41,6 +41,7 @@ from pathlib import Path
 
 CLOB_URL = "https://clob.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
+DATA_API = "https://data-api.polymarket.com"
 ENSEMBLE_API = "https://ensemble-api.open-meteo.com/v1/ensemble"
 TRADES_FILE = Path(os.environ.get("WEATHER_TRADES_PATH", "data/weather_trades.json"))
 
@@ -331,6 +332,8 @@ class WeatherScanner:
         # HTTP session (lazy init)
         self._session = None
         self._client = None  # ClobClient for live mode
+        self._funder = ""    # Wallet/proxy address used to sign (for fill reconciliation)
+        self._reconcile_task = None  # Background task that catches orphan fills
         self._initialized = False
 
         # Rate limiting for Open-Meteo API
@@ -402,6 +405,9 @@ class WeatherScanner:
         self._running = True
         self._started_at = time.time()
         self._scan_task = asyncio.create_task(self._scan_loop())
+        # Sweep funder activity for orphan fills (only meaningful in live).
+        if not self.should_simulate:
+            self._reconcile_task = asyncio.create_task(self._reconciliation_loop())
 
         logger.info(
             "weather_scanner_started",
@@ -417,6 +423,12 @@ class WeatherScanner:
             self._scan_task.cancel()
             try:
                 await self._scan_task
+            except asyncio.CancelledError:
+                pass
+        if self._reconcile_task and not self._reconcile_task.done():
+            self._reconcile_task.cancel()
+            try:
+                await self._reconcile_task
             except asyncio.CancelledError:
                 pass
         # Persist pending trades before shutdown
@@ -470,8 +482,9 @@ class WeatherScanner:
                     api_passphrase=passphrase,
                 ),
             )
+            self._funder = funder
             self._initialized = True
-            logger.info("weather_clob_initialized", sig_type=sig_type)
+            logger.info("weather_clob_initialized", sig_type=sig_type, funder=funder[:10] if funder else "")
         except Exception as e:
             logger.error("weather_clob_init_failed", error=str(e))
 
@@ -581,6 +594,7 @@ class WeatherScanner:
     _MAX_RESOLVED_AGE = 7 * 86400  # 7 days in seconds
     _MAX_TRADES_KEPT = 500         # Hard cap on list size
     _RETRY_COOLDOWN_S = 6 * 3600   # Back off this long after a failed/illiquid attempt
+    _RECONCILE_INTERVAL_S = 600    # Sweep funder activity every 10 min to catch orphan fills
 
     def _prune_old_trades(self):
         """Remove resolved trades older than 7 days to prevent unbounded memory growth.
@@ -1390,6 +1404,28 @@ class WeatherScanner:
             agreement=f"{opp.forecast.agreement:.1%}",
         )
 
+    @staticmethod
+    def _parse_post_order_response(
+        result: object,
+    ) -> tuple[bool, str, list, bool, str, str]:
+        """Extract fill evidence from a CLOB V2 post_order response.
+
+        Returns ``(filled, order_id, trade_ids, success, err_msg, status)``.
+        A response can indicate a real fill in three different ways:
+          - ``orderID`` populated (normal resting/partial fill)
+          - ``tradeIDs`` non-empty (FAK / immediate match — no resting order)
+          - ``success: true`` (some V2 responses omit IDs but flag success)
+        Reading only ``orderID`` was our bug: ~$45 of fills landed as "failed".
+        """
+        r = result if isinstance(result, dict) else {}
+        order_id = r.get("orderID", "") or ""
+        trade_ids = r.get("tradeIDs", []) or []
+        api_status = r.get("status", "") or ""
+        success = bool(r.get("success", False))
+        err_msg = r.get("errorMsg", "") or ""
+        filled = bool(order_id) or bool(trade_ids) or success
+        return filled, order_id, trade_ids, success, err_msg, api_status
+
     async def _live_execute(self, trade: WeatherTrade, opp: WeatherOpportunity):
         """Execute real trade via CLOB.
 
@@ -1402,6 +1438,8 @@ class WeatherScanner:
             self._trades.append(trade)
             return
 
+        sent_at = time.time()  # Stamp BEFORE the try so the except can still
+                               # search the Data API for any fill that landed.
         try:
             from py_clob_client_v2 import OrderArgs
             from py_clob_client_v2.order_builder.constants import BUY
@@ -1453,13 +1491,17 @@ class WeatherScanner:
                 None, lambda: self._client.post_order(signed)
             )
 
-            order_id = result.get("orderID", "") if isinstance(result, dict) else ""
-            if order_id:
+            filled, order_id, trade_ids, success, err_msg, api_status = (
+                self._parse_post_order_response(result)
+            )
+            if filled:
                 trade.status = "confirmed"
                 logger.info(
                     "weather_live_trade",
                     trade_id=trade.trade_id,
-                    order_id=order_id[:12],
+                    order_id=order_id[:12] if order_id else "(matched)",
+                    tradeIDs=len(trade_ids),
+                    status=api_status,
                     city=trade.city,
                     outcome=trade.outcome,
                     price=f"${trade.price:.3f}",
@@ -1468,12 +1510,40 @@ class WeatherScanner:
             else:
                 trade.status = "failed"
                 self._retry_cooldown[cid] = time.time()
-                logger.error("weather_order_no_id", response=str(result)[:200])
+                logger.error(
+                    "weather_order_rejected",
+                    errorMsg=err_msg[:200],
+                    status=api_status,
+                    response_keys=list(r.keys())[:10],
+                )
 
         except Exception as e:
-            trade.status = "failed"
-            self._retry_cooldown[trade.condition_id] = time.time()
-            logger.error("weather_live_error", error=str(e))
+            # Nivel C: an exception after sending doesn't mean the order isn't
+            # live — network/timeout/post-send glitches can leave the order in
+            # the CLOB while we lose its ID. Verify via the Data API before
+            # giving up so we don't repeat the invisible-loss pattern.
+            logger.warning("weather_live_send_exception", error=str(e), cid=trade.condition_id[:12])
+            hit = await self._verify_fill_via_api(
+                trade.condition_id, since_ts=sent_at - 5
+            )
+            if hit:
+                trade.status = "confirmed"
+                hit_price = float(hit.get("price", trade.price) or trade.price)
+                hit_size = float(hit.get("size", trade.shares) or trade.shares)
+                trade.price = hit_price
+                trade.shares = hit_size
+                trade.cost = round(hit_price * hit_size, 4)
+                logger.warning(
+                    "weather_orphan_fill_recovered",
+                    trade_id=trade.trade_id,
+                    cid=trade.condition_id[:12],
+                    tx=str(hit.get("transactionHash", ""))[:12],
+                    price=hit_price,
+                )
+            else:
+                trade.status = "failed"
+                self._retry_cooldown[trade.condition_id] = time.time()
+                logger.error("weather_live_error", error=str(e))
 
         self._trades.append(trade)
         self._trades_executed += 1
@@ -1515,6 +1585,167 @@ class WeatherScanner:
         except Exception:
             pass
         return None
+
+    # ── Fill reconciliation (catches orphan fills) ──────────────────────
+
+    async def _fetch_user_fills_via_api(
+        self, since_ts: float, condition_id: str | None = None
+    ) -> list[dict]:
+        """Return TRADE-type activity entries for our funder since the given ts.
+
+        The CLOB response from post_order can come back without an orderID even
+        when the order actually filled (FAK matched at submit, network blip
+        after send, etc.). In live we saw $44.5 of fills land as "failed" in
+        the bot's books → invisible losses. This endpoint is our ground truth:
+        whatever the Data API lists for our wallet IS what actually happened
+        on-chain, regardless of what the bot recorded.
+        """
+        if not self._session or not self._funder:
+            return []
+        params = {"user": self._funder, "type": "TRADE", "limit": "100"}
+        try:
+            async with self._session.get(f"{DATA_API}/activity", params=params) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+        except Exception as e:
+            logger.warning("weather_data_api_fetch_error", error=str(e))
+            return []
+        items = data if isinstance(data, list) else data.get("data", []) or []
+        out: list[dict] = []
+        for r in items:
+            ts = float(r.get("timestamp", 0) or 0)
+            if ts < since_ts:
+                continue
+            if condition_id and r.get("conditionId") != condition_id:
+                continue
+            out.append(r)
+        return out
+
+    async def _verify_fill_via_api(
+        self, condition_id: str, since_ts: float, attempts: int = 3, delay_s: float = 2.0
+    ) -> dict | None:
+        """Poll the Data API briefly looking for our recent fill on a condition.
+
+        Used when post_order raised or returned an ambiguous response: the
+        order may already be live/filled on-chain; we just don't know yet.
+        """
+        for _ in range(attempts):
+            await asyncio.sleep(delay_s)
+            hits = await self._fetch_user_fills_via_api(since_ts, condition_id)
+            if hits:
+                return hits[0]
+        return None
+
+    async def _reconciliation_loop(self):
+        """Periodic sweep that catches orphan fills the bot missed.
+
+        Every ``_RECONCILE_INTERVAL_S`` we list the funder's recent TRADE
+        activity from the Data API and cross-check against our local trades.
+        Anything that matches a condition_id we currently track as ``failed``
+        but actually filled gets reclassified ``confirmed`` so resolution
+        runs against it and the P&L is honest. Anything matching a known
+        weather market that we have NO record of becomes a synthetic orphan
+        trade so the loss/gain isn't invisible.
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(self._RECONCILE_INTERVAL_S)
+                if not self._funder or self.should_simulate:
+                    continue
+                # Window: anything from the last hour
+                fills = await self._fetch_user_fills_via_api(time.time() - 3600)
+                if not fills:
+                    continue
+                # Index local state once
+                by_cid: dict[str, list[WeatherTrade]] = {}
+                for t in self._trades:
+                    by_cid.setdefault(t.condition_id, []).append(t)
+                known_market_cids = {
+                    cid for m in self._markets for cid in m.condition_ids
+                }
+                rescued = 0
+                orphans = 0
+                for r in fills:
+                    cid = r.get("conditionId")
+                    if not cid:
+                        continue
+                    local = by_cid.get(cid, [])
+                    if any(t.status in ("confirmed", "pending", "won", "lost") for t in local):
+                        continue  # Already tracked
+                    failed = next((t for t in local if t.status == "failed"), None)
+                    if failed:
+                        failed.status = "confirmed"
+                        rescued += 1
+                        logger.warning(
+                            "weather_orphan_fill_rescued",
+                            trade_id=failed.trade_id,
+                            cid=cid[:12],
+                            tx=str(r.get("transactionHash", ""))[:12],
+                        )
+                        continue
+                    if cid in known_market_cids:
+                        # No local record at all — synthesize one so resolution sees it
+                        self._record_synthetic_orphan(r)
+                        orphans += 1
+                if rescued or orphans:
+                    self._save_pending_trades()
+                    logger.warning(
+                        "weather_reconciliation_summary",
+                        rescued_failed_to_confirmed=rescued,
+                        new_orphans_recorded=orphans,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("weather_reconciliation_error", error=str(e))
+
+    def _record_synthetic_orphan(self, fill: dict):
+        """Build a WeatherTrade from a Data API fill the bot never recorded.
+
+        Best-effort: we may not know the original forecast_prob/edge, but we
+        do know condition, price, size and that the cost left our wallet.
+        """
+        cid = fill.get("conditionId", "")
+        # Find the matching market for context (outcomes, target_date, station)
+        market = next((m for m in self._markets if cid in m.condition_ids), None)
+        try:
+            idx = market.condition_ids.index(cid) if market else -1
+        except ValueError:
+            idx = -1
+        outcome_label = market.outcomes[idx] if market and idx >= 0 else "?"
+        price = float(fill.get("price", 0) or 0)
+        size = float(fill.get("size", 0) or 0)
+        cost = price * size
+        trade = WeatherTrade(
+            trade_id=f"wx_orphan_{uuid.uuid4().hex[:10]}",
+            condition_id=cid,
+            question=market.event_title if market else "",
+            city=market.city_slug if market else "?",
+            outcome=outcome_label,
+            shares=size,
+            price=price,
+            cost=round(cost, 4),
+            forecast_prob=0.0,
+            edge=0.0,
+            target_date=market.target_date if market else None,
+            outcomes=list(market.outcomes) if market else [],
+            unit=market.unit if market else "C",
+            status="confirmed",
+            created_at=float(fill.get("timestamp", time.time()) or time.time()),
+            mode=self._config.mode,
+            station_icao=market.station_icao if market else "",
+        )
+        self._trades.append(trade)
+        self._trades_executed += 1
+        logger.warning(
+            "weather_synthetic_orphan_recorded",
+            trade_id=trade.trade_id,
+            cid=cid[:12],
+            city=trade.city,
+            outcome=trade.outcome,
+            cost=trade.cost,
+        )
 
     # ── Resolution ───────────────────────────────────────────────────────
 
