@@ -258,6 +258,82 @@ class TestStationCoords:
             assert icao in STATION_COORDS, f"{city} → {icao} missing coords"
 
 
+class TestStatsReport:
+    """``get_stats()`` must split pending vs resolved trades and surface the
+    forecast_prob discriminator so manual review can spot a sobre-confident
+    model (high-prob bets lose disproportionately) vs a healthy one."""
+
+    def _mk(self, scanner, *, status, prob, pnl=0.0, created=1.0, resolved=0.0):
+        from src.weather_scanner import WeatherTrade
+        t = WeatherTrade(
+            trade_id=f"t{len(scanner._trades)}",
+            condition_id=f"c{len(scanner._trades)}",
+            question="", city="madrid", outcome="20°C",
+            shares=10, price=0.3, cost=3.0,
+            forecast_prob=prob, edge=0.2,
+            status=status, pnl=pnl,
+            created_at=created, resolved_at=resolved,
+        )
+        scanner._trades.append(t)
+        return t
+
+    def test_open_and_closed_split(self, scanner):
+        scanner._trades.clear()
+        self._mk(scanner, status="pending", prob=0.30)
+        self._mk(scanner, status="confirmed", prob=0.35)
+        self._mk(scanner, status="won", prob=0.50, pnl=10, resolved=200)
+        self._mk(scanner, status="lost", prob=0.20, pnl=-3, resolved=300)
+        self._mk(scanner, status="expired", prob=0.25, resolved=100)
+
+        stats = scanner.get_stats()
+        open_ids = {t["trade_id"] for t in stats["recent_trades"]}
+        closed_ids = {t["trade_id"] for t in stats["resolved_trades"]}
+        assert len(open_ids) == 2 and len(closed_ids) == 3
+        assert open_ids.isdisjoint(closed_ids)
+        # forecast_prob must be present on both
+        assert all("forecast_prob" in t for t in stats["recent_trades"])
+        assert all("forecast_prob" in t for t in stats["resolved_trades"])
+        # resolved entries carry resolved_at
+        for t in stats["resolved_trades"]:
+            if t["status"] in ("won", "lost", "expired"):
+                # Built with non-zero resolved → must be exposed
+                src = next(s for s in scanner._trades if s.trade_id == t["trade_id"])
+                if src.resolved_at:
+                    assert t["resolved_at"] == src.resolved_at
+
+    def test_resolved_sorted_newest_first(self, scanner):
+        scanner._trades.clear()
+        self._mk(scanner, status="lost", prob=0.2, resolved=100)
+        self._mk(scanner, status="won", prob=0.5, resolved=300)
+        self._mk(scanner, status="lost", prob=0.3, resolved=200)
+        stats = scanner.get_stats()
+        ts = [t["resolved_at"] for t in stats["resolved_trades"]]
+        assert ts == sorted(ts, reverse=True)
+
+    def test_discriminator_buckets_by_forecast_prob(self, scanner):
+        """A healthy model wins more on high-prob bets than on low-prob ones."""
+        scanner._trades.clear()
+        # low (<0.25): 1W 2L → 33%
+        self._mk(scanner, status="won", prob=0.20, resolved=1)
+        self._mk(scanner, status="lost", prob=0.20, resolved=2)
+        self._mk(scanner, status="lost", prob=0.10, resolved=3)
+        # mid (0.25-0.40): 2W 1L → 67%
+        self._mk(scanner, status="won", prob=0.30, resolved=4)
+        self._mk(scanner, status="won", prob=0.35, resolved=5)
+        self._mk(scanner, status="lost", prob=0.28, resolved=6)
+        # high (>=0.40): 3W 0L → 100%
+        self._mk(scanner, status="won", prob=0.50, resolved=7)
+        self._mk(scanner, status="won", prob=0.60, resolved=8)
+        self._mk(scanner, status="won", prob=0.45, resolved=9)
+        # expired must NOT count
+        self._mk(scanner, status="expired", prob=0.40, resolved=10)
+
+        d = scanner.get_stats()["discriminator_by_forecast_prob"]
+        assert d["low_<0.25"] == {"wins": 1, "losses": 2, "n": 3, "win_rate": 0.333}
+        assert d["mid_0.25-0.40"] == {"wins": 2, "losses": 1, "n": 3, "win_rate": 0.667}
+        assert d["high_>=0.40"] == {"wins": 3, "losses": 0, "n": 3, "win_rate": 1.0}
+
+
 class TestFillDetection:
     """Nivel A — Detección robusta de fills en post_order V2.
 

@@ -2049,8 +2049,62 @@ class WeatherScanner:
     # ── Stats ────────────────────────────────────────────────────────────
 
     def get_stats(self) -> dict:
-        """Return scanner statistics."""
-        recent_trades = self._trades[-20:]
+        """Return scanner statistics.
+
+        ``recent_trades`` lists the most recent pending/confirmed (open) trades.
+        ``resolved_trades`` lists the most recent won/lost/expired (closed)
+        trades, separately, so the dashboard and manual review can see what
+        actually settled instead of only what's still open. Both include
+        ``forecast_prob`` to evaluate model discrimination: a healthy model
+        wins more often on higher-prob bets than lower-prob ones.
+        """
+        # Split by lifecycle so resolved trades aren't hidden behind the wall
+        # of freshly-created pending ones.
+        open_trades = [t for t in self._trades if t.status in ("pending", "confirmed")]
+        closed_trades = [t for t in self._trades if t.status in ("won", "lost", "expired")]
+        # Most recent first (closed by resolved_at, open by created_at)
+        open_trades.sort(key=lambda t: t.created_at, reverse=True)
+        closed_trades.sort(key=lambda t: t.resolved_at or t.created_at, reverse=True)
+
+        def _ser(t: WeatherTrade, *, include_resolved: bool = False) -> dict:
+            d = {
+                "trade_id": t.trade_id,
+                "city": t.city,
+                "outcome": t.outcome,
+                "price": round(t.price, 3),
+                "forecast_prob": round(t.forecast_prob, 3),
+                "edge": round(t.edge, 3),
+                "cost": round(t.cost, 2),
+                "pnl": round(t.pnl, 2),
+                "status": t.status,
+                "mode": t.mode,
+                "lead_days": t.lead_days,
+            }
+            if include_resolved and t.resolved_at:
+                d["resolved_at"] = round(t.resolved_at, 1)
+            return d
+
+        # Discriminator: win rate split by forecast_prob bucket. Tells us if
+        # the model actually distinguishes its confident bets from its iffy
+        # ones — the key diagnostic the older report couldn't surface.
+        prob_buckets = {"low_<0.25": [0, 0], "mid_0.25-0.40": [0, 0], "high_>=0.40": [0, 0]}
+        for t in closed_trades:
+            if t.status not in ("won", "lost"):
+                continue
+            if t.forecast_prob < 0.25:
+                bucket = "low_<0.25"
+            elif t.forecast_prob < 0.40:
+                bucket = "mid_0.25-0.40"
+            else:
+                bucket = "high_>=0.40"
+            prob_buckets[bucket][0 if t.status == "won" else 1] += 1
+        discriminator = {
+            k: {
+                "wins": w, "losses": l, "n": w + l,
+                "win_rate": round(w / (w + l), 3) if (w + l) else None,
+            }
+            for k, (w, l) in prob_buckets.items()
+        }
 
         # Current forecast summary
         active_forecasts = []
@@ -2080,19 +2134,7 @@ class WeatherScanner:
             "total_pnl": round(self._total_pnl, 2),
             "uptime_s": round(time.time() - self._started_at, 1) if self._started_at else 0,
             "forecast_cache": active_forecasts[:10],
-            "recent_trades": [
-                {
-                    "trade_id": t.trade_id,
-                    "city": t.city,
-                    "outcome": t.outcome,
-                    "price": round(t.price, 3),
-                    "edge": round(t.edge, 3),
-                    "cost": round(t.cost, 2),
-                    "pnl": round(t.pnl, 2),
-                    "status": t.status,
-                    "mode": t.mode,
-                    "lead_days": t.lead_days,
-                }
-                for t in recent_trades
-            ],
+            "discriminator_by_forecast_prob": discriminator,
+            "recent_trades": [_ser(t) for t in open_trades[:20]],
+            "resolved_trades": [_ser(t, include_resolved=True) for t in closed_trades[:20]],
         }
