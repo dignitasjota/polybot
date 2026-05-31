@@ -1176,6 +1176,20 @@ Solo leíamos `result.get("orderID", "")` → vacío → `status: "failed"`, per
 
 **Tests**: +`TestFillDetection` (5: clásico, FAK matched, success-sin-IDs, rechazado, response no-dict) y +`TestOrphanReconciliation` (1: huérfano construido desde fill de la Data API). **67 pasando**.
 
+### Weather: observabilidad de resoluciones + discriminador de forecast_prob (Junio 1, 2026)
+
+**Problema**: `get_stats()` exponía solo los 20 últimos en tiempo de `self._trades`, que casi siempre son los `pending` recién creados — los resueltos (`won`/`lost`/`expired`) quedaban fuera del slice. Desde fuera era imposible juzgar la calidad real del modelo: el log mostraba 47 trades pero solo los 20 más nuevos, todos pending.
+
+**Cambios en `get_stats()`** (`src/weather_scanner.py`):
+- **`recent_trades`** ahora trae solo abiertos (pending/confirmed) más recientes.
+- **`resolved_trades`** (campo nuevo) trae los cerrados (won/lost/expired) más recientes, ordenados por `resolved_at` desc, con `pnl` y `resolved_at` incluidos.
+- **`forecast_prob`** añadido a la serialización de ambos arrays (antes había que inferirlo de `edge + price`).
+- **`discriminator_by_forecast_prob`** (campo nuevo): cuenta wins/losses en tres cubetas de forecast_prob (`<0.25`, `0.25-0.40`, `≥0.40`). Diagnóstico clave para validar el modelo:
+  - **Modelo sano** → `win_rate` sube con la cubeta (low < mid < high).
+  - **Modelo sobre-confiado / sesgado** → curva plana o invertida: las apuestas de alta prob pierden tanto como las marginales. Señal de que el sesgo modelo-vs-estación sigue dominando aunque el PnL agregado sea positivo.
+
+**Tests**: +`TestStatsReport` (3: split open/closed, orden por resolved_at, conteo correcto de cubetas del discriminador, expired no cuentan en win rate). **70 pasando**. Commit `897d1b2`.
+
 ---
 
 ## Idioma
