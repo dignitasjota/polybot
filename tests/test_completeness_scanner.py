@@ -35,6 +35,7 @@ class MockMarketState:
     resolved: bool = False
     last_update: float = 1000.0  # Non-zero = has received WS data
     tags: list = field(default_factory=list)
+    hours_to_resolution: float | None = None  # None = skip close-to-resolution guard
 
 
 @dataclass
@@ -46,6 +47,12 @@ class MockConfig:
     max_cost_per_trade: float = 50.0
     cooldown_s: float = 0.0  # No cooldown in tests
     category: str = "crypto"
+    # Reality guards neutralized by default so the legacy gap/fee/sizing tests
+    # below exercise that mechanic in isolation. Each guard has dedicated tests
+    # (TestRealityGuards) that enable it with production values.
+    max_plausible_gap: float = 1.0       # disabled (allow legacy 0.10 gaps)
+    max_quote_age_s: float = 0.0         # disabled (allow fixed last_update=1000.0)
+    require_book_depth: bool = False     # legacy fallback sizing enabled
 
 
 class MockTracker:
@@ -563,3 +570,110 @@ def test_gamma_parse_fee_type_fallback():
     market = gc._parse_market(data)
     assert market is not None
     assert market.fee_rate == 0.072
+
+
+# ── Tests: Reality Guards (anti phantom/stale fills) ─────────────────
+
+
+class TestRealityGuards:
+    """Guards that stop paper mode from booking fake profit on phantom asks.
+
+    See _evaluate_market: sanity cap on gap, quote freshness, and the
+    require_book_depth flag (no fabricated `max_cost/price` sizing).
+    """
+
+    # --- Sanity cap on gap -------------------------------------------------
+
+    def test_implausible_gap_rejected(self):
+        """A 42¢ gap (the kind seen on stale 5-min legs) must be rejected."""
+        cfg = MockConfig(max_plausible_gap=0.05)
+        scanner = CompletenessScanner(config=cfg)
+        # YES 0.05 (stale loser) + NO 0.53 → gap 0.42
+        market = MockMarketState(
+            best_ask_yes=0.05, best_ask_no=0.53,
+            asks_yes=[MockPriceLevel(0.05, 100)],
+            asks_no=[MockPriceLevel(0.53, 100)],
+        )
+        assert scanner._evaluate_market(market) is None
+
+    def test_plausible_small_gap_passes_cap(self):
+        """A real sub-cap gap still detects (geopolitics 0% fees)."""
+        cfg = MockConfig(max_plausible_gap=0.05, category="geopolitics")
+        scanner = CompletenessScanner(config=cfg)
+        # gap 0.04 < cap 0.05, profitable at 0% fees
+        market = MockMarketState(best_ask_yes=0.48, best_ask_no=0.48)
+        opp = scanner._evaluate_market(market)
+        assert opp is not None
+        assert opp.gap == pytest.approx(0.04, abs=0.001)
+
+    def test_gap_just_below_cap_passes(self):
+        """A gap just under the cap is allowed (only clearly-large gaps reject)."""
+        cfg = MockConfig(max_plausible_gap=0.05, category="geopolitics")
+        scanner = CompletenessScanner(config=cfg)
+        market = MockMarketState(best_ask_yes=0.48, best_ask_no=0.475)  # gap ~0.045
+        assert scanner._evaluate_market(market) is not None
+
+    # --- Quote freshness ---------------------------------------------------
+
+    def test_stale_quote_rejected(self):
+        """A quote older than max_quote_age_s is rejected as stale."""
+        cfg = MockConfig(max_quote_age_s=5.0, category="geopolitics")
+        scanner = CompletenessScanner(config=cfg)
+        market = MockMarketState(
+            best_ask_yes=0.48, best_ask_no=0.48,
+            last_update=time.time() - 60,  # 60s old
+        )
+        assert scanner._evaluate_market(market) is None
+
+    def test_fresh_quote_passes(self):
+        """A recently-updated quote is accepted."""
+        cfg = MockConfig(max_quote_age_s=5.0, category="geopolitics")
+        scanner = CompletenessScanner(config=cfg)
+        market = MockMarketState(
+            best_ask_yes=0.48, best_ask_no=0.48,
+            last_update=time.time(),
+        )
+        assert scanner._evaluate_market(market) is not None
+
+    def test_never_updated_quote_rejected(self):
+        """last_update == 0 (never received WS data) is rejected when guard on."""
+        cfg = MockConfig(max_quote_age_s=5.0, category="geopolitics")
+        scanner = CompletenessScanner(config=cfg)
+        market = MockMarketState(
+            best_ask_yes=0.48, best_ask_no=0.48, last_update=0,
+        )
+        assert scanner._evaluate_market(market) is None
+
+    # --- require_book_depth ------------------------------------------------
+
+    def test_no_depth_rejected_when_required(self):
+        """With require_book_depth, an empty book yields no opportunity."""
+        cfg = MockConfig(require_book_depth=True, category="geopolitics")
+        scanner = CompletenessScanner(config=cfg)
+        market = MockMarketState(
+            best_ask_yes=0.48, best_ask_no=0.48,
+            asks_yes=[], asks_no=[],  # no fillable depth
+        )
+        assert scanner._evaluate_market(market) is None
+
+    def test_real_depth_passes_when_required(self):
+        """With require_book_depth, real book depth still detects the gap."""
+        cfg = MockConfig(require_book_depth=True, category="geopolitics")
+        scanner = CompletenessScanner(config=cfg)
+        market = MockMarketState(
+            best_ask_yes=0.48, best_ask_no=0.48,
+            asks_yes=[MockPriceLevel(0.48, 100)],
+            asks_no=[MockPriceLevel(0.48, 100)],
+        )
+        assert scanner._evaluate_market(market) is not None
+
+    def test_one_sided_depth_rejected_when_required(self):
+        """One leg with depth, the other empty → rejected (can't fill both)."""
+        cfg = MockConfig(require_book_depth=True, category="geopolitics")
+        scanner = CompletenessScanner(config=cfg)
+        market = MockMarketState(
+            best_ask_yes=0.48, best_ask_no=0.48,
+            asks_yes=[MockPriceLevel(0.48, 100)],
+            asks_no=[],
+        )
+        assert scanner._evaluate_market(market) is None

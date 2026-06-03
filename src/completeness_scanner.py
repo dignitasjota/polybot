@@ -359,6 +359,14 @@ class CompletenessScanner:
         if market.best_ask_yes <= 0 or market.best_ask_no <= 0:
             return None
 
+        # Freshness guard: a stale quote (old best-ask still resting on the
+        # losing leg of a fast 5-min market) fabricates phantom sub-$1 sums.
+        # Reject anything whose last WS update is older than max_quote_age_s.
+        max_age = self._config.max_quote_age_s
+        if max_age > 0:
+            if market.last_update <= 0 or (time.time() - market.last_update) > max_age:
+                return None
+
         # Skip markets too close to resolution: book is unreliable and we
         # can't redeem before close. Large gaps here are almost always stale.
         hours_left = market.hours_to_resolution
@@ -369,21 +377,28 @@ class CompletenessScanner:
         prices = [market.best_ask_yes, market.best_ask_no]
         token_ids = [market.yes_token_id, market.no_token_id]
 
-        # Sizes available at best ask. Prefer real order book depth.
+        # Sizes available at best ask. Real order-book depth only.
         yes_size = market.asks_yes[0].size if market.asks_yes else 0
         no_size = market.asks_no[0].size if market.asks_no else 0
 
-        # Fallback when only best_bid_ask is available (no book snapshot yet).
-        # For deep-OTM legs (price < threshold), refuse to fabricate size — those
-        # asks are typically stale 1¢ leftovers, not real fillable liquidity.
-        if yes_size == 0 and market.best_ask_yes > 0:
-            if market.best_ask_yes < PHANTOM_ASK_PRICE_THRESHOLD:
+        if self._config.require_book_depth:
+            # No fabricated sizing. If either leg lacks real depth, the gap is
+            # phantom (a resting ask with no fillable size behind it) — exactly
+            # what produced fake "profit" in paper. In live these orders fail.
+            if yes_size <= 0 or no_size <= 0:
                 return None
-            yes_size = self._config.max_cost_per_trade / market.best_ask_yes
-        if no_size == 0 and market.best_ask_no > 0:
-            if market.best_ask_no < PHANTOM_ASK_PRICE_THRESHOLD:
-                return None
-            no_size = self._config.max_cost_per_trade / market.best_ask_no
+        else:
+            # Legacy fallback when only best_bid_ask is available (no book
+            # snapshot). For deep-OTM legs (price < threshold), refuse to
+            # fabricate size — those asks are typically stale 1¢ leftovers.
+            if yes_size == 0 and market.best_ask_yes > 0:
+                if market.best_ask_yes < PHANTOM_ASK_PRICE_THRESHOLD:
+                    return None
+                yes_size = self._config.max_cost_per_trade / market.best_ask_yes
+            if no_size == 0 and market.best_ask_no > 0:
+                if market.best_ask_no < PHANTOM_ASK_PRICE_THRESHOLD:
+                    return None
+                no_size = self._config.max_cost_per_trade / market.best_ask_no
 
         sizes = [yes_size, no_size]
 
@@ -415,6 +430,19 @@ class CompletenessScanner:
 
         if gap <= 0:
             return None  # No arb (sum >= 1.0)
+
+        # Sanity cap: real completeness arbs are sub-cent to a few cents — they
+        # get arbed away instantly. A large gap (e.g. 42¢) is almost always a
+        # stale/phantom ask, not a fillable opportunity. Reject it.
+        if self._config.max_plausible_gap > 0 and gap > self._config.max_plausible_gap:
+            logger.debug(
+                "arb_gap_implausible",
+                condition_id=market.condition_id[:16],
+                question=market.question[:50],
+                gap=round(gap, 4),
+                cap=self._config.max_plausible_gap,
+            )
+            return None
 
         # Fee calculation: we're taker on all buys
         # Use per-market fee_rate from Gamma API if available, else fallback to tag/config

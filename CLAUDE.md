@@ -367,6 +367,19 @@ profit = (1.00 × shares) - (price_YES × shares) - (price_NO × shares) - fees 
 | max_cost_per_trade | 50.0 | Máximo $ por trade |
 | cooldown_s | 30.0 | Segundos antes de reintentar mismo mercado |
 | category | crypto | Categoría de fees (auto-detectada si viene del keyset endpoint) |
+| max_plausible_gap | 0.05 | Reality guard: rechaza gaps > 5¢ como stale/fantasma (arbs reales son sub-centavo). 0 = desactivado |
+| max_quote_age_s | 5.0 | Reality guard: rechaza quotes con `last_update` más viejo que esto (ask stale). 0 = desactivado |
+| require_book_depth | true | Reality guard: exige profundidad real de book; sin esto se fabricaba `max_cost/price` |
+
+### Reality guards (anti profit ficticio en paper)
+
+Tres filtros en `_evaluate_market()` evitan que el paper mode contabilice profit imposible a partir de asks stale/fantasma (típicos de la pata perdedora en mercados "Up or Down" de 5 min, cuyo ask residual no se refresca):
+
+1. **`require_book_depth`** (default true): si cualquiera de las dos patas no tiene profundidad real de book (`asks_yes[0].size`/`asks_no[0].size` > 0), no hay oportunidad. Reemplaza el sizing fabricado `max_cost/price`, que inventaba liquidez inexistente. En live esas órdenes fallarían; ahora paper lo replica. Poner en `false` restaura el fallback legacy (ver "Fallback de sizing").
+2. **`max_quote_age_s`** (default 5s): descarta el mercado si el último update del WebSocket es más viejo que el umbral. Ataca la causa raíz (el ask de la pata perdedora está stale).
+3. **`max_plausible_gap`** (default 0.05): red de seguridad — rechaza cualquier gap > 5¢. Los arbs de completeness reales viven en sub-centavo a pocos centavos (crypto necesita ~4¢); un gap de 42¢ no es fillable, se arbitraría al instante. Log `arb_gap_implausible` (debug) al filtrar.
+
+**Síntoma que resolvieron**: un run en paper acumuló `total_profit = $6.860` con trades como "Bitcoin Up or Down" comprando YES+NO por $0.58 (gap 42¢) y "ganando" $34 por trade, repetidos idénticos cada cooldown. El propio diagnóstico lo delataba: `positive_gaps: 0`, `best_gap: -0.001` (mercados perfectamente arbitrados). Los tres guards juntos cortan ese patrón. Cobertura: `TestRealityGuards` en `tests/test_completeness_scanner.py`.
 
 ### Auto-detección de categoría de fees
 El endpoint keyset de Gamma API no devuelve `feeSchedule` pero sí `feeType` (e.g. `"crypto_fees_v2"`, `"sports_fees_v2"`, `"politics_fees"`, `"general_fees"`, `"culture_fees"`, `"weather_fees"`) y `feesEnabled` (bool). `gamma_client.py` infiere el `fee_rate` a partir de `feeType`+`feesEnabled` cuando `feeSchedule` está ausente, usando `fee_rate_from_fee_type()` de `src/fees.py`. Esto permite evaluar correctamente mercados de geopolítica (0% fees, gap mínimo ~$0.005) que antes se rechazaban erróneamente al asumir fees de crypto (7.2%, gap mínimo ~$0.04).
@@ -376,8 +389,8 @@ Además del scan periódico, el scanner recibe callbacks del WebSocket cada vez 
 
 **Wiring para cuentas standalone**: Si la cuenta completeness no comparte runner con directional, `account_runner.py` wirea explícitamente el callback `scanner.check` al WebSocket client en el bloque `elif strat_name == "completeness"`.
 
-### Fallback de sizing
-Cuando el WebSocket solo envía eventos `best_bid_ask` (frecuentes) sin `book` completo (raro), el order book puede estar vacío pero con `best_ask_yes/no > 0`. En ese caso, el scanner usa fallback sizing: `size = max_cost_per_trade / best_ask_price` para no descartar oportunidades válidas.
+### Fallback de sizing (legacy — desactivado por default)
+Cuando el WebSocket solo envía eventos `best_bid_ask` (frecuentes) sin `book` completo (raro), el order book puede estar vacío pero con `best_ask_yes/no > 0`. El fallback sizing `size = max_cost_per_trade / best_ask_price` cubría ese caso. **Desde los reality guards está desactivado por default** (`require_book_depth = true`) porque fabricaba liquidez inexistente y era el motor del profit ficticio en paper. Se reactiva poniendo `require_book_depth = false`.
 
 ### Ejecución atómica
 Las órdenes para ambos tokens se envían en paralelo (`asyncio.gather`). Si una falla, se cancelan las demás para evitar quedar con posición direccional no deseada.

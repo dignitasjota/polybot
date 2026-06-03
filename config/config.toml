@@ -191,6 +191,10 @@ min_shares = 5                       # Mínimo 5 shares para ejecutar
 max_cost_per_trade = 50.0            # Máximo $50 por trade
 cooldown_s = 10                      # 10s antes de reintentar mismo mercado (era 30, muy largo)
 category = "crypto"                  # Categoría de fees fallback (auto-detecta desde Gamma API)
+# Reality guards — evitan profit ficticio en paper por asks stale/fantasma
+max_plausible_gap = 0.05             # Rechaza gaps > 5¢ (arbs reales son sub-centavo; 42¢ = stale)
+max_quote_age_s = 5.0               # Rechaza quotes más viejos que 5s (ask stale); 0 = desactivado
+require_book_depth = true            # Exige profundidad real de book (sin sizing fabricado max_cost/price)
 
 [accounts.risk]
 simulated_balance = 500.0

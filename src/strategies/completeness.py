@@ -30,6 +30,10 @@ class CompletenessConfig(StrategyConfig):
     max_cost_per_trade: float = 50.0      # Max $ to spend per arb trade
     cooldown_s: float = 30.0              # Seconds to wait before re-trying same market
     category: str = "crypto"              # Fee category (affects threshold)
+    # Reality guards (anti phantom/stale fills — see _evaluate_market)
+    max_plausible_gap: float = 0.05       # Reject gaps > 5¢ as almost-certainly stale (real arbs are sub-cent)
+    max_quote_age_s: float = 5.0          # Reject markets whose quote is older than this (stale ask); 0 = disabled
+    require_book_depth: bool = True       # Require real order-book depth — no fabricated `max_cost/price` sizing
 
     @classmethod
     def from_dict(cls, raw: dict, mode: str = "disabled") -> CompletenessConfig:
@@ -42,6 +46,9 @@ class CompletenessConfig(StrategyConfig):
             max_cost_per_trade=float(raw.get("max_cost_per_trade", 50.0)),
             cooldown_s=float(raw.get("cooldown_s", 30.0)),
             category=raw.get("category", "crypto"),
+            max_plausible_gap=float(raw.get("max_plausible_gap", 0.05)),
+            max_quote_age_s=float(raw.get("max_quote_age_s", 5.0)),
+            require_book_depth=bool(raw.get("require_book_depth", True)),
             max_concurrent_bets=int(raw.get("max_concurrent_bets", 10)),
             max_bet_per_trade=float(raw.get("max_bet_per_trade", 50.0)),
         )
@@ -106,6 +113,9 @@ class CompletenessStrategy(Strategy):
             "max_cost_per_trade": cfg.max_cost_per_trade,
             "cooldown_s": cfg.cooldown_s,
             "category": cfg.category,
+            "max_plausible_gap": cfg.max_plausible_gap,
+            "max_quote_age_s": cfg.max_quote_age_s,
+            "require_book_depth": cfg.require_book_depth,
         }
 
     async def set_mode(self, new_mode: str) -> None:
