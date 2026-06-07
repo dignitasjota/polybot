@@ -43,6 +43,10 @@ CLOB_URL = "https://clob.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
 DATA_API = "https://data-api.polymarket.com"
 ENSEMBLE_API = "https://ensemble-api.open-meteo.com/v1/ensemble"
+# Iowa Environmental Mesonet ASOS archive — real METAR observations by station,
+# the same data Weather Underground (Polymarket's resolution source) derives
+# from. Used to resolve trades against the actual station obs, not Open-Meteo.
+IEM_ASOS_API = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
 TRADES_FILE = Path(os.environ.get("WEATHER_TRADES_PATH", "data/weather_trades.json"))
 
 logger = structlog.get_logger("polymarket.weather")
@@ -1245,51 +1249,48 @@ class WeatherScanner:
     def _evaluate_market(
         self, market: WeatherMarket, forecast: ForecastDistribution
     ) -> WeatherOpportunity | None:
-        """Compare forecast distribution against market prices to find edge."""
-        best_edge = 0.0
-        best_idx = -1
-        best_label = ""
-        best_forecast_prob = 0.0
-        best_market_price = 0.0
+        """Compare forecast distribution against market prices to find edge.
 
+        Selection picks the highest-conviction underpriced outcome (largest
+        forecast_prob among those clearing every filter), NOT the largest
+        nominal edge. Maximizing raw edge structurally favors cheap tails
+        (a 17%-prob outcome at 2¢ shows a 15% edge and beats a 60%-prob
+        outcome at 50¢), which turned the strategy into a lottery-ticket
+        buyer whose PnL rode on a couple of flukes.
+        """
+        min_price = self._config.min_price
+
+        candidates = []  # (forecast_prob, edge, idx, label, market_price)
         for i, outcome in enumerate(market.outcomes):
             if i >= len(market.outcome_prices):
                 break
 
             market_price = market.outcome_prices[i]
             forecast_prob = forecast.buckets.get(outcome, 0.0)
-
-            # Skip if no forecast data for this outcome
-            if forecast_prob == 0.0 and market_price < 0.05:
-                continue
-
-            # Edge = what we think prob is - what market says
             edge = forecast_prob - market_price
 
-            # Only consider positive edge (underpriced by market)
-            if edge > best_edge:
-                best_edge = edge
-                best_idx = i
-                best_label = outcome
-                best_forecast_prob = forecast_prob
-                best_market_price = market_price
+            # Per-outcome filters — only outcomes clearing all of these qualify.
+            if edge < self._config.min_edge:
+                continue
+            # Require real conviction, not a cheap tail.
+            if forecast_prob < self._config.min_forecast_prob:
+                continue
+            # Don't buy overpriced outcomes (even with edge, risk/reward bad).
+            if market_price > self._config.max_price:
+                continue
+            # Price floor: long-shots below this are noise/lottery tickets and
+            # rarely fill in live even though they "execute" in dry_run.
+            if market_price < min_price:
+                continue
 
-        # Minimum thresholds
-        if best_edge < self._config.min_edge:
+            candidates.append((forecast_prob, edge, i, outcome, market_price))
+
+        if not candidates:
             return None
 
-        # Don't bet on very low probability events (noisy)
-        if best_forecast_prob < self._config.min_forecast_prob:
-            return None
-
-        # Don't buy overpriced outcomes (even with edge, risk/reward bad)
-        if best_market_price > self._config.max_price:
-            return None
-
-        # Don't buy phantom asks (price < 2¢): order book is empty or stale,
-        # the bet wouldn't fill in live trading even though it "executes" in dry_run.
-        if best_market_price < 0.02:
-            return None
+        # Highest conviction first; break ties by larger edge.
+        candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+        best_forecast_prob, best_edge, best_idx, best_label, best_market_price = candidates[0]
 
         # Agreement filter: if models disagree strongly, skip
         if forecast.agreement < self._config.min_agreement:
@@ -1752,8 +1753,9 @@ class WeatherScanner:
     async def check_resolutions(self):
         """Check if any pending trades have resolved.
 
-        Called periodically by the strategy. Uses actual temperature data
-        from Open-Meteo historical endpoint to determine winners.
+        Called periodically by the strategy. Determines winners from the real
+        observed max temperature: METAR/ASOS by station ICAO (independent of the
+        Open-Meteo source used for forecasting), falling back to Open-Meteo.
 
         Resolution uses trade.target_date and trade.outcomes stored at execution
         time, so it works independently of self._markets (which only contains
@@ -1784,9 +1786,22 @@ class WeatherScanner:
                     trade.resolved_at = now
                 continue
 
-            actual_temp = await self._fetch_actual_temp_for_trade(
-                coords[0], coords[1], coords[2], trade.target_date
-            )
+            # Prefer real METAR observations (IEM ASOS by ICAO) — the same data
+            # Polymarket's resolution source (Weather Underground) derives from.
+            # Falls back to Open-Meteo if METAR is unavailable, so resolution
+            # never regresses below today's behavior.
+            actual_temp = None
+            resolution_source = "open-meteo"
+            if self._config.use_metar_resolution and trade.station_icao:
+                actual_temp = await self._fetch_metar_max_temp(
+                    trade.station_icao, trade.target_date, coords[2]
+                )
+                if actual_temp is not None:
+                    resolution_source = "metar"
+            if actual_temp is None:
+                actual_temp = await self._fetch_actual_temp_for_trade(
+                    coords[0], coords[1], coords[2], trade.target_date
+                )
             if actual_temp is None:
                 continue
 
@@ -1817,6 +1832,7 @@ class WeatherScanner:
                 city=trade.city,
                 outcome=trade.outcome,
                 actual_temp=f"{actual_temp:.1f}°C",
+                source=resolution_source,
                 winning=winning_outcome,
                 status=trade.status,
                 pnl=f"${trade.pnl:.2f}",
@@ -1824,6 +1840,88 @@ class WeatherScanner:
 
         # Persist: resolved trades removed from file, pending ones kept
         self._save_pending_trades()
+
+    @staticmethod
+    def _iem_station_id(icao: str) -> str:
+        """Map an ICAO code to the IEM ASOS station identifier.
+
+        US continental stations (K + 3 letters) are stored without the leading
+        'K' (KDAL → DAL). Everything else (intl 4-letter ICAO, Alaska/Pacific
+        P-codes) is used as-is. Heuristic, but covers the common cases; a wrong
+        guess just yields no rows and we fall back to Open-Meteo.
+        """
+        icao = (icao or "").strip().upper()
+        if len(icao) == 4 and icao.startswith("K"):
+            return icao[1:]
+        return icao
+
+    @staticmethod
+    def _parse_iem_csv(text: str) -> float | None:
+        """Parse IEM ASOS CSV (station,valid,tmpf) → max temp in °C, or None.
+
+        Rows with missing ('M') or unparseable temps are skipped. Returns the
+        max observed temperature of the response window converted to Celsius.
+        """
+        if not text:
+            return None
+        max_f: float | None = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.lower().startswith("station"):
+                continue
+            parts = line.split(",")
+            if len(parts) < 3:
+                continue
+            raw = parts[-1].strip()
+            if not raw or raw.upper() == "M":
+                continue
+            try:
+                f = float(raw)
+            except ValueError:
+                continue
+            if max_f is None or f > max_f:
+                max_f = f
+        if max_f is None:
+            return None
+        return (max_f - 32.0) * 5.0 / 9.0
+
+    async def _fetch_metar_max_temp(
+        self, icao: str, target_date: date, tz: str
+    ) -> float | None:
+        """Fetch the real observed daily max temp (°C) from METAR/ASOS by ICAO.
+
+        Independent of the Open-Meteo source used for forecasting, so dry_run
+        resolution no longer grades the forecast against its own model. Returns
+        None on any failure (caller falls back to Open-Meteo).
+        """
+        if not self._session or not icao:
+            return None
+
+        station = self._iem_station_id(icao)
+        if not station:
+            return None
+
+        end = target_date + timedelta(days=1)
+        params = {
+            "station": station,
+            "data": "tmpf",
+            "year1": str(target_date.year), "month1": str(target_date.month), "day1": str(target_date.day),
+            "year2": str(end.year), "month2": str(end.month), "day2": str(end.day),
+            "tz": tz or "UTC",
+            "format": "onlycomma",
+            "latlon": "no",
+            "missing": "M",
+        }
+        try:
+            async with self._session.get(IEM_ASOS_API, params=params) as resp:
+                if resp.status != 200:
+                    return None
+                text = await resp.text()
+        except Exception as e:
+            logger.warning("weather_metar_fetch_error", error=str(e), icao=icao)
+            return None
+
+        return self._parse_iem_csv(text)
 
     async def _fetch_actual_temp_for_trade(
         self, lat: float, lon: float, tz: str, target_date: date

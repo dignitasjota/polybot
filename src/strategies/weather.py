@@ -30,13 +30,24 @@ class WeatherConfig(StrategyConfig):
 
     # Edge thresholds
     min_edge: float = 0.10             # Minimum edge (forecast_prob - market_price) to trade (10%)
-    min_forecast_prob: float = 0.15    # Don't bet on outcomes with <15% forecast prob (noisy)
+    min_forecast_prob: float = 0.30    # Don't bet on outcomes with <30% forecast prob — require
+                                        # real conviction, not cheap tails (was 0.15: too low, let
+                                        # long-shots through that dominated PnL by luck)
+    min_price: float = 0.10            # Floor on outcome price: never buy below 10¢. Long-shots at
+                                        # 2-6¢ are noise/lottery tickets (47× payouts on flukes);
+                                        # they also rarely fill in live. (was a hardcoded 2¢)
     min_agreement: float = 0.30        # Minimum model agreement (30% = at least 15/50 agree)
     max_price: float = 0.65            # Don't buy outcomes priced above 65¢ (more upside)
     forecast_uncertainty_c: float = 2.0  # Calibration σ (°C) for kernel dressing: inflates the
                                           # ensemble spread to cover model bias + grid-vs-station
                                           # error. Ensemble alone is underdispersive (~0.25°C),
                                           # real error vs the resolution source is ~1-1.5°C.
+
+    # Resolution source
+    use_metar_resolution: bool = True  # Resolve dry_run/paper trades against real METAR observations
+                                        # (IEM ASOS, by ICAO) instead of Open-Meteo. Avoids the
+                                        # circularity of scoring the forecast with its own source.
+                                        # Falls back to Open-Meteo if METAR is unavailable.
 
     # Bet sizing
     max_bet_per_trade: float = 15.0    # Max $ per trade (Kelly sizing is the real driver)
@@ -56,10 +67,12 @@ class WeatherConfig(StrategyConfig):
             forecast_cache_ttl=float(raw.get("forecast_cache_ttl", 3600.0)),
             max_forecast_days=int(raw.get("max_forecast_days", 2)),
             min_edge=float(raw.get("min_edge", 0.10)),
-            min_forecast_prob=float(raw.get("min_forecast_prob", 0.15)),
+            min_forecast_prob=float(raw.get("min_forecast_prob", 0.30)),
+            min_price=float(raw.get("min_price", 0.10)),
             min_agreement=float(raw.get("min_agreement", 0.30)),
             max_price=float(raw.get("max_price", 0.65)),
             forecast_uncertainty_c=float(raw.get("forecast_uncertainty_c", 2.0)),
+            use_metar_resolution=bool(raw.get("use_metar_resolution", True)),
             max_bet_per_trade=float(raw.get("max_bet_per_trade", 15.0)),
             bankroll=float(raw.get("bankroll", 300.0)),
             kelly_multiplier=float(raw.get("kelly_multiplier", 0.30)),
@@ -143,9 +156,11 @@ class WeatherStrategy(Strategy):
             "max_forecast_days": cfg.max_forecast_days,
             "min_edge": cfg.min_edge,
             "min_forecast_prob": cfg.min_forecast_prob,
+            "min_price": cfg.min_price,
             "min_agreement": cfg.min_agreement,
             "max_price": cfg.max_price,
             "forecast_uncertainty_c": cfg.forecast_uncertainty_c,
+            "use_metar_resolution": cfg.use_metar_resolution,
             "max_bet_per_trade": cfg.max_bet_per_trade,
             "bankroll": cfg.bankroll,
             "kelly_multiplier": cfg.kelly_multiplier,

@@ -663,20 +663,25 @@ bet_size = min(bankroll × kelly × kelly_multiplier, max_bet_per_trade)
 ### Filtros de calidad
 
 Un trade se ejecuta solo si:
-1. `edge >= min_edge` (8%)
-2. `forecast_prob >= min_forecast_prob` (15%) — descarta predicciones ruidosas
-3. `market_price <= max_price` (75¢) — asegura upside suficiente
-4. `agreement >= min_agreement` (20%) — al menos 20% de miembros coinciden en un bucket
-5. `ev_per_share > 0` — EV positivo tras fees
-6. Max `max_bets_per_cycle` (3) trades por ciclo de scan
+1. `edge >= min_edge`
+2. `forecast_prob >= min_forecast_prob` (30%) — exige convicción real, no colas baratas
+3. `market_price <= max_price` (65¢) — asegura upside suficiente
+4. `market_price >= min_price` (10¢) — descarta long-shots (ruido/lotería que casi no fillean en live)
+5. `agreement >= min_agreement` (30%) — al menos 30% de miembros coinciden en un bucket
+6. `ev_per_share > 0` — EV positivo tras fees
+7. Max `max_bets_per_cycle` trades por ciclo de scan
+
+**Selección por convicción, no por edge nominal**: entre todos los outcomes que pasan los filtros por-outcome, `_evaluate_market()` elige el de **mayor `forecast_prob`** (desempate por edge), no el de mayor edge absoluto. Maximizar el edge nominal favorecía estructuralmente las colas baratas (un outcome al 17% de prob a 2¢ muestra un edge del 15% y le ganaba a uno del 60% a 50¢), convirtiendo la estrategia en compradora de billetes de lotería cuyo PnL dependía de un par de golpes de suerte.
 
 ### Resolución de trades
 
 `_resolution_loop()` corre cada `resolution_check_interval` (1h). Para cada trade pendiente:
-1. Consulta Open-Meteo **daily** API (`temperature_2m_max`) para la ciudad y fecha del trade
+1. Obtiene la temp máxima real observada en la estación: **METAR/ASOS por ICAO** (`_fetch_metar_max_temp` vía IEM ASOS) si `use_metar_resolution=true` y el trade tiene `station_icao`; si falla, **fallback** a Open-Meteo daily (`temperature_2m_max`). Loguea `source=metar|open-meteo`.
 2. `_determine_winner()`: Compara la temp real contra cada outcome bucket (misma lógica de parsing que `_build_distribution`)
 3. Si el outcome comprado ganó → `status = "won"`, `pnl = (1.0 / price - 1) × cost`
 4. Si otro outcome ganó → `status = "lost"`, `pnl = -cost`
+
+**Por qué METAR y no Open-Meteo**: el forecast usa Open-Meteo (ensemble ECMWF). Resolver con Open-Meteo daily calificaba el forecast contra su propia fuente — circularidad que ocultaba el error modelo-vs-estación (la causa real de pérdidas en live) e inflaba el resultado en paper/dry_run. IEM ASOS expone las observaciones METAR reales por estación, la misma data de la que deriva Weather Underground (fuente de liquidación de Polymarket). `_iem_station_id()` mapea ICAO→id IEM (US `KXXX`→`XXX`; intl 4-letras tal cual); `_parse_iem_csv()` toma el máx de `tmpf` del día y lo pasa a °C. **Limitación**: el mapeo ICAO es heurístico y la cobertura/latencia de IEM no es universal — por eso siempre hay fallback a Open-Meteo, así la resolución nunca empeora respecto al comportamiento anterior.
 
 ### Dashboard
 
@@ -693,9 +698,11 @@ La cuenta weather se muestra en el dashboard principal con:
 | forecast_cache_ttl | 3600 | Cache de forecasts: 1 hora |
 | max_forecast_days | 2 | Solo mercados a ≤2 días (ensemble más fiable) |
 | min_edge | 0.10 | Mínimo 10% edge para apostar |
-| min_forecast_prob | 0.15 | Ignora outcomes con <15% prob (ruido) |
+| min_forecast_prob | 0.30 | Exige convicción real (subido de 0.15); evita colas baratas |
+| min_price | 0.10 | Piso de precio: nunca comprar bajo 10¢ (long-shots = ruido/lotería) |
 | min_agreement | 0.30 | Al menos 30% de modelos (15/50) deben coincidir |
 | max_price | 0.65 | No comprar outcomes >65¢ (más upside) |
+| use_metar_resolution | true | Resolver contra METAR real (IEM ASOS por ICAO); fallback a Open-Meteo |
 | forecast_uncertainty_c | 2.0 | σ del kernel dressing (°C): infla la dispersión del ensemble para cubrir sesgo + error de representatividad. Subir = más conservador (menos trades) |
 | max_bet_per_trade | 15.0 | $15 max por trade (Kelly sizing es el driver real) |
 | bankroll | 300.0 | Capital total weather |
@@ -1202,6 +1209,16 @@ Solo leíamos `result.get("orderID", "")` → vacío → `status: "failed"`, per
   - **Modelo sobre-confiado / sesgado** → curva plana o invertida: las apuestas de alta prob pierden tanto como las marginales. Señal de que el sesgo modelo-vs-estación sigue dominando aunque el PnL agregado sea positivo.
 
 **Tests**: +`TestStatsReport` (3: split open/closed, orden por resolved_at, conteo correcto de cubetas del discriminador, expired no cuentan en win rate). **70 pasando**. Commit `897d1b2`.
+
+### Weather: selección por convicción + floor de precio + resolución METAR (Junio 6, 2026)
+
+**Problema**: un run dry_run reportó `total_pnl +$453` con `win_rate 27.3%` (21/77) — contradicción que delataba el patrón. El PnL lo sostenían **2 long-shots afortunados** (wuhan "31°C" a 2.1¢ → +$163; warsaw "19°C or below" a 6.4¢ → +$107 = 60% del total); quitando esos dos, hasta la muestra visible quedaba negativa. Tres causas:
+
+1. **Sesgo estructural a colas**: `_evaluate_market()` elegía el outcome de **mayor edge nominal** (`forecast_prob - market_price`), que favorece los baratos (17%-prob a 2¢ = edge 15% le gana a 60%-prob a 50¢). **Fix**: selección por **mayor `forecast_prob`** entre los que pasan los filtros (desempate por edge).
+2. **Sin piso de precio real**: solo había un hardcode de 2¢; los trades problemáticos estaban a 2-6¢. **Fix**: `min_price` configurable (default 0.10). También `min_forecast_prob` subido 0.15→0.30.
+3. **Resolución circular**: dry_run/paper resolvía con Open-Meteo daily — la misma fuente del forecast — ocultando el error modelo-vs-estación e inflando el resultado (aun así acertaba solo 27%). **Fix**: `use_metar_resolution` (default true) resuelve contra **METAR/ASOS real por ICAO** (IEM ASOS), la fuente de la que deriva Weather Underground; fallback a Open-Meteo si falla. Helpers `_iem_station_id()`, `_parse_iem_csv()`, `_fetch_metar_max_temp()`; log `source=metar|open-meteo`.
+
+**Limitación honesta**: estos fixes hacen que dry_run **deje de mentir** (resolución independiente) y dejan de comprar lotería, pero no garantizan rentabilidad — el veredicto realista del modelo es que su win rate es bajo. **Tests**: +`TestSelectionAndFloor` (5) y +`TestMetarResolution` (6). **81 pasando**.
 
 ---
 

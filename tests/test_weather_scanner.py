@@ -23,6 +23,7 @@ class MockWeatherConfig:
     max_forecast_days: int = 3
     min_edge: float = 0.08
     min_forecast_prob: float = 0.15
+    min_price: float = 0.10
     min_agreement: float = 0.20
     max_price: float = 0.75
     forecast_uncertainty_c: float = 0.01  # ~0 dressing: bucketing tests assert hard assignment
@@ -31,6 +32,7 @@ class MockWeatherConfig:
     kelly_multiplier: float = 0.25
     max_bets_per_cycle: int = 3
     resolution_check_interval: float = 3600.0
+    use_metar_resolution: bool = True
 
 
 @pytest.fixture
@@ -793,3 +795,100 @@ class TestStats:
         assert stats["opportunities_found"] == 0
         assert stats["total_pnl"] == 0.0
         assert stats["win_rate"] == 0.0
+
+
+# ── Selection & price floor (_evaluate_market) ───────────────────────────
+
+
+def _mk_market(outcomes, prices, agreement_ok=True, **kw):
+    return WeatherMarket(
+        event_slug="ev", event_title="Highest temp?", city_slug="dallas",
+        target_date=date(2026, 6, 6), outcomes=outcomes, outcome_prices=prices,
+        condition_ids=["c"] * len(outcomes), token_ids=["t"] * len(outcomes),
+        **kw,
+    )
+
+
+def _mk_forecast(buckets, agreement=0.5):
+    return ForecastDistribution(
+        city_slug="dallas", target_date=date(2026, 6, 6),
+        buckets=buckets, ensemble_max_temps=[], agreement=agreement,
+    )
+
+
+class TestSelectionAndFloor:
+    def test_selects_conviction_over_nominal_edge(self, scanner):
+        """Picks the highest-prob underpriced outcome, not the largest edge.
+
+        'tail' has a bigger nominal edge (0.25) but only 40% conviction;
+        'conviction' has a smaller edge (0.15) but 65% prob. New logic must
+        pick 'conviction' (the old max-edge logic would pick 'tail').
+        """
+        market = _mk_market(["tail", "conviction"], [0.15, 0.50])
+        forecast = _mk_forecast({"tail": 0.40, "conviction": 0.65})
+        opp = scanner._evaluate_market(market, forecast)
+        assert opp is not None
+        assert opp.best_outcome_label == "conviction"
+        assert opp.forecast_prob == pytest.approx(0.65)
+        assert opp.market_price == pytest.approx(0.50)
+
+    def test_price_floor_rejects_cheap_longshot(self, scanner):
+        """A cheap long-shot below min_price is rejected even with huge edge."""
+        market = _mk_market(["cheap"], [0.05])
+        forecast = _mk_forecast({"cheap": 0.30})  # edge 0.25, but price < 0.10
+        assert scanner._evaluate_market(market, forecast) is None
+
+    def test_outcome_just_above_floor_passes(self, scanner):
+        """An outcome exactly at the floor still qualifies."""
+        market = _mk_market(["ok"], [0.10])
+        forecast = _mk_forecast({"ok": 0.30})  # edge 0.20
+        opp = scanner._evaluate_market(market, forecast)
+        assert opp is not None
+        assert opp.best_outcome_label == "ok"
+
+    def test_no_candidate_when_edge_too_small(self, scanner):
+        market = _mk_market(["a"], [0.50])
+        forecast = _mk_forecast({"a": 0.52})  # edge 0.02 < min_edge 0.08
+        assert scanner._evaluate_market(market, forecast) is None
+
+    def test_low_agreement_rejected(self, scanner):
+        market = _mk_market(["ok"], [0.30])
+        forecast = _mk_forecast({"ok": 0.60}, agreement=0.10)  # < min_agreement 0.20
+        assert scanner._evaluate_market(market, forecast) is None
+
+
+# ── METAR resolution helpers (#3) ────────────────────────────────────────
+
+
+class TestMetarResolution:
+    def test_iem_station_id_us_strips_k(self):
+        assert WeatherScanner._iem_station_id("KDAL") == "DAL"
+
+    def test_iem_station_id_intl_unchanged(self):
+        assert WeatherScanner._iem_station_id("EGLC") == "EGLC"
+
+    def test_iem_station_id_blank(self):
+        assert WeatherScanner._iem_station_id("") == ""
+
+    def test_parse_iem_csv_returns_max_in_celsius(self):
+        text = (
+            "station,valid,tmpf\n"
+            "DAL,2026-06-06 12:00,80.0\n"
+            "DAL,2026-06-06 15:00,95.0\n"
+            "DAL,2026-06-06 18:00,88.0\n"
+        )
+        c = WeatherScanner._parse_iem_csv(text)
+        assert c == pytest.approx((95.0 - 32.0) * 5.0 / 9.0, abs=0.01)  # 35°C
+
+    def test_parse_iem_csv_skips_missing(self):
+        text = (
+            "station,valid,tmpf\n"
+            "DAL,2026-06-06 12:00,M\n"
+            "DAL,2026-06-06 15:00,70.0\n"
+        )
+        c = WeatherScanner._parse_iem_csv(text)
+        assert c == pytest.approx((70.0 - 32.0) * 5.0 / 9.0, abs=0.01)
+
+    def test_parse_iem_csv_empty_returns_none(self):
+        assert WeatherScanner._parse_iem_csv("") is None
+        assert WeatherScanner._parse_iem_csv("station,valid,tmpf\n") is None

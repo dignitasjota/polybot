@@ -321,9 +321,11 @@ scan_interval = 900                  # Cada 15 min (pronósticos no cambian ráp
 forecast_cache_ttl = 14400           # Cache forecasts 4 horas (forecasts ECMWF no cambian en horas, evita rate limit Open-Meteo)
 max_forecast_days = 2                # Solo mercados a ≤2 días (ensemble más fiable)
 min_edge = 0.15                      # Mínimo 15% edge — modelo sobreestima edges, exigir más
-min_forecast_prob = 0.15             # No apostar en outcomes con <15% prob (ruido)
+min_forecast_prob = 0.30             # Exigir convicción real (no colas baratas); subido de 0.15
+min_price = 0.10                     # Piso de precio: nunca comprar bajo 10¢ (long-shots = ruido/lotería)
 min_agreement = 0.30                 # Al menos 30% de los 50 modelos deben coincidir
 max_price = 0.65                     # No comprar outcomes >65¢ (más upside)
+use_metar_resolution = true          # Resolver contra METAR real (IEM ASOS por ICAO), no Open-Meteo
 max_bet_per_trade = 15.0             # $15 max por trade (Kelly sizing es el driver real)
 bankroll = 300.0                     # Capital total para weather
 kelly_multiplier = 0.15              # 15% Kelly — margen para slippage y error de calibración del modelo en live
