@@ -33,6 +33,9 @@ class MockWeatherConfig:
     max_bets_per_cycle: int = 3
     resolution_check_interval: float = 3600.0
     use_metar_resolution: bool = True
+    bias_correction: bool = True
+    bias_min_samples: int = 10
+    bias_max_correction_c: float = 3.0
 
 
 @pytest.fixture
@@ -892,3 +895,92 @@ class TestMetarResolution:
     def test_parse_iem_csv_empty_returns_none(self):
         assert WeatherScanner._parse_iem_csv("") is None
         assert WeatherScanner._parse_iem_csv("station,valid,tmpf\n") is None
+
+
+# ── Per-station bias correction ──────────────────────────────────────────
+
+
+from src.weather_scanner import VerificationRecord
+import time as _time
+
+
+def _vrec(icao, fc, actual, days_ago=1):
+    return VerificationRecord(
+        station_icao=icao, city="dallas",
+        target_date=date.today() - timedelta(days=days_ago),
+        lead_days=1, forecast_mean_c=fc, created_at=_time.time(),
+        actual_c=actual, verified_at=_time.time(),
+    )
+
+
+class TestStationBias:
+    def test_no_correction_below_min_samples(self, scanner):
+        """Fewer verified records than bias_min_samples → bias 0 (no guessing)."""
+        scanner._config.bias_min_samples = 10
+        scanner._verification = [_vrec("KDAL", 30.0, 31.5) for _ in range(9)]
+        assert scanner._station_bias("KDAL") == 0.0
+
+    def test_bias_is_mean_error_when_enough_samples(self, scanner):
+        """bias = mean(actual - raw forecast) once n >= min_samples."""
+        scanner._config.bias_min_samples = 10
+        scanner._verification = [_vrec("KDAL", 30.0, 31.5) for _ in range(10)]
+        assert scanner._station_bias("KDAL") == pytest.approx(1.5)
+
+    def test_bias_clamped_to_max_correction(self, scanner):
+        """Huge measured bias (likely bad data) is clamped to ±cap."""
+        scanner._config.bias_min_samples = 10
+        scanner._config.bias_max_correction_c = 3.0
+        scanner._verification = [_vrec("KDAL", 30.0, 36.0) for _ in range(10)]
+        assert scanner._station_bias("KDAL") == pytest.approx(3.0)
+
+    def test_bias_zero_when_disabled(self, scanner):
+        scanner._config.bias_correction = False
+        scanner._verification = [_vrec("KDAL", 30.0, 31.5) for _ in range(10)]
+        assert scanner._station_bias("KDAL") == 0.0
+
+    def test_bias_per_station_isolated(self, scanner):
+        """Other stations' records don't bleed into the bias."""
+        scanner._config.bias_min_samples = 5
+        scanner._verification = (
+            [_vrec("KDAL", 30.0, 31.0) for _ in range(5)]
+            + [_vrec("EGLC", 20.0, 18.0) for _ in range(5)]
+        )
+        assert scanner._station_bias("KDAL") == pytest.approx(1.0)
+        assert scanner._station_bias("EGLC") == pytest.approx(-2.0)
+
+    def test_unverified_records_dont_count(self, scanner):
+        scanner._config.bias_min_samples = 5
+        recs = [_vrec("KDAL", 30.0, 31.0) for _ in range(5)]
+        for r in recs[:3]:
+            r.actual_c = None  # not yet verified
+        scanner._verification = recs
+        assert scanner._station_bias("KDAL") == 0.0  # only 2 verified < 5
+
+
+class TestVerificationRecording:
+    def test_record_dedup_overwrites_same_horizon(self, scanner):
+        """Same (station, date, lead) → latest forecast wins, no duplicates."""
+        market = _mk_market(["30°C"], [0.5])
+        market.station_icao = "KDAL"
+        market.target_date = date.today() + timedelta(days=1)
+        scanner._record_forecast_verification(market, 30.0)
+        scanner._record_forecast_verification(market, 31.0)
+        assert len(scanner._verification) == 1
+        assert scanner._verification[0].forecast_mean_c == pytest.approx(31.0)
+
+    def test_record_skipped_without_station(self, scanner):
+        market = _mk_market(["30°C"], [0.5])
+        market.city_slug = "nowhere-ville"  # no CITY_STATION mapping
+        market.station_icao = ""
+        scanner._record_forecast_verification(market, 30.0)
+        assert scanner._verification == []
+
+    def test_verified_record_not_overwritten(self, scanner):
+        """Once verified, the record is frozen (it's a measurement)."""
+        market = _mk_market(["30°C"], [0.5])
+        market.station_icao = "KDAL"
+        market.target_date = date.today() + timedelta(days=1)
+        scanner._record_forecast_verification(market, 30.0)
+        scanner._verification[0].actual_c = 32.0
+        scanner._record_forecast_verification(market, 99.0)
+        assert scanner._verification[0].forecast_mean_c == pytest.approx(30.0)

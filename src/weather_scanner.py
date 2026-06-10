@@ -48,6 +48,12 @@ ENSEMBLE_API = "https://ensemble-api.open-meteo.com/v1/ensemble"
 # from. Used to resolve trades against the actual station obs, not Open-Meteo.
 IEM_ASOS_API = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
 TRADES_FILE = Path(os.environ.get("WEATHER_TRADES_PATH", "data/weather_trades.json"))
+# Forecast-verification history (raw ensemble mean vs METAR observation per
+# station). Feeds the per-station bias correction. Survives mode switches:
+# it's model science, not P&L.
+VERIFICATION_FILE = Path(
+    os.environ.get("WEATHER_VERIFICATION_PATH", "data/weather_verification.json")
+)
 
 logger = structlog.get_logger("polymarket.weather")
 
@@ -268,9 +274,29 @@ class ForecastDistribution:
     city_slug: str
     target_date: date
     buckets: dict[str, float]     # outcome_label → probability (0-1)
-    ensemble_max_temps: list[float]  # Raw max temps from each member
+    ensemble_max_temps: list[float]  # Member max temps (bias-shifted if correction applied)
     agreement: float              # How much models agree (0-1, 1=unanimous)
     fetched_at: float = 0.0
+    raw_mean_c: float = 0.0       # RAW ensemble mean (°C), before bias shift — for verification
+    bias_applied_c: float = 0.0   # Per-station bias shift applied to member temps (°C)
+
+
+@dataclass
+class VerificationRecord:
+    """One forecast-vs-observation pair for per-station bias measurement.
+
+    forecast_mean_c is the RAW ensemble mean (no bias applied) — measuring
+    bias against corrected forecasts would make the correction feed on
+    itself and converge to zero.
+    """
+    station_icao: str
+    city: str
+    target_date: date
+    lead_days: int
+    forecast_mean_c: float
+    created_at: float = 0.0
+    actual_c: float | None = None   # METAR observation (filled by _verify_forecasts)
+    verified_at: float = 0.0
 
 
 @dataclass
@@ -352,6 +378,9 @@ class WeatherScanner:
         self._forecast_cache: dict[str, ForecastDistribution] = {}  # "city:date" → forecast
         # condition_id → timestamp of last failed/illiquid attempt (retry cooldown)
         self._retry_cooldown: dict[str, float] = {}
+        # Forecast-verification history for per-station bias correction.
+        # NOT cleared on reset_stats: it's model science, independent of mode.
+        self._verification: list[VerificationRecord] = []
 
         # Stats
         self._total_scans = 0
@@ -402,6 +431,8 @@ class WeatherScanner:
 
         # Restore pending trades from previous run
         self._load_pending_trades()
+        # Restore forecast-verification history (per-station bias data)
+        self._load_verification()
 
         if not self.should_simulate:
             await self._init_clob_client()
@@ -437,6 +468,7 @@ class WeatherScanner:
                 pass
         # Persist pending trades before shutdown
         self._save_pending_trades()
+        self._save_verification()
         if self._session:
             await self._session.close()
             self._session = None
@@ -970,6 +1002,157 @@ class WeatherScanner:
             return city[0], city[1], tz
         return None
 
+    # ── Forecast verification & per-station bias ─────────────────────────
+
+    def _load_verification(self):
+        """Restore verification history from disk."""
+        try:
+            if not VERIFICATION_FILE.exists():
+                return
+            raw = json.loads(VERIFICATION_FILE.read_text())
+            records = raw.get("records", []) if isinstance(raw, dict) else raw
+            self._verification = [
+                VerificationRecord(
+                    station_icao=r["station_icao"],
+                    city=r.get("city", ""),
+                    target_date=date.fromisoformat(r["target_date"]),
+                    lead_days=int(r.get("lead_days", 0)),
+                    forecast_mean_c=float(r["forecast_mean_c"]),
+                    created_at=float(r.get("created_at", 0)),
+                    actual_c=(
+                        float(r["actual_c"]) if r.get("actual_c") is not None else None
+                    ),
+                    verified_at=float(r.get("verified_at", 0)),
+                )
+                for r in records
+            ]
+            logger.info(
+                "weather_verification_loaded",
+                records=len(self._verification),
+                verified=len([r for r in self._verification if r.actual_c is not None]),
+            )
+        except Exception as e:
+            logger.warning("weather_verification_load_failed", error=str(e))
+
+    def _save_verification(self):
+        """Persist verification history to disk."""
+        try:
+            VERIFICATION_FILE.parent.mkdir(parents=True, exist_ok=True)
+            VERIFICATION_FILE.write_text(json.dumps({
+                "records": [
+                    {
+                        "station_icao": r.station_icao,
+                        "city": r.city,
+                        "target_date": r.target_date.isoformat(),
+                        "lead_days": r.lead_days,
+                        "forecast_mean_c": round(r.forecast_mean_c, 2),
+                        "created_at": r.created_at,
+                        "actual_c": (
+                            round(r.actual_c, 2) if r.actual_c is not None else None
+                        ),
+                        "verified_at": r.verified_at,
+                    }
+                    for r in self._verification
+                ]
+            }))
+        except Exception as e:
+            logger.warning("weather_verification_save_failed", error=str(e))
+
+    def _record_forecast_verification(
+        self, market: WeatherMarket, raw_mean_c: float
+    ):
+        """Register a raw forecast for later METAR verification.
+
+        Deduped on (station, target_date, lead_days) — refreshed forecasts for
+        the same horizon overwrite the entry (latest model run wins).
+        """
+        icao = market.station_icao or CITY_STATION.get(market.city_slug, "")
+        if not icao:
+            return  # No station — can't verify against METAR
+        lead_days = (market.target_date - date.today()).days
+        for r in self._verification:
+            if (
+                r.station_icao == icao
+                and r.target_date == market.target_date
+                and r.lead_days == lead_days
+            ):
+                if r.actual_c is None:
+                    r.forecast_mean_c = raw_mean_c
+                    r.created_at = time.time()
+                return
+        self._verification.append(VerificationRecord(
+            station_icao=icao,
+            city=market.city_slug,
+            target_date=market.target_date,
+            lead_days=lead_days,
+            forecast_mean_c=raw_mean_c,
+            created_at=time.time(),
+        ))
+
+    async def _verify_forecasts(self):
+        """Fill in METAR observations for past-date records; prune old ones.
+
+        Only METAR counts as truth here — falling back to Open-Meteo would
+        reintroduce the circularity the bias correction exists to fix. If a
+        station never yields METAR data, its records expire after 7 days.
+        """
+        today = date.today()
+        now = time.time()
+        changed = False
+
+        for r in self._verification:
+            if r.actual_c is not None or r.target_date >= today:
+                continue
+            city = CITY_COORDS.get(r.city)
+            tz = city[2] if city else "UTC"
+            actual = await self._fetch_metar_max_temp(r.station_icao, r.target_date, tz)
+            if actual is not None:
+                r.actual_c = actual
+                r.verified_at = now
+                changed = True
+                logger.info(
+                    "weather_forecast_verified",
+                    station=r.station_icao,
+                    target_date=r.target_date.isoformat(),
+                    lead_days=r.lead_days,
+                    forecast=f"{r.forecast_mean_c:.1f}°C",
+                    actual=f"{actual:.1f}°C",
+                    error=f"{actual - r.forecast_mean_c:+.1f}°C",
+                )
+
+        # Prune: verified records older than 90 days; unverifiable older than 7.
+        before = len(self._verification)
+        self._verification = [
+            r for r in self._verification
+            if (
+                (r.actual_c is not None and now - r.verified_at < 90 * 86400)
+                or (r.actual_c is None and (today - r.target_date).days < 7)
+            )
+        ]
+        if changed or len(self._verification) != before:
+            self._save_verification()
+
+    def _station_bias(self, icao: str) -> float:
+        """Mean (observation - raw forecast) for a station, in °C.
+
+        Returns 0.0 until bias_min_samples verifications exist — no correction
+        on thin evidence. Clamped to ±bias_max_correction_c: a larger measured
+        bias more likely signals a data problem than real model drift.
+        """
+        if not getattr(self._config, "bias_correction", True) or not icao:
+            return 0.0
+        errors = [
+            r.actual_c - r.forecast_mean_c
+            for r in self._verification
+            if r.station_icao == icao and r.actual_c is not None
+        ]
+        min_samples = getattr(self._config, "bias_min_samples", 10)
+        if len(errors) < min_samples:
+            return 0.0
+        bias = sum(errors) / len(errors)
+        cap = getattr(self._config, "bias_max_correction_c", 3.0)
+        return max(-cap, min(cap, bias))
+
     async def _get_forecast(self, market: WeatherMarket) -> ForecastDistribution | None:
         """Get ensemble forecast for a market, using cache if fresh."""
         cache_key = f"{market.city_slug}:{market.target_date.isoformat()}"
@@ -986,20 +1169,38 @@ class WeatherScanner:
             return None
 
         lat, lon, tz = coords
-        forecast = await self._fetch_ensemble_forecast(lat, lon, tz, market.target_date, market.outcomes)
+        icao = market.station_icao or CITY_STATION.get(market.city_slug, "")
+        bias_c = self._station_bias(icao)
+        forecast = await self._fetch_ensemble_forecast(
+            lat, lon, tz, market.target_date, market.outcomes, bias_c=bias_c
+        )
         if forecast:
             forecast.city_slug = market.city_slug
             forecast.target_date = market.target_date
             self._forecast_cache[cache_key] = forecast
+            # Record the RAW forecast for later METAR verification (feeds the
+            # per-station bias). Persisted lazily by _verify_forecasts.
+            self._record_forecast_verification(market, forecast.raw_mean_c)
+            if bias_c:
+                logger.info(
+                    "weather_bias_applied",
+                    city=market.city_slug,
+                    station=icao,
+                    bias=f"{bias_c:+.2f}°C",
+                )
 
         return forecast
 
     async def _fetch_ensemble_forecast(
-        self, lat: float, lon: float, tz: str, target_date: date, outcomes: list[str]
+        self, lat: float, lon: float, tz: str, target_date: date,
+        outcomes: list[str], bias_c: float = 0.0,
     ) -> ForecastDistribution | None:
         """Fetch ECMWF IFS ensemble forecast from Open-Meteo.
 
         Uses a semaphore to limit concurrent requests (Open-Meteo free tier).
+        bias_c: per-station correction (mean METAR-vs-model error) added to
+        every member temp before bucketing. The RAW mean is preserved in
+        raw_mean_c so verification always measures the uncorrected model.
         """
         if not self._session:
             return None
@@ -1090,6 +1291,12 @@ class WeatherScanner:
         if not ensemble_max_temps:
             return None
 
+        # Preserve the raw mean for verification, then apply the per-station
+        # bias shift (dressing widens, this recenters).
+        raw_mean_c = sum(ensemble_max_temps) / len(ensemble_max_temps)
+        if bias_c:
+            ensemble_max_temps = [t + bias_c for t in ensemble_max_temps]
+
         # Build probability distribution over outcome buckets
         buckets = self._build_distribution(ensemble_max_temps, outcomes)
 
@@ -1105,6 +1312,8 @@ class WeatherScanner:
             ensemble_max_temps=ensemble_max_temps,
             agreement=agreement,
             fetched_at=time.time(),
+            raw_mean_c=raw_mean_c,
+            bias_applied_c=bias_c,
         )
 
     def _build_distribution(
@@ -1761,6 +1970,13 @@ class WeatherScanner:
         time, so it works independently of self._markets (which only contains
         currently active markets and gets overwritten each scan cycle).
         """
+        # Verify past forecasts against METAR observations (feeds the
+        # per-station bias correction) — runs even with no pending trades.
+        try:
+            await self._verify_forecasts()
+        except Exception as e:
+            logger.warning("weather_verify_forecasts_error", error=str(e))
+
         now = time.time()
         pending = [t for t in self._trades if t.status in ("pending", "confirmed")]
         today = date.today()
@@ -2217,6 +2433,23 @@ class WeatherScanner:
                     "members": len(forecast.ensemble_max_temps),
                 })
 
+        # Per-station bias summary: measured model error vs METAR, and whether
+        # the correction is active (n >= bias_min_samples).
+        station_bias: dict[str, dict] = {}
+        by_station: dict[str, list[float]] = {}
+        for r in self._verification:
+            if r.actual_c is not None:
+                by_station.setdefault(r.station_icao, []).append(
+                    r.actual_c - r.forecast_mean_c
+                )
+        min_samples = getattr(self._config, "bias_min_samples", 10)
+        for icao, errors in sorted(by_station.items()):
+            station_bias[icao] = {
+                "bias_c": round(sum(errors) / len(errors), 2),
+                "n": len(errors),
+                "active": len(errors) >= min_samples,
+            }
+
         return {
             "running": self._running,
             "mode": self._config.mode,
@@ -2233,6 +2466,8 @@ class WeatherScanner:
             "uptime_s": round(time.time() - self._started_at, 1) if self._started_at else 0,
             "forecast_cache": active_forecasts[:10],
             "discriminator_by_forecast_prob": discriminator,
+            "station_bias": station_bias,
+            "verification_records": len(self._verification),
             "recent_trades": [_ser(t) for t in open_trades[:20]],
             "resolved_trades": [_ser(t, include_resolved=True) for t in closed_trades[:20]],
         }

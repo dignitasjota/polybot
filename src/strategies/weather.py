@@ -49,6 +49,13 @@ class WeatherConfig(StrategyConfig):
                                         # circularity of scoring the forecast with its own source.
                                         # Falls back to Open-Meteo if METAR is unavailable.
 
+    # Per-station bias correction (the dressing widens; this recenters)
+    bias_correction: bool = True       # Shift member temps by the measured station bias
+                                        # (mean METAR-vs-raw-forecast error) before bucketing
+    bias_min_samples: int = 10         # Verified forecasts required before correcting a station
+    bias_max_correction_c: float = 3.0  # Clamp on the shift — larger measured bias more likely
+                                         # signals a data problem than real model drift
+
     # Bet sizing
     max_bet_per_trade: float = 15.0    # Max $ per trade (Kelly sizing is the real driver)
     bankroll: float = 300.0            # Total bankroll for weather strategy
@@ -73,6 +80,9 @@ class WeatherConfig(StrategyConfig):
             max_price=float(raw.get("max_price", 0.65)),
             forecast_uncertainty_c=float(raw.get("forecast_uncertainty_c", 2.0)),
             use_metar_resolution=bool(raw.get("use_metar_resolution", True)),
+            bias_correction=bool(raw.get("bias_correction", True)),
+            bias_min_samples=int(raw.get("bias_min_samples", 10)),
+            bias_max_correction_c=float(raw.get("bias_max_correction_c", 3.0)),
             max_bet_per_trade=float(raw.get("max_bet_per_trade", 15.0)),
             bankroll=float(raw.get("bankroll", 300.0)),
             kelly_multiplier=float(raw.get("kelly_multiplier", 0.30)),
@@ -161,6 +171,9 @@ class WeatherStrategy(Strategy):
             "max_price": cfg.max_price,
             "forecast_uncertainty_c": cfg.forecast_uncertainty_c,
             "use_metar_resolution": cfg.use_metar_resolution,
+            "bias_correction": cfg.bias_correction,
+            "bias_min_samples": cfg.bias_min_samples,
+            "bias_max_correction_c": cfg.bias_max_correction_c,
             "max_bet_per_trade": cfg.max_bet_per_trade,
             "bankroll": cfg.bankroll,
             "kelly_multiplier": cfg.kelly_multiplier,

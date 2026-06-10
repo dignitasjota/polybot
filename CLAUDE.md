@@ -657,7 +657,19 @@ El bot replica esa fuente:
 - `_station_coords(city, icao)`: resuelve (lat, lon, tz) con prioridad **ICAO del mercado → ICAO mapeado de ciudad → centro de ciudad** (con log `weather_station_unmapped`). El **timezone** siempre viene de la ciudad.
 - `_get_forecast()` y `check_resolutions()` consultan Open-Meteo en el punto del aeropuerto, no del centro.
 
-> **Residual no cubierto**: la diferencia entre el grid de Open-Meteo *en el aeropuerto* y la observación METAR real de Wunderground (sesgo modelo-vs-estación), más el ruido irreducible de ±1°F entre fuentes a grado entero. El kernel dressing (σ=2.0°C) absorbe parte; una corrección de bias por estación con histórico sería el siguiente paso.
+> **Residual**: la diferencia entre el grid de Open-Meteo *en el aeropuerto* y la observación METAR real de Wunderground (sesgo modelo-vs-estación), más el ruido irreducible de ±1°F entre fuentes a grado entero. El kernel dressing (σ=2.0°C) absorbe la dispersión; la **corrección de bias por estación** (sección siguiente) recentra el sesgo sistemático.
+
+### Corrección de bias por estación (verificación METAR)
+
+El dressing ensancha pero no recentra: si el grid de Open-Meteo corre sistemáticamente caliente/frío respecto a la estación METAR de resolución (e.g. jeddah con forecast_prob 0.99 en "37°C or higher" contra mercado al 21% — eso no es alpha, es sesgo), los buckets de cola abierta generan edges ficticios sistemáticos. El bot ahora mide y corrige ese sesgo:
+
+1. **Registro** (`_record_forecast_verification`): cada forecast nuevo guarda la **media cruda** del ensemble (`raw_mean_c`, sin corrección — medirla contra el forecast corregido haría que la corrección se retroalimentara hacia cero) por (estación ICAO, fecha, lead_days). Dedup: el último run del modelo gana mientras no esté verificado; una vez verificado, el registro es inmutable.
+2. **Verificación** (`_verify_forecasts`, anclada en `check_resolutions`, corre aunque no haya trades): para fechas pasadas, consulta la observación METAR real (`_fetch_metar_max_temp`). **Solo METAR cuenta** — usar Open-Meteo reintroduciría la circularidad. Registros no verificables expiran a los 7 días; verificados se retienen 90.
+3. **Corrección** (`_station_bias`): `bias = mean(actual − raw_forecast)` por estación. Se aplica **solo con ≥ `bias_min_samples` (10) verificaciones** y con clamp ±`bias_max_correction_c` (3°C). El shift se suma a cada member temp antes del kernel dressing y el bucketing (`_fetch_ensemble_forecast(bias_c=...)`).
+4. **Persistencia**: `data/weather_verification.json` (env `WEATHER_VERIFICATION_PATH`). **Sobrevive a `reset_stats()` y cambios de modo** — es ciencia del modelo, no P&L.
+5. **Observabilidad**: `get_stats()` expone `station_bias` ({ICAO: {bias_c, n, active}}) y `verification_records`; log `weather_bias_applied` cuando se usa, `weather_forecast_verified` por cada verificación (con el error firmado).
+
+Con ~10 días de operación el bot acumula muestras para las estaciones activas y empieza a recentrar automáticamente. El `station_bias` del stats permite auditar qué estaciones tienen sesgo real (e.g. si jeddah muestra `bias_c: -2.5, n: 12`, el modelo corre 2.5°C caliente ahí y la corrección está activa).
 
 ### Edge y bet sizing
 
@@ -717,6 +729,9 @@ La cuenta weather se muestra en el dashboard principal con:
 | min_agreement | 0.30 | Al menos 30% de modelos (15/50) deben coincidir |
 | max_price | 0.65 | No comprar outcomes >65¢ (más upside) |
 | use_metar_resolution | true | Resolver contra METAR real (IEM ASOS por ICAO); fallback a Open-Meteo |
+| bias_correction | true | Recentrar el forecast con el bias medido por estación (METAR vs modelo crudo) |
+| bias_min_samples | 10 | Verificaciones mínimas por estación antes de aplicar corrección |
+| bias_max_correction_c | 3.0 | Tope del shift (°C) — un bias mayor sugiere problema de datos, no drift real |
 | forecast_uncertainty_c | 2.0 | σ del kernel dressing (°C): infla la dispersión del ensemble para cubrir sesgo + error de representatividad. Subir = más conservador (menos trades) |
 | max_bet_per_trade | 15.0 | $15 max por trade (Kelly sizing es el driver real) |
 | bankroll | 300.0 | Capital total weather |
@@ -1245,6 +1260,14 @@ Solo leíamos `result.get("orderID", "")` → vacío → `status: "failed"`, per
 ### Completeness: gate por categoría de fees (`max_fee_rate`) (Junio 10, 2026)
 
 Materializa la recomendación anterior: `_evaluate_market()` descarta mercados cuyo taker `fee_rate` supere `max_fee_rate` (default 0.05). Excluye crypto (0.072) — donde el margen neto tras fees es ~1¢/share sobre los mercados Up/Down de 5 min, justo los de peor legging risk — y permite geopolitics/sports/politics/weather. El `fee_rate` por mercado (Gamma API) tiene prioridad sobre la categoría fallback del config; mercados con `feesEnabled=false` (rate 0) pasan aunque la cuenta esté configurada como crypto. Diagnóstico `markets_fee_blocked` en `_get_market_diagnostic()`. Para volver al comportamiento anterior: `max_fee_rate = 1.0`. **Tests**: +`TestFeeGate` (5). **142 pasando**.
+
+### Weather: corrección de bias por estación con verificación METAR (Junio 11, 2026)
+
+**Problema**: el último pendiente estructural de weather. El kernel dressing ensancha la distribución pero no la recentra: un sesgo sistemático del grid de Open-Meteo vs la estación METAR de resolución (e.g. jeddah forecast_prob 0.994 en cola abierta vs mercado al 21%) produce edges ficticios que ningún filtro de selección puede distinguir de alpha real. Además, la "selección por convicción" concentra apuestas justo en buckets de cola abierta, donde el sesgo direccional pega más fuerte.
+
+**Solución**: pipeline de verificación continua — registrar la media cruda del ensemble por (ICAO, fecha, lead), verificarla después contra METAR real (nunca Open-Meteo: circularidad), y recentrar los member temps con el bias medido cuando hay ≥10 verificaciones (clamp ±3°C). Ver sección "Corrección de bias por estación". Nuevos: `VerificationRecord`, `_record_forecast_verification()`, `_verify_forecasts()`, `_station_bias()`, persistencia `data/weather_verification.json` (sobrevive resets), campos `raw_mean_c`/`bias_applied_c` en `ForecastDistribution`, `station_bias` + `verification_records` en `get_stats()`. Config: `bias_correction` (true), `bias_min_samples` (10), `bias_max_correction_c` (3.0). **Tests**: +`TestStationBias` (6) y +`TestVerificationRecording` (3). **155 pasando** (weather 90 + completeness 65).
+
+**Operativa**: la recolección empieza al desplegar; la corrección se activa sola por estación al llegar a 10 verificaciones (~10 días con forecasts diarios). Mientras tanto el bot opera sin corrección, igual que antes. Auditar `station_bias` en stats: estaciones con `|bias_c|` ≥ 1.5°C y `active: true` son donde el modelo estaba apostando contra su propio sesgo.
 
 ### Completeness: discovery ampliado a categorías de fee bajo (Junio 11, 2026)
 
