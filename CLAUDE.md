@@ -393,7 +393,20 @@ Además del scan periódico, el scanner recibe callbacks del WebSocket cada vez 
 Cuando el WebSocket solo envía eventos `best_bid_ask` (frecuentes) sin `book` completo (raro), el order book puede estar vacío pero con `best_ask_yes/no > 0`. El fallback sizing `size = max_cost_per_trade / best_ask_price` cubría ese caso. **Desde los reality guards está desactivado por default** (`require_book_depth = true`) porque fabricaba liquidez inexistente y era el motor del profit ficticio en paper. Se reactiva poniendo `require_book_depth = false`.
 
 ### Ejecución atómica
-Las órdenes para ambos tokens se envían en paralelo (`asyncio.gather`). Si una falla, se cancelan las demás para evitar quedar con posición direccional no deseada.
+Las órdenes para ambos tokens se envían en paralelo (`asyncio.gather`). Si una falla al colocarse, se cancelan las demás para evitar quedar con posición direccional no deseada.
+
+### Verificación de fills + unwind (live)
+
+Un `orderID` de `post_order` solo significa que la orden limit fue **aceptada** en el book, no que se ejecutó. El matching no es atómico: en mercados rápidos la pata hacia la que se movió el precio llena al instante y la otra queda resting — adverse selection puro (solo "consigues" el arb cuando ya no es arb). Sin gestión, eso deja una posición direccional sin hedge cuya pérdida el bot ni siquiera ve (contabilizaba `expected_profit` al redeem sin verificar nada).
+
+Flujo en `_live_execute` tras colocar las órdenes:
+1. **`_poll_fills()`**: poll `get_order()` cada `FILL_POLL_INTERVAL_S` (2s) hasta `FILL_POLL_TIMEOUT_S` (10s) o ambos legs llenos. Devuelve `size_matched` por pata.
+2. **Cancel del remanente**: cualquier orden no llena al timeout se cancela (antes de hacer unwind, para que nada llene por la espalda).
+3. **`pair = min(matched)`** = sets completos reales. El **exceso** de la pata sobre-llenada se deshace con `_unwind_leg()`: SELL marketable al best bid del tracker (o `buy_price - 5¢` si no hay bid) — pérdida pequeña y conocida en vez de exposición desconocida. Contador `legs_unwound` en stats.
+4. **Si `pair < min_shares`**: no hay par usable → unwind de todo (incluido dust), `status = "unwound"` (o `"failed"` si nada llenó), P&L realizado (≤0) contabilizado.
+5. **Si hay par**: el trade se **redimensiona al par verificado** (cost/fees re-escalados a los precios limit conocidos) → `confirmed` → redeem. `_try_redeem` **acumula** el profit del par sobre el P&L del unwind (no lo sobrescribe).
+
+La contabilidad pasa de "expected" a **realizada**: el P&L del unwind se estima con el precio de venta usado (si el unwind falla → se asume pérdida total del exceso, conservador; el refresh de balance reconcilia la realidad). Cobertura: `TestFillVerification` (9 tests).
 
 ### Paper mode
 Simula todo sin ClobClient. Registra trades con profit simulado para evaluar frecuencia y rentabilidad antes de ir a live.
@@ -1219,6 +1232,14 @@ Solo leíamos `result.get("orderID", "")` → vacío → `status: "failed"`, per
 3. **Resolución circular**: dry_run/paper resolvía con Open-Meteo daily — la misma fuente del forecast — ocultando el error modelo-vs-estación e inflando el resultado (aun así acertaba solo 27%). **Fix**: `use_metar_resolution` (default true) resuelve contra **METAR/ASOS real por ICAO** (IEM ASOS), la fuente de la que deriva Weather Underground; fallback a Open-Meteo si falla. Helpers `_iem_station_id()`, `_parse_iem_csv()`, `_fetch_metar_max_temp()`; log `source=metar|open-meteo`.
 
 **Limitación honesta**: estos fixes hacen que dry_run **deje de mentir** (resolución independiente) y dejan de comprar lotería, pero no garantizan rentabilidad — el veredicto realista del modelo es que su win rate es bajo. **Tests**: +`TestSelectionAndFloor` (5) y +`TestMetarResolution` (6). **81 pasando**.
+
+### Completeness: verificación de fills + unwind en live (Junio 10, 2026)
+
+**Problema**: el camino live de completeness tenía los mismos defectos que causaron las pérdidas invisibles de weather: (1) `orderID ≠ fill` — marcaba `confirmed` con solo recibir el ID, sin verificar jamás el matching; (2) legging risk sin gestión — el matching no es atómico, la pata adversa llena y la otra queda resting (adverse selection), dejando posición direccional sin hedge; (3) órdenes resting sin timeout — opción gratis para el mercado, fills tardíos siempre adversos; (4) contabilidad por expectativa — `actual_pnl = expected_profit` al redeem, sin importar lo realmente ejecutado.
+
+**Solución**: ver sección "Verificación de fills + unwind (live)" de la Estrategia 3. Poll de fills (2s × 10s) → cancel del remanente → unwind del exceso al best bid → downsize del trade al par verificado → P&L realizado. Nuevos `_poll_fills()`, `_unwind_leg()`, `_get_order_async()`; estado `unwound`; contador `legs_unwound` en stats; `_try_redeem` acumula en vez de sobrescribir. **Tests**: +`TestFillVerification` (9, con SDK fake inyectado en sys.modules). **137 pasando** (completeness 56 + weather 81).
+
+**Nota**: esto convierte pérdidas invisibles/desconocidas en pérdidas pequeñas, conocidas y contabilizadas — no convierte la estrategia en rentable. Con gaps de 4-5¢ y fees crypto ~3.6¢, el margen sigue siendo fino; la recomendación operativa sigue siendo favorecer categorías de fee bajo y validar el fill rate en live con tamaño mínimo.
 
 ---
 

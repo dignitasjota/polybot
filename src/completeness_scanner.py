@@ -37,6 +37,14 @@ CLOB_URL = "https://clob.polymarket.com"
 # Polymarket requires marketable BUY orders to be at least $1 per leg.
 MIN_ORDER_USD = 1.0
 
+# Fill verification: an orderID from post_order only means the limit order was
+# ACCEPTED into the book, not that it matched. Poll get_order() until both legs
+# fill or the timeout hits; then cancel resting remainders and unwind stranded
+# fills. Without this, a half-filled arb is an unhedged directional position
+# whose loss the bot never even sees.
+FILL_POLL_INTERVAL_S = 2.0
+FILL_POLL_TIMEOUT_S = 10.0
+
 # Skip markets within this window of resolution: order book asks become stale
 # (matching engine winding down), and any large gap detected here is almost
 # certainly phantom liquidity priced from a leftover 1¢ ask we'd never fill.
@@ -82,7 +90,7 @@ class ArbTrade:
     cost_total: float          # sum of (price_i * shares) for all outcomes
     expected_profit: float     # (1.0 * shares) - cost_total - fees - gas
     fees_paid: float
-    status: str = "pending"    # pending, confirmed, redeemed, failed
+    status: str = "pending"    # pending, confirmed, redeemed, failed, unwound
     created_at: float = 0.0
     redeemed_at: float = 0.0
     actual_pnl: float = 0.0
@@ -131,6 +139,7 @@ class CompletenessScanner:
         self._opportunities_found = 0
         self._trades_executed = 0
         self._trades_failed = 0
+        self._legs_unwound = 0
         self._total_profit = 0.0
         self._started_at: float = 0.0
 
@@ -150,6 +159,7 @@ class CompletenessScanner:
         self._opportunities_found = 0
         self._trades_executed = 0
         self._trades_failed = 0
+        self._legs_unwound = 0
         self._total_profit = 0.0
         self._started_at = time.time()
         logger.info("completeness_stats_reset")
@@ -656,13 +666,6 @@ class CompletenessScanner:
                 self._trades.append(trade)
                 return
 
-            trade.status = "confirmed"
-            self._trades.append(trade)
-            self._trades_executed += 1
-
-            # Force balance refresh on next check — both legs consumed pUSD.
-            self._last_balance_fetch = 0.0
-
             logger.info(
                 "arb_orders_placed",
                 trade_id=trade.trade_id,
@@ -673,8 +676,101 @@ class CompletenessScanner:
                 order_ids=[oid[:12] for oid in order_ids],
             )
 
-            # Wait briefly for fills, then trigger redeem
-            await asyncio.sleep(2)
+            # Force balance refresh on next check — legs may consume pUSD.
+            self._last_balance_fetch = 0.0
+
+            # ── Fill verification ────────────────────────────────────
+            # An orderID only means the order was accepted, not matched.
+            # Verify what actually filled before counting anything.
+            matched = await self._poll_fills(order_ids, trade.shares)
+            pair = min(matched)  # complete sets we actually hold
+
+            # Cancel resting remainders FIRST so nothing fills behind our back
+            # while we unwind.
+            resting = [
+                oid for i, oid in enumerate(order_ids)
+                if matched[i] < trade.shares * 0.999
+            ]
+            if resting:
+                await self._cancel_partial_orders(resting)
+
+            # Unwind any excess fill beyond the matched pair (stranded
+            # directional exposure). Realized loss is small and known —
+            # better than holding an unhedged leg of unknown outcome.
+            unwind_pnl = 0.0
+            for i, m in enumerate(matched):
+                excess = m - pair
+                if excess > 0.01:
+                    sell_price = await self._unwind_leg(
+                        opp.token_ids[i], excess, opp.prices[i]
+                    )
+                    # sell_price=0 → unwind failed; assume full loss of the
+                    # excess cost (conservative; reconciled by balance anyway).
+                    unwind_pnl += excess * (sell_price - opp.prices[i])
+                    self._legs_unwound += 1
+
+            if pair < self._config.min_shares:
+                # No usable pair. Unwind any dust pair too — redeeming dust
+                # isn't worth gas, and holding it is silent exposure.
+                if pair > 0.01:
+                    for i, token_id in enumerate(opp.token_ids):
+                        sell_price = await self._unwind_leg(
+                            token_id, pair, opp.prices[i]
+                        )
+                        unwind_pnl += pair * (sell_price - opp.prices[i])
+                trade.status = "unwound" if any(m > 0.01 for m in matched) else "failed"
+                trade.cost_total = 0.0
+                trade.actual_pnl = round(unwind_pnl, 4)
+                self._total_profit += trade.actual_pnl
+                self._trades_failed += 1
+                self._trades.append(trade)
+                logger.warning(
+                    "arb_no_pair_filled",
+                    trade_id=trade.trade_id,
+                    condition_id=opp.condition_id[:16],
+                    matched=[round(m, 2) for m in matched],
+                    target_shares=trade.shares,
+                    realized_pnl=f"${unwind_pnl:.4f}",
+                )
+                return
+
+            # Downsize the trade to the VERIFIED matched pair. Both legs
+            # filled at our limit prices, so cost/fees scale linearly.
+            if pair < trade.shares * 0.999:
+                ratio = pair / trade.shares
+                trade.fees_paid = round(trade.fees_paid * ratio, 4)
+                trade.shares = round(pair, 2)
+                trade.cost_total = round(sum(p * pair for p in opp.prices), 4)
+                trade.expected_profit = round(
+                    pair - trade.cost_total - trade.fees_paid - GAS_REDEEM_USD, 4
+                )
+                logger.info(
+                    "arb_downsized_to_fills",
+                    trade_id=trade.trade_id,
+                    pair=round(pair, 2),
+                    matched=[round(m, 2) for m in matched],
+                    realized_unwind=f"${unwind_pnl:.4f}",
+                )
+
+            # Excess-unwind result rides on the trade; redeem profit of the
+            # verified pair is added when the redeem succeeds.
+            trade.actual_pnl = round(unwind_pnl, 4)
+            if unwind_pnl:
+                self._total_profit += round(unwind_pnl, 4)
+
+            trade.status = "confirmed"
+            self._trades.append(trade)
+            self._trades_executed += 1
+
+            logger.info(
+                "arb_fills_verified",
+                trade_id=trade.trade_id,
+                condition_id=opp.condition_id[:16],
+                shares=trade.shares,
+                cost=f"${trade.cost_total:.4f}",
+                expected_profit=f"${trade.expected_profit:.4f}",
+            )
+
             await self._try_redeem(trade)
 
         except Exception as e:
@@ -719,6 +815,104 @@ class CompletenessScanner:
             None, lambda: self._client.post_order(signed_order)
         )
 
+    async def _get_order_async(self, order_id: str) -> dict | None:
+        """Fetch order state from CLOB (sync call wrapped in executor)."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: self._client.get_order(order_id)
+        )
+
+    async def _poll_fills(self, order_ids: list[str], target_shares: float) -> list[float]:
+        """Poll the CLOB until every leg fills or the timeout hits.
+
+        Returns the matched size per leg (same order as order_ids). A leg
+        that vanished from the CLOB (get_order → None) keeps its last known
+        matched size — cancelling it later is a harmless no-op.
+        """
+        matched = [0.0] * len(order_ids)
+        deadline = time.time() + FILL_POLL_TIMEOUT_S
+        while True:
+            for i, oid in enumerate(order_ids):
+                try:
+                    data = await self._get_order_async(oid)
+                except Exception as e:
+                    logger.warning(
+                        "arb_fill_poll_error", order_id=oid[:12], error=str(e)
+                    )
+                    continue
+                if isinstance(data, dict):
+                    matched[i] = float(data.get("size_matched", 0) or 0)
+            if all(m >= target_shares * 0.999 for m in matched):
+                break
+            if time.time() >= deadline:
+                break
+            await asyncio.sleep(FILL_POLL_INTERVAL_S)
+        return matched
+
+    async def _unwind_leg(
+        self, token_id: str, shares: float, buy_price: float
+    ) -> float:
+        """Sell a stranded leg with a marketable SELL order.
+
+        Crosses the book at the current best bid (or an aggressive discount
+        off our buy price if no bid is known) to exit NOW — a small known
+        loss instead of an unhedged position of unknown outcome.
+
+        Returns the sell price used (for realized-PnL estimation), or 0.0 if
+        the unwind could not be submitted (caller assumes full loss; the
+        balance refresh reconciles reality either way).
+        """
+        sell_price = 0.0
+        if self._tracker:
+            m = self._tracker.get_by_token(token_id)
+            if m:
+                sell_price = (
+                    m.best_bid_yes if token_id == m.yes_token_id else m.best_bid_no
+                )
+        if sell_price <= 0:
+            sell_price = max(0.01, round(buy_price - 0.05, 2))
+
+        try:
+            from py_clob_client_v2 import OrderArgs
+            from py_clob_client_v2.order_builder.constants import SELL
+
+            order_args = OrderArgs(
+                price=sell_price,
+                size=round(shares, 2),
+                side=SELL,
+                token_id=token_id,
+            )
+            signed = self._client.create_order(order_args)
+            result = await self._post_order_async(signed)
+            ok = isinstance(result, dict) and (
+                result.get("orderID") or result.get("success")
+            )
+            if ok:
+                logger.info(
+                    "arb_leg_unwound",
+                    token_id=token_id[:12],
+                    shares=round(shares, 2),
+                    buy_price=buy_price,
+                    sell_price=sell_price,
+                    est_loss=f"${shares * (buy_price - sell_price):.4f}",
+                )
+                return sell_price
+            logger.error(
+                "arb_unwind_rejected",
+                token_id=token_id[:12],
+                shares=round(shares, 2),
+                response=str(result)[:200],
+            )
+            return 0.0
+        except Exception as e:
+            logger.error(
+                "arb_unwind_error",
+                token_id=token_id[:12],
+                shares=round(shares, 2),
+                error=str(e),
+            )
+            return 0.0
+
     async def _cancel_partial_orders(self, order_ids: list[str]):
         """Cancel any orders that were placed before a failure."""
         if not self._client or not order_ids:
@@ -750,8 +944,10 @@ class CompletenessScanner:
                 if success:
                     trade.status = "redeemed"
                     trade.redeemed_at = time.time()
-                    trade.actual_pnl = trade.expected_profit
-                    self._total_profit += trade.actual_pnl
+                    # Accumulate on top of any excess-unwind PnL already
+                    # realized — don't overwrite it.
+                    trade.actual_pnl = round(trade.actual_pnl + trade.expected_profit, 4)
+                    self._total_profit += trade.expected_profit
                     logger.info(
                         "arb_redeemed",
                         trade_id=trade.trade_id,
@@ -824,6 +1020,7 @@ class CompletenessScanner:
             "opportunities_found": self._opportunities_found,
             "trades_executed": self._trades_executed,
             "trades_failed": self._trades_failed,
+            "legs_unwound": self._legs_unwound,
             "total_profit": round(self._total_profit, 4),
             "pending_redeems": len(self._pending_redeems),
             "uptime_s": round(time.time() - self._started_at, 1) if self._started_at else 0,

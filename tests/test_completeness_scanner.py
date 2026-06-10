@@ -30,6 +30,8 @@ class MockMarketState:
     no_token_id: str = "no_token"
     best_ask_yes: float = 0.48
     best_ask_no: float = 0.50
+    best_bid_yes: float = 0.0
+    best_bid_no: float = 0.0
     asks_yes: list = field(default_factory=lambda: [MockPriceLevel(0.48, 100)])
     asks_no: list = field(default_factory=lambda: [MockPriceLevel(0.50, 100)])
     resolved: bool = False
@@ -677,3 +679,195 @@ class TestRealityGuards:
             asks_no=[],
         )
         assert scanner._evaluate_market(market) is None
+
+
+# ── Tests: Fill Verification & Unwind (live execution) ───────────────
+
+
+import sys
+import types
+from unittest.mock import AsyncMock
+
+
+@pytest.fixture
+def fake_clob_sdk(monkeypatch):
+    """Inject a fake py_clob_client_v2 so live-path lazy imports resolve."""
+    fake = types.ModuleType("py_clob_client_v2")
+    fake.OrderArgs = lambda **kw: kw
+    ob = types.ModuleType("py_clob_client_v2.order_builder")
+    const = types.ModuleType("py_clob_client_v2.order_builder.constants")
+    const.BUY = "BUY"
+    const.SELL = "SELL"
+    clob_types = types.ModuleType("py_clob_client_v2.clob_types")
+    clob_types.OrderPayload = lambda **kw: kw
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.order_builder", ob)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.order_builder.constants", const)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.clob_types", clob_types)
+    return fake
+
+
+def _live_scanner(market):
+    """Scanner in live mode with a mocked CLOB client.
+
+    Book: 0.45/0.45 with 50 shares depth each → trade.shares = 50.
+    """
+    config = MockConfig(mode="live", cooldown_s=0)
+    scanner = CompletenessScanner(config, MockTracker([market]))
+    scanner._client = MagicMock()
+    scanner._client.create_order = MagicMock(return_value="signed")
+    scanner._refresh_balance = AsyncMock(return_value=None)
+    scanner._post_order_async = AsyncMock(
+        side_effect=[{"orderID": "o-yes"}, {"orderID": "o-no"}]
+    )
+    scanner._cancel_partial_orders = AsyncMock()
+    return scanner
+
+
+def _arb_market(**kw):
+    return MockMarketState(
+        best_ask_yes=0.45, best_ask_no=0.45,
+        asks_yes=[MockPriceLevel(0.45, 50)],
+        asks_no=[MockPriceLevel(0.45, 50)],
+        **kw,
+    )
+
+
+class TestFillVerification:
+    @pytest.mark.asyncio
+    async def test_poll_fills_returns_matched_sizes(self):
+        scanner = CompletenessScanner(MockConfig(), MockTracker())
+        scanner._client = MagicMock()
+        scanner._get_order_async = AsyncMock(
+            side_effect=[{"size_matched": "50"}, {"size_matched": "50"}]
+        )
+        matched = await scanner._poll_fills(["a", "b"], 50.0)
+        assert matched == [50.0, 50.0]
+
+    @pytest.mark.asyncio
+    async def test_poll_fills_timeout_returns_partials(self, monkeypatch):
+        monkeypatch.setattr("src.completeness_scanner.FILL_POLL_TIMEOUT_S", 0.01)
+        scanner = CompletenessScanner(MockConfig(), MockTracker())
+        scanner._client = MagicMock()
+        scanner._get_order_async = AsyncMock(
+            return_value={"size_matched": "10"}
+        )
+        matched = await scanner._poll_fills(["a", "b"], 50.0)
+        assert matched == [10.0, 10.0]
+
+    @pytest.mark.asyncio
+    async def test_both_legs_filled_confirms_and_redeems(self, fake_clob_sdk):
+        """Full fill on both legs → redeemed, profit = expected_profit."""
+        market = _arb_market()
+        scanner = _live_scanner(market)
+        scanner._poll_fills = AsyncMock(return_value=[50.0, 50.0])
+        scanner.set_redeem_callback(AsyncMock(return_value=True))
+
+        opp = scanner._evaluate_market(market)
+        assert opp is not None
+        await scanner._execute_arb(opp)
+
+        trade = scanner._trades[0]
+        assert trade.status == "redeemed"
+        assert trade.actual_pnl == pytest.approx(trade.expected_profit)
+        assert scanner._total_profit == pytest.approx(trade.expected_profit)
+        assert scanner._trades_executed == 1
+        assert scanner._trades_failed == 0
+        scanner._cancel_partial_orders.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_one_leg_filled_unwinds_with_realized_loss(self, fake_clob_sdk):
+        """Half-filled arb → cancel resting leg, sell stranded leg, book the loss."""
+        market = _arb_market()
+        scanner = _live_scanner(market)
+        scanner._poll_fills = AsyncMock(return_value=[50.0, 0.0])
+        scanner._unwind_leg = AsyncMock(return_value=0.40)  # sold at 0.40, bought 0.45
+
+        opp = scanner._evaluate_market(market)
+        await scanner._execute_arb(opp)
+
+        trade = scanner._trades[0]
+        assert trade.status == "unwound"
+        # Realized: 50 shares × (0.40 - 0.45) = -2.50
+        assert trade.actual_pnl == pytest.approx(-2.50)
+        assert scanner._total_profit == pytest.approx(-2.50)
+        assert scanner._trades_failed == 1
+        assert scanner._trades_executed == 0
+        assert scanner._legs_unwound == 1
+        # Both orders were resting/cancellable (one never filled, one partially)
+        scanner._cancel_partial_orders.assert_called_once()
+        cancelled = scanner._cancel_partial_orders.call_args[0][0]
+        assert "o-no" in cancelled
+
+    @pytest.mark.asyncio
+    async def test_no_fills_marks_failed_without_loss(self, fake_clob_sdk):
+        """Nothing filled → cancel both, status failed, zero PnL."""
+        market = _arb_market()
+        scanner = _live_scanner(market)
+        scanner._poll_fills = AsyncMock(return_value=[0.0, 0.0])
+        scanner._unwind_leg = AsyncMock()
+
+        opp = scanner._evaluate_market(market)
+        await scanner._execute_arb(opp)
+
+        trade = scanner._trades[0]
+        assert trade.status == "failed"
+        assert trade.actual_pnl == 0.0
+        assert scanner._total_profit == 0.0
+        assert scanner._trades_failed == 1
+        scanner._unwind_leg.assert_not_called()
+        scanner._cancel_partial_orders.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_partial_pair_downsizes_and_unwinds_excess(self, fake_clob_sdk):
+        """Legs fill asymmetrically → keep the matched pair, unwind the excess."""
+        market = _arb_market()
+        scanner = _live_scanner(market)
+        scanner._poll_fills = AsyncMock(return_value=[30.0, 50.0])
+        scanner._unwind_leg = AsyncMock(return_value=0.40)
+
+        opp = scanner._evaluate_market(market)
+        await scanner._execute_arb(opp)
+
+        trade = scanner._trades[0]
+        # Pair = 30 shares kept (confirmed, awaiting redeem — no callback set)
+        assert trade.status == "confirmed"
+        assert trade.shares == pytest.approx(30.0)
+        assert trade.cost_total == pytest.approx(30 * 0.90)
+        # Excess 20 shares of the NO leg sold: 20 × (0.40 - 0.45) = -1.0
+        assert trade.actual_pnl == pytest.approx(-1.0)
+        assert scanner._total_profit == pytest.approx(-1.0)
+        assert scanner._trades_executed == 1
+        assert scanner._legs_unwound == 1
+        # Only the under-filled YES order was resting
+        cancelled = scanner._cancel_partial_orders.call_args[0][0]
+        assert cancelled == ["o-yes"]
+        # Unwound the NO token's excess
+        unwind_args = scanner._unwind_leg.call_args[0]
+        assert unwind_args[0] == "no_token"
+        assert unwind_args[1] == pytest.approx(20.0)
+
+    @pytest.mark.asyncio
+    async def test_unwind_leg_uses_tracker_bid(self, fake_clob_sdk):
+        """Unwind sells at the live best bid from the tracker."""
+        market = _arb_market(best_bid_yes=0.42)
+        scanner = _live_scanner(market)
+        sell_price = await scanner._unwind_leg("yes_token", 20.0, 0.45)
+        assert sell_price == pytest.approx(0.42)
+
+    @pytest.mark.asyncio
+    async def test_unwind_leg_fallback_price_without_bid(self, fake_clob_sdk):
+        """No bid known → sell at aggressive discount off our buy price."""
+        market = _arb_market()  # bids default 0.0
+        scanner = _live_scanner(market)
+        sell_price = await scanner._unwind_leg("yes_token", 20.0, 0.45)
+        assert sell_price == pytest.approx(0.40)
+
+    @pytest.mark.asyncio
+    async def test_unwind_failure_returns_zero(self, fake_clob_sdk):
+        """Rejected unwind order → 0.0 (caller assumes full loss)."""
+        market = _arb_market(best_bid_yes=0.42)
+        scanner = _live_scanner(market)
+        scanner._post_order_async = AsyncMock(return_value={"error": "rejected"})
+        sell_price = await scanner._unwind_leg("yes_token", 20.0, 0.45)
+        assert sell_price == 0.0
