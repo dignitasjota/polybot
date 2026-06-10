@@ -34,6 +34,10 @@ class CompletenessConfig(StrategyConfig):
     max_plausible_gap: float = 0.05       # Reject gaps > 5¢ as almost-certainly stale (real arbs are sub-cent)
     max_quote_age_s: float = 5.0          # Reject markets whose quote is older than this (stale ask); 0 = disabled
     require_book_depth: bool = True       # Require real order-book depth — no fabricated `max_cost/price` sizing
+    max_fee_rate: float = 0.05            # Skip markets with taker feeRate above this. Crypto (0.072) has
+                                          # razor margins (4-5¢ gap vs ~3.6¢ fees) on the fastest markets —
+                                          # the worst legging risk. Allows geopolitics (0), sports (0.03),
+                                          # politics (0.04), weather/economics (0.05).
 
     @classmethod
     def from_dict(cls, raw: dict, mode: str = "disabled") -> CompletenessConfig:
@@ -49,6 +53,7 @@ class CompletenessConfig(StrategyConfig):
             max_plausible_gap=float(raw.get("max_plausible_gap", 0.05)),
             max_quote_age_s=float(raw.get("max_quote_age_s", 5.0)),
             require_book_depth=bool(raw.get("require_book_depth", True)),
+            max_fee_rate=float(raw.get("max_fee_rate", 0.05)),
             max_concurrent_bets=int(raw.get("max_concurrent_bets", 10)),
             max_bet_per_trade=float(raw.get("max_bet_per_trade", 50.0)),
         )
@@ -116,6 +121,7 @@ class CompletenessStrategy(Strategy):
             "max_plausible_gap": cfg.max_plausible_gap,
             "max_quote_age_s": cfg.max_quote_age_s,
             "require_book_depth": cfg.require_book_depth,
+            "max_fee_rate": cfg.max_fee_rate,
         }
 
     async def set_mode(self, new_mode: str) -> None:

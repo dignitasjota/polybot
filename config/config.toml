@@ -195,6 +195,7 @@ category = "crypto"                  # Categoría de fees fallback (auto-detecta
 max_plausible_gap = 0.05             # Rechaza gaps > 5¢ (arbs reales son sub-centavo; 42¢ = stale)
 max_quote_age_s = 5.0               # Rechaza quotes más viejos que 5s (ask stale); 0 = desactivado
 require_book_depth = true            # Exige profundidad real de book (sin sizing fabricado max_cost/price)
+max_fee_rate = 0.05                  # Excluye mercados con feeRate > 5% (crypto 7.2% = margen fino + peor legging)
 
 [accounts.risk]
 simulated_balance = 500.0

@@ -370,6 +370,7 @@ profit = (1.00 × shares) - (price_YES × shares) - (price_NO × shares) - fees 
 | max_plausible_gap | 0.05 | Reality guard: rechaza gaps > 5¢ como stale/fantasma (arbs reales son sub-centavo). 0 = desactivado |
 | max_quote_age_s | 5.0 | Reality guard: rechaza quotes con `last_update` más viejo que esto (ask stale). 0 = desactivado |
 | require_book_depth | true | Reality guard: exige profundidad real de book; sin esto se fabricaba `max_cost/price` |
+| max_fee_rate | 0.05 | Excluye mercados con taker feeRate superior. Default deja fuera crypto (0.072): margen 4-5¢ vs fees ~3.6¢ en los mercados más rápidos (peor legging) — un fallo de ejecución borra ~20 arbs buenos. Permite geopolitics (0), sports (0.03), politics (0.04), weather/economics (0.05). El `fee_rate` por mercado de la Gamma API tiene prioridad sobre la categoría del config. Diagnóstico: `markets_fee_blocked` |
 
 ### Reality guards (anti profit ficticio en paper)
 
@@ -1240,6 +1241,10 @@ Solo leíamos `result.get("orderID", "")` → vacío → `status: "failed"`, per
 **Solución**: ver sección "Verificación de fills + unwind (live)" de la Estrategia 3. Poll de fills (2s × 10s) → cancel del remanente → unwind del exceso al best bid → downsize del trade al par verificado → P&L realizado. Nuevos `_poll_fills()`, `_unwind_leg()`, `_get_order_async()`; estado `unwound`; contador `legs_unwound` en stats; `_try_redeem` acumula en vez de sobrescribir. **Tests**: +`TestFillVerification` (9, con SDK fake inyectado en sys.modules). **137 pasando** (completeness 56 + weather 81).
 
 **Nota**: esto convierte pérdidas invisibles/desconocidas en pérdidas pequeñas, conocidas y contabilizadas — no convierte la estrategia en rentable. Con gaps de 4-5¢ y fees crypto ~3.6¢, el margen sigue siendo fino; la recomendación operativa sigue siendo favorecer categorías de fee bajo y validar el fill rate en live con tamaño mínimo.
+
+### Completeness: gate por categoría de fees (`max_fee_rate`) (Junio 10, 2026)
+
+Materializa la recomendación anterior: `_evaluate_market()` descarta mercados cuyo taker `fee_rate` supere `max_fee_rate` (default 0.05). Excluye crypto (0.072) — donde el margen neto tras fees es ~1¢/share sobre los mercados Up/Down de 5 min, justo los de peor legging risk — y permite geopolitics/sports/politics/weather. El `fee_rate` por mercado (Gamma API) tiene prioridad sobre la categoría fallback del config; mercados con `feesEnabled=false` (rate 0) pasan aunque la cuenta esté configurada como crypto. Diagnóstico `markets_fee_blocked` en `_get_market_diagnostic()`. Para volver al comportamiento anterior: `max_fee_rate = 1.0`. **Tests**: +`TestFeeGate` (5). **142 pasando**.
 
 ---
 

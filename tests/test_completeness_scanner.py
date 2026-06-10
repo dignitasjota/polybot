@@ -55,6 +55,7 @@ class MockConfig:
     max_plausible_gap: float = 1.0       # disabled (allow legacy 0.10 gaps)
     max_quote_age_s: float = 0.0         # disabled (allow fixed last_update=1000.0)
     require_book_depth: bool = False     # legacy fallback sizing enabled
+    max_fee_rate: float = 1.0            # disabled (legacy tests use crypto fees)
 
 
 class MockTracker:
@@ -871,3 +872,54 @@ class TestFillVerification:
         scanner._post_order_async = AsyncMock(return_value={"error": "rejected"})
         sell_price = await scanner._unwind_leg("yes_token", 20.0, 0.45)
         assert sell_price == 0.0
+
+
+# ── Tests: Fee-category gate (max_fee_rate) ───────────────────────────
+
+
+class TestFeeGate:
+    """Markets whose taker feeRate exceeds max_fee_rate are skipped entirely.
+
+    Rationale: crypto (0.072) leaves 4-5¢ gaps vs ~3.6¢ fees on the fastest
+    markets (worst legging risk). Production default 0.05 allows geopolitics,
+    sports, politics, weather — excludes crypto.
+    """
+
+    def test_crypto_blocked_at_production_default(self):
+        cfg = MockConfig(max_fee_rate=0.05, category="crypto")
+        scanner = CompletenessScanner(cfg, MockTracker())
+        market = MockMarketState(best_ask_yes=0.45, best_ask_no=0.45)  # gap 0.10
+        assert scanner._evaluate_market(market) is None
+
+    def test_geopolitics_passes_at_production_default(self):
+        cfg = MockConfig(max_fee_rate=0.05, category="geopolitics")
+        scanner = CompletenessScanner(cfg, MockTracker())
+        market = MockMarketState(best_ask_yes=0.45, best_ask_no=0.45)
+        opp = scanner._evaluate_market(market)
+        assert opp is not None
+
+    def test_api_fee_rate_overrides_config_category(self):
+        """Per-market fee_rate from Gamma API wins over the config category."""
+        cfg = MockConfig(max_fee_rate=0.05, category="geopolitics")
+        scanner = CompletenessScanner(cfg, MockTracker())
+        market = MockMarketState(best_ask_yes=0.45, best_ask_no=0.45)
+        market.fee_rate = 0.072  # API says crypto fees → blocked
+        assert scanner._evaluate_market(market) is None
+
+    def test_api_zero_fee_passes_despite_crypto_config(self):
+        """feesEnabled=false market (rate 0) qualifies even under crypto config."""
+        cfg = MockConfig(max_fee_rate=0.05, category="crypto")
+        scanner = CompletenessScanner(cfg, MockTracker())
+        market = MockMarketState(best_ask_yes=0.45, best_ask_no=0.45)
+        market.fee_rate = 0.0
+        opp = scanner._evaluate_market(market)
+        assert opp is not None
+
+    def test_diagnostic_counts_fee_blocked(self):
+        cfg = MockConfig(max_fee_rate=0.05, category="geopolitics")
+        cheap = MockMarketState(condition_id="0xa")
+        pricey = MockMarketState(condition_id="0xb")
+        pricey.fee_rate = 0.072
+        scanner = CompletenessScanner(cfg, MockTracker([cheap, pricey]))
+        diag = scanner._get_market_diagnostic()
+        assert diag["markets_fee_blocked"] == 1

@@ -465,6 +465,14 @@ class CompletenessScanner:
         else:
             category = self._config.category
             fee_rate = TAKER_FEE_RATES.get(category, TAKER_FEE_RATES[DEFAULT_CATEGORY])
+
+        # Fee-category gate: high-fee markets (crypto 0.072) leave razor-thin
+        # margins (4-5¢ gap vs ~3.6¢ fees) on exactly the fastest markets,
+        # where legging risk is worst — one slip erases ~20 good arbs. Stick
+        # to categories where the margin survives imperfect execution.
+        if fee_rate > self._config.max_fee_rate:
+            return None
+
         total_fees_per_share = sum(
             fee_rate * p * (1.0 - p) for p in prices
         )
@@ -1047,9 +1055,13 @@ class CompletenessScanner:
         total = 0
         with_prices = 0
         positive_gaps = 0
+        fee_blocked = 0
         best_gap = -99.0
         best_question = ""
         best_fee_rate = -1.0
+        fallback_rate = TAKER_FEE_RATES.get(
+            self._config.category, TAKER_FEE_RATES[DEFAULT_CATEGORY]
+        )
 
         seen = set()
         for m in self._tracker.all_markets:
@@ -1059,17 +1071,21 @@ class CompletenessScanner:
             total += 1
             if m.best_ask_yes > 0 and m.best_ask_no > 0 and not m.resolved:
                 with_prices += 1
+                market_rate = getattr(m, 'fee_rate', -1.0)
+                if (market_rate if market_rate >= 0 else fallback_rate) > self._config.max_fee_rate:
+                    fee_blocked += 1
                 gap = 1.0 - m.best_ask_yes - m.best_ask_no
                 if gap > 0:
                     positive_gaps += 1
                 if gap > best_gap:
                     best_gap = gap
                     best_question = m.question[:50]
-                    best_fee_rate = getattr(m, 'fee_rate', -1.0)
+                    best_fee_rate = market_rate
 
         return {
             "markets_tracked": total,
             "markets_with_prices": with_prices,
+            "markets_fee_blocked": fee_blocked,
             "positive_gaps": positive_gaps,
             "best_gap": round(best_gap, 5) if best_gap > -99 else None,
             "best_gap_fee_rate": best_fee_rate,
