@@ -70,28 +70,53 @@ class GammaClient:
         if self._owns_session and self._session and not self._session.closed:
             await self._session.close()
 
+    @staticmethod
+    def _passes_fee_filter(market: Market, max_fee_rate: float | None) -> bool:
+        """True if the market's fee rate qualifies under max_fee_rate.
+
+        Unknown fee rates (-1) pass — the consumer's own fee gate makes the
+        final call with its category fallback.
+        """
+        if max_fee_rate is None:
+            return True
+        if market.fee_rate < 0:
+            return True
+        return market.fee_rate <= max_fee_rate
+
     async def fetch_active_markets(
         self,
         max_time_to_resolution: timedelta = timedelta(hours=24),
         max_results: int = 50,
         tag: str = "",
+        max_fee_rate: float | None = None,
+        max_pages: int = 50,
     ) -> list[Market]:
         """Fetch active markets closing within max_time_to_resolution.
 
         Uses keyset pagination (GET /markets/keyset) with cursor-based paging.
         Orders by endDate ascending to get soonest-closing markets first.
         Filters: enableOrderBook=true, has liquidity (price > 0).
+
+        max_fee_rate: if set, markets with a KNOWN fee rate above it are
+        skipped DURING pagination (they don't consume max_results slots).
+        This matters because endDate-ascending ordering front-loads 5-min
+        crypto markets — without the filter they exhaust the quota before
+        low-fee categories (geopolitics/politics, days away) ever appear.
+        max_pages bounds the extra paging this can trigger.
         """
         session = await self._get_session()
         markets: list[Market] = []
         skipped_no_book = 0
         skipped_no_liquidity = 0
+        skipped_high_fee = 0
+        pages = 0
         page_size = min(100, max_results)
         now = datetime.now(timezone.utc)
         end_max = now + max_time_to_resolution
         after_cursor: str | None = None
 
-        while len(markets) < max_results:
+        while len(markets) < max_results and pages < max_pages:
+            pages += 1
             params: dict[str, str] = {
                 "active": "true",
                 "closed": "false",
@@ -136,6 +161,10 @@ class GammaClient:
                         if market.yes_price <= 0 and market.no_price <= 0:
                             skipped_no_liquidity += 1
                             continue
+                        # Skip high-fee markets so they don't consume slots
+                        if not self._passes_fee_filter(market, max_fee_rate):
+                            skipped_high_fee += 1
+                            continue
                         markets.append(market)
 
                     # Keyset pagination: next_cursor absent = last page
@@ -156,6 +185,8 @@ class GammaClient:
             total_found=len(markets),
             skipped_no_book=skipped_no_book,
             skipped_no_liquidity=skipped_no_liquidity,
+            skipped_high_fee=skipped_high_fee,
+            pages=pages,
             max_time_to_resolution=str(max_time_to_resolution),
         )
         return markets

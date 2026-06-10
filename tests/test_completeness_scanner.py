@@ -923,3 +923,41 @@ class TestFeeGate:
         scanner = CompletenessScanner(cfg, MockTracker([cheap, pricey]))
         diag = scanner._get_market_diagnostic()
         assert diag["markets_fee_blocked"] == 1
+
+
+# ── Tests: Discovery fee filter (GammaClient._passes_fee_filter) ──────
+
+
+class TestDiscoveryFeeFilter:
+    """Markets are fee-filtered DURING pagination so high-fee (crypto) markets
+    don't exhaust the discovery quota before low-fee categories appear."""
+
+    def _market(self, fee_rate):
+        from src.gamma_client import Market
+        from datetime import datetime, timezone
+        return Market(
+            condition_id="0x1", question="q", slug="s",
+            yes_token_id="y", no_token_id="n",
+            yes_price=0.5, no_price=0.5,
+            end_date=datetime.now(timezone.utc),
+            active=True, closed=False, enable_order_book=True,
+            fee_rate=fee_rate,
+        )
+
+    def test_high_fee_blocked(self):
+        from src.gamma_client import GammaClient
+        assert GammaClient._passes_fee_filter(self._market(0.072), 0.05) is False
+
+    def test_low_fee_passes(self):
+        from src.gamma_client import GammaClient
+        assert GammaClient._passes_fee_filter(self._market(0.0), 0.05) is True
+        assert GammaClient._passes_fee_filter(self._market(0.05), 0.05) is True
+
+    def test_unknown_fee_passes(self):
+        """fee_rate=-1 (no data) passes — the scanner's gate decides later."""
+        from src.gamma_client import GammaClient
+        assert GammaClient._passes_fee_filter(self._market(-1.0), 0.05) is True
+
+    def test_no_filter_passes_everything(self):
+        from src.gamma_client import GammaClient
+        assert GammaClient._passes_fee_filter(self._market(0.072), None) is True

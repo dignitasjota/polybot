@@ -1246,6 +1246,12 @@ Solo leíamos `result.get("orderID", "")` → vacío → `status: "failed"`, per
 
 Materializa la recomendación anterior: `_evaluate_market()` descarta mercados cuyo taker `fee_rate` supere `max_fee_rate` (default 0.05). Excluye crypto (0.072) — donde el margen neto tras fees es ~1¢/share sobre los mercados Up/Down de 5 min, justo los de peor legging risk — y permite geopolitics/sports/politics/weather. El `fee_rate` por mercado (Gamma API) tiene prioridad sobre la categoría fallback del config; mercados con `feesEnabled=false` (rate 0) pasan aunque la cuenta esté configurada como crypto. Diagnóstico `markets_fee_blocked` en `_get_market_diagnostic()`. Para volver al comportamiento anterior: `max_fee_rate = 1.0`. **Tests**: +`TestFeeGate` (5). **142 pasando**.
 
+### Completeness: discovery ampliado a categorías de fee bajo (Junio 11, 2026)
+
+**Problema**: con el fee gate activo, el universo monitorizado quedaba casi vacío de mercados operables. `_discover_completeness_markets()` ya pedía todas las categorías (`tag=""`), pero la Gamma API ordena por `endDate ascending` — los crypto Up/Down de 5 min (cierran en minutos) llenan las primeras páginas y **agotan el cupo de 500** antes de que aparezcan geopolitics/politics (cierran en días). Filtrar después del fetch no sirve: hay que filtrar durante la paginación.
+
+**Solución**: `fetch_active_markets()` acepta `max_fee_rate` opcional — los mercados con fee **conocido** por encima del umbral se saltan **durante la paginación** (no consumen plazas de `max_results`; nuevo contador `skipped_high_fee` y cap defensivo `max_pages=50`). Los de fee desconocido (`fee_rate=-1`) pasan y los decide el gate del scanner. `main._discover_completeness_markets()` lee el `max_fee_rate` de la cuenta completeness (`_completeness_max_fee_rate()`, default 0.05) para que discovery y evaluación usen el mismo criterio. El discovery del directional no cambia (sigue trayendo crypto para su propia estrategia; el tracker compartido mantiene ambos universos). **Tests**: +`TestDiscoveryFeeFilter` (4). **146 pasando**.
+
 ---
 
 ## Idioma

@@ -421,13 +421,28 @@ class Bot:
                 self.log.warning("ws_resubscribe_failed", error=str(e),
                                 msg="New markets won't receive WS prices until reconnect")
 
+    def _completeness_max_fee_rate(self) -> float:
+        """Read max_fee_rate from the first completeness account (default 0.05).
+
+        Mirrors CompletenessConfig.max_fee_rate so discovery and evaluation
+        agree on which fee categories are operable.
+        """
+        for acc in self.accounts:
+            raw = acc.account.strategies.get("completeness")
+            if raw is not None:
+                return float(raw.get("max_fee_rate", 0.05))
+        return 0.05
+
     async def _discover_completeness_markets(self):
-        """Fetch markets from ALL categories for completeness arbitrage.
+        """Fetch low-fee markets from ALL categories for completeness arbitrage.
 
         Unlike _discover_markets() (crypto-only, short time-to-resolution),
-        this fetches broadly: no tag filter, longer time horizon.
-        Completeness gaps can appear in any category, especially in low-fee
-        categories like geopolitics (0%) and sports (3%).
+        this fetches broadly: no tag filter, longer time horizon. Completeness
+        gaps only survive fees in low-fee categories — geopolitics (0%),
+        sports (3%), politics (4%) — so high-fee markets (crypto 7.2%) are
+        filtered DURING pagination. Without that, endDate-ascending ordering
+        fills the whole quota with 5-min crypto markets that the scanner's
+        max_fee_rate gate would discard anyway, crowding out the operable ones.
         """
         from datetime import timedelta
 
@@ -435,6 +450,7 @@ class Bot:
             max_time_to_resolution=timedelta(hours=168),  # 7 days — more markets to monitor
             max_results=500,
             tag="",  # No tag filter — all categories
+            max_fee_rate=self._completeness_max_fee_rate(),
         )
 
         new_count = 0
