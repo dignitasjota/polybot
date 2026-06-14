@@ -30,9 +30,10 @@ class WeatherConfig(StrategyConfig):
 
     # Edge thresholds
     min_edge: float = 0.10             # Minimum edge (forecast_prob - market_price) to trade (10%)
-    min_forecast_prob: float = 0.30    # Don't bet on outcomes with <30% forecast prob — require
-                                        # real conviction, not cheap tails (was 0.15: too low, let
-                                        # long-shots through that dominated PnL by luck)
+    min_forecast_prob: float = 0.40    # Don't bet on outcomes with <40% forecast prob — require
+                                        # real conviction, not cheap tails. 0.15→0.30→0.40: the
+                                        # discriminator showed the 0.25-0.40 bucket at 0/5 (pure
+                                        # loss) while >=0.40 ran 50% win rate.
     min_price: float = 0.10            # Floor on outcome price: never buy below 10¢. Long-shots at
                                         # 2-6¢ are noise/lottery tickets (47× payouts on flukes);
                                         # they also rarely fill in live. (was a hardcoded 2¢)
@@ -74,7 +75,7 @@ class WeatherConfig(StrategyConfig):
             forecast_cache_ttl=float(raw.get("forecast_cache_ttl", 3600.0)),
             max_forecast_days=int(raw.get("max_forecast_days", 2)),
             min_edge=float(raw.get("min_edge", 0.10)),
-            min_forecast_prob=float(raw.get("min_forecast_prob", 0.30)),
+            min_forecast_prob=float(raw.get("min_forecast_prob", 0.40)),
             min_price=float(raw.get("min_price", 0.10)),
             min_agreement=float(raw.get("min_agreement", 0.30)),
             max_price=float(raw.get("max_price", 0.65)),

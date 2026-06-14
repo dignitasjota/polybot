@@ -690,7 +690,7 @@ bet_size = min(bankroll × kelly × kelly_multiplier, max_bet_per_trade)
 
 Un trade se ejecuta solo si:
 1. `edge >= min_edge`
-2. `forecast_prob >= min_forecast_prob` (30%) — exige convicción real, no colas baratas
+2. `forecast_prob >= min_forecast_prob` (40%) — exige convicción real, no colas baratas
 3. `market_price <= max_price` (65¢) — asegura upside suficiente
 4. `market_price >= min_price` (10¢) — descarta long-shots (ruido/lotería que casi no fillean en live)
 5. `agreement >= min_agreement` (30%) — al menos 30% de miembros coinciden en un bucket
@@ -724,7 +724,7 @@ La cuenta weather se muestra en el dashboard principal con:
 | forecast_cache_ttl | 3600 | Cache de forecasts: 1 hora |
 | max_forecast_days | 2 | Solo mercados a ≤2 días (ensemble más fiable) |
 | min_edge | 0.10 | Mínimo 10% edge para apostar |
-| min_forecast_prob | 0.30 | Exige convicción real (subido de 0.15); evita colas baratas |
+| min_forecast_prob | 0.40 | Exige convicción real (0.15→0.30→0.40); el discriminador mostró el bucket 0.25-0.40 en 0/5 (puro perdedor) y ≥0.40 al 50% de win rate |
 | min_price | 0.10 | Piso de precio: nunca comprar bajo 10¢ (long-shots = ruido/lotería) |
 | min_agreement | 0.30 | Al menos 30% de modelos (15/50) deben coincidir |
 | max_price | 0.65 | No comprar outcomes >65¢ (más upside) |
