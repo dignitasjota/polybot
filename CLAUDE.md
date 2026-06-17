@@ -730,7 +730,7 @@ La cuenta weather se muestra en el dashboard principal con:
 | max_price | 0.65 | No comprar outcomes >65¢ (más upside) |
 | use_metar_resolution | true | Resolver contra METAR real (IEM ASOS por ICAO); fallback a Open-Meteo |
 | bias_correction | true | Recentrar el forecast con el bias medido por estación (METAR vs modelo crudo) |
-| bias_min_samples | 10 | Verificaciones mínimas por estación antes de aplicar corrección |
+| bias_min_samples | 6 | Verificaciones mínimas por estación antes de aplicar corrección (bajado de 10: los sesgos medidos son grandes y consistentes —jeddah −1.78°C, China caliente— y esperar a 10 cuesta pérdidas; el clamp protege la cola ruidosa) |
 | bias_max_correction_c | 3.0 | Tope del shift (°C) — un bias mayor sugiere problema de datos, no drift real |
 | forecast_uncertainty_c | 2.0 | σ del kernel dressing (°C): infla la dispersión del ensemble para cubrir sesgo + error de representatividad. Subir = más conservador (menos trades) |
 | max_bet_per_trade | 15.0 | $15 max por trade (Kelly sizing es el driver real) |

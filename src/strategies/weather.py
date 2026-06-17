@@ -53,7 +53,10 @@ class WeatherConfig(StrategyConfig):
     # Per-station bias correction (the dressing widens; this recenters)
     bias_correction: bool = True       # Shift member temps by the measured station bias
                                         # (mean METAR-vs-raw-forecast error) before bucketing
-    bias_min_samples: int = 10         # Verified forecasts required before correcting a station
+    bias_min_samples: int = 6          # Verified forecasts required before correcting a station.
+                                        # 6 (was 10): measured biases are large and consistent
+                                        # (jeddah -1.78, China hot) and waiting costs real losses;
+                                        # the ±bias_max_correction_c clamp guards the noisy tail.
     bias_max_correction_c: float = 3.0  # Clamp on the shift — larger measured bias more likely
                                          # signals a data problem than real model drift
 
@@ -82,7 +85,7 @@ class WeatherConfig(StrategyConfig):
             forecast_uncertainty_c=float(raw.get("forecast_uncertainty_c", 2.0)),
             use_metar_resolution=bool(raw.get("use_metar_resolution", True)),
             bias_correction=bool(raw.get("bias_correction", True)),
-            bias_min_samples=int(raw.get("bias_min_samples", 10)),
+            bias_min_samples=int(raw.get("bias_min_samples", 6)),
             bias_max_correction_c=float(raw.get("bias_max_correction_c", 3.0)),
             max_bet_per_trade=float(raw.get("max_bet_per_trade", 15.0)),
             bankroll=float(raw.get("bankroll", 300.0)),
