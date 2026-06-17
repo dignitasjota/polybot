@@ -1275,6 +1275,19 @@ Materializa la recomendación anterior: `_evaluate_market()` descarta mercados c
 
 **Solución**: `fetch_active_markets()` acepta `max_fee_rate` opcional — los mercados con fee **conocido** por encima del umbral se saltan **durante la paginación** (no consumen plazas de `max_results`; nuevo contador `skipped_high_fee` y cap defensivo `max_pages=50`). Los de fee desconocido (`fee_rate=-1`) pasan y los decide el gate del scanner. `main._discover_completeness_markets()` lee el `max_fee_rate` de la cuenta completeness (`_completeness_max_fee_rate()`, default 0.05) para que discovery y evaluación usen el mismo criterio. El discovery del directional no cambia (sigue trayendo crypto para su propia estrategia; el tracker compartido mantiene ambos universos). **Tests**: +`TestDiscoveryFeeFilter` (4). **146 pasando**.
 
+### Verificación del changelog de Polymarket (Junio 18, 2026)
+
+Auditoría del [changelog](https://docs.polymarket.com/changelog) contra el código. **Conclusión: el bot está al día hasta junio 2026; ninguna entrada reciente requiere cambios de código.** Toda la oleada estructural (CLOB V2, pUSD, Fees V2 por categoría, keyset pagination, límite keyset 100) ya estaba migrada. Verificado entrada por entrada:
+
+- **Jun 15 — `DELETE /orders` ≤1000 IDs/request**: no nos afecta; no usamos batch-cancel con listas de IDs (solo `cancel_all()` sin IDs y `cancel_order(OrderPayload(orderID=id))` individual).
+- **Jun 1 — rate limits ↑ (200/s)**: beneficioso; completeness escanea cada 2s y liquidity refresca cada 15s, muy por debajo.
+- **May 14 — keyset `limit` máx 100**: ya cumplido (`gamma_client` usa `page_size=min(100,...)`; weather pide `limit:"100"` en `/events/keyset`).
+- **Apr 28 — sin compatibilidad V1**: cero imports V1 (todo `py_clob_client_v2`; los `py_clob_client` restantes son comentarios).
+- **Mar 31 — fees desde `feeSchedule`**: `gamma_client` ya lee `feeSchedule.rate` primero con fallback a `feeType`+`feesEnabled`.
+- **Sept 15 '25 — cambio estructural en `price_change` WS**: `_handle_price_change` cubre `price_changes`/`changes`/evento único.
+
+**Dependencia externa a vigilar (no es código nuestro)**: el order-struct V2 (timestamp ms, EIP-712 domain v2) lo construye `py-clob-client-v2` (fijado `>=1.0.0` en requirements). Confirmar que el contenedor desplegado tenga la última v2 del paquete; un SDK desactualizado podría fallar firmas. **Matiz de rewards**: programas de liquidity con duración mínima de orden (e.g. ≥3.5s, March Madness) — `quote_refresh_s=15` cumple, pero `reprice_threshold` podría cancelar antes de ese umbral en mercados muy volátiles.
+
 ---
 
 ## Idioma
