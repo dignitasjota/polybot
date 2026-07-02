@@ -1290,7 +1290,7 @@ Auditoría del [changelog](https://docs.polymarket.com/changelog) contra el cód
 
 ### Pivote estratégico: solo liquidity + fixes del bloque liquidity (Julio 2, 2026)
 
-**Decisión operativa**: tras validar que las cinco estrategias pierden dinero en real y analizar el porqué (ver tabla), el proyecto se centra **exclusivamente en liquidity** — la única cuyo modelo de ingreso es un **subsidio** (rewards de Polymarket por cotizar) y no requiere ganarle información o latencia al mercado. Las otras cuatro cuentas quedan `enabled = false` en config.toml:
+**Decisión operativa**: tras validar que las cinco estrategias pierden dinero en real y analizar el porqué (ver tabla), el **foco activo de mejora** pasa a **liquidity** — la única cuyo modelo de ingreso es un **subsidio** (rewards de Polymarket por cotizar) y no requiere ganarle información o latencia al mercado. Las otras cuatro cuentas **se mantienen `enabled = true` en `paper`** (no se desactivan): siguen corriendo simuladas para poder seguir iterándolas más adelante, sin arriesgar capital. Por qué ninguna tiene edge hoy:
 
 | Estrategia | Edge asumido | Por qué no existe |
 |---|---|---|
@@ -1325,7 +1325,7 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 `executor.py:1445` — `update_pnl()` no tiene ningún llamador. `_daily_pnl` queda en 0.0 siempre → el check de stop-loss nunca dispara. Ninguna estrategia implementa el suyo. El parámetro del panel es teatro.
 
 **[PARCIAL — liquidity corregido Jul 2] C2 — Kill switch no cubre completeness, liquidity ni weather**
-> Jul 2, 2026: `LiquidityProvider` recibe el `RiskConfig` compartido y honra `kill_switch` (cancel-all + stop quoting en `_refresh_all`, guard en `_place_order`); el panel propaga `kill_switch` a TODOS los runners (`config_manager.py`). Completeness y weather siguen sin cubrir, pero están **deshabilitadas** en config.
+> Jul 2, 2026: `LiquidityProvider` recibe el `RiskConfig` compartido y honra `kill_switch` (cancel-all + stop quoting en `_refresh_all`, guard en `_place_order`); el panel propaga `kill_switch` a TODOS los runners (`config_manager.py`). Completeness y weather siguen sin cubrir el kill switch en su propio camino de ejecución, pero corren en **paper** (sin órdenes reales), así que no hay exposición real que cortar.
 `executor.py:958` — solo lo consulta `Executor._check_risk()`. Completeness (`completeness_scanner.py:630`), liquidity (`liquidity_provider.py:1621`) y weather (`weather_scanner.py:1917`) postean órdenes directamente al CLOB con su propio cliente. El botón de emergencia del panel solo detiene directional/copy.
 
 **[ABIERTO] C3 — Protección anti-apuesta-cruzada muerta (enum vs string)**
