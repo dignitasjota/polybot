@@ -326,10 +326,20 @@ min_forecast_prob = 0.40             # Exigir convicción real; subido 0.15→0.
 min_price = 0.10                     # Piso de precio: nunca comprar bajo 10¢ (long-shots = ruido/lotería)
 min_agreement = 0.30                 # Al menos 30% de los 50 modelos deben coincidir
 max_price = 0.65                     # No comprar outcomes >65¢ (más upside)
+forecast_uncertainty_c = 2.0         # σ floor del kernel dressing (°C); sigma_calibration solo puede ensancharlo
+sigma_calibration = true             # #1: σ empírico por lead_days desde verificación METAR (cura sobre-confianza)
+sigma_min_samples = 12               # Residuos verificados mínimos por lead antes de usar σ empírico
+prob_calibration = true              # #2: remapear forecast_prob → win rate histórico (isotónico + shrinkage)
+calibration_min_samples = 25         # Resultados cerrados mínimos antes de activar el calibrador
+calibration_shrink = 20.0            # Pseudo-cuenta: peso = n/(n+shrink) hacia el mapa empírico
+open_tail_haircut = 0.80             # #3: descuento a la prob de buckets de cola abierta ("or higher/below")
+discriminator_gate = true            # #4: en live, no operar un bucket de prob no calibrado
+discriminator_min_samples = 10       # Resultados mínimos en el bucket antes de que el gate pueda bloquear
 use_metar_resolution = true          # Resolver contra METAR real (IEM ASOS por ICAO), no Open-Meteo
 bias_correction = true               # Recentrar forecast con el bias medido por estación (METAR vs modelo)
 bias_min_samples = 6                 # Verificaciones mínimas antes de corregir (bajado de 10: sesgos grandes y consistentes; esperar cuesta)
-bias_max_correction_c = 3.0          # Tope del shift (°C) — bias mayor sugiere problema de datos
+bias_max_correction_c = 4.0          # #5: tope del shift (°C), subido 3→4 (KLAX -4.31 dejaba 1.3 sin corregir)
+bias_exclude_threshold_c = 6.0       # #5: |bias| mayor = datos rotos → bloquear la estación (no operar)
 max_bet_per_trade = 15.0             # $15 max por trade (Kelly sizing es el driver real)
 bankroll = 300.0                     # Capital total para weather
 kelly_multiplier = 0.15              # 15% Kelly — margen para slippage y error de calibración del modelo en live

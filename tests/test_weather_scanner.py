@@ -35,7 +35,16 @@ class MockWeatherConfig:
     use_metar_resolution: bool = True
     bias_correction: bool = True
     bias_min_samples: int = 10
-    bias_max_correction_c: float = 3.0
+    bias_max_correction_c: float = 4.0
+    bias_exclude_threshold_c: float = 6.0
+    sigma_calibration: bool = True
+    sigma_min_samples: int = 12
+    prob_calibration: bool = True
+    calibration_min_samples: int = 25
+    calibration_shrink: float = 20.0
+    open_tail_haircut: float = 0.80
+    discriminator_gate: bool = True
+    discriminator_min_samples: int = 10
 
 
 @pytest.fixture
@@ -984,3 +993,199 @@ class TestVerificationRecording:
         scanner._verification[0].actual_c = 32.0
         scanner._record_forecast_verification(market, 99.0)
         assert scanner._verification[0].forecast_mean_c == pytest.approx(30.0)
+
+
+def _vrec_lead(icao, fc, actual, lead, n_jitter=0.0):
+    return VerificationRecord(
+        station_icao=icao, city="dallas",
+        target_date=date.today() - timedelta(days=lead + 1),
+        lead_days=lead, forecast_mean_c=fc, created_at=_time.time(),
+        actual_c=actual + n_jitter, verified_at=_time.time(),
+    )
+
+
+class TestEmpiricalSigma:
+    """#1 — dressing σ calibrated from verification dispersion per lead_days."""
+
+    def test_floor_when_thin(self, scanner):
+        """Below sigma_min_samples, σ stays at the configured floor."""
+        scanner._config.forecast_uncertainty_c = 2.0
+        scanner._config.sigma_min_samples = 12
+        scanner._verification = [_vrec_lead("KDAL", 30.0, 30.0, 1) for _ in range(5)]
+        assert scanner._residual_sigma(1) == pytest.approx(2.0)
+
+    def test_widens_to_empirical(self, scanner):
+        """With enough samples and large spread, σ widens above the floor."""
+        scanner._config.forecast_uncertainty_c = 2.0
+        scanner._config.sigma_min_samples = 10
+        # Residuals spread ±4°C around the station mean → empirical std ~4 > 2.
+        recs = []
+        for i in range(20):
+            err = 4.0 if i % 2 == 0 else -4.0
+            recs.append(_vrec_lead("KDAL", 30.0, 30.0 + err, 1))
+        scanner._verification = recs
+        sigma = scanner._residual_sigma(1)
+        assert sigma > 2.0
+        assert sigma == pytest.approx(4.0, abs=0.3)
+
+    def test_never_narrows_below_floor(self, scanner):
+        """A tight model (low dispersion) cannot shrink σ below the floor."""
+        scanner._config.forecast_uncertainty_c = 2.0
+        scanner._config.sigma_min_samples = 10
+        scanner._verification = [_vrec_lead("KDAL", 30.0, 30.0, 1) for _ in range(15)]
+        assert scanner._residual_sigma(1) == pytest.approx(2.0)
+
+    def test_per_lead_isolation(self, scanner):
+        """Dispersion at lead 2 doesn't affect σ at lead 1."""
+        scanner._config.forecast_uncertainty_c = 1.0
+        scanner._config.sigma_min_samples = 10
+        tight = [_vrec_lead("KDAL", 30.0, 30.0, 1) for _ in range(12)]
+        wide = [
+            _vrec_lead("EGLC", 20.0, 20.0 + (5 if i % 2 else -5), 2)
+            for i in range(12)
+        ]
+        scanner._verification = tight + wide
+        assert scanner._residual_sigma(1) == pytest.approx(1.0)   # floor
+        assert scanner._residual_sigma(2) > 3.0                   # widened
+
+    def test_disabled_returns_floor(self, scanner):
+        scanner._config.sigma_calibration = False
+        scanner._config.forecast_uncertainty_c = 2.0
+        scanner._verification = [
+            _vrec_lead("KDAL", 30.0, 30.0 + (4 if i % 2 else -4), 1)
+            for i in range(20)
+        ]
+        assert scanner._residual_sigma(1) == pytest.approx(2.0)
+
+
+class TestOpenTailHaircut:
+    """#3 — open-ended buckets get their forecast_prob discounted."""
+
+    def test_is_open_tail_detection(self):
+        assert WeatherScanner._is_open_tail("34°C or higher")
+        assert WeatherScanner._is_open_tail("21°C or below")
+        assert WeatherScanner._is_open_tail("76°F or above")
+        assert WeatherScanner._is_open_tail("90+")
+        assert not WeatherScanner._is_open_tail("18°C")
+        assert not WeatherScanner._is_open_tail("66-67°F")
+
+    def test_haircut_lowers_tail_prob(self, scanner):
+        """An open-tail outcome's effective prob is haircut before filters."""
+        scanner._config.open_tail_haircut = 0.80
+        scanner._config.min_forecast_prob = 0.40
+        # Raw 0.48 → haircut 0.384 < min_forecast_prob → filtered out.
+        market = _mk_market(["34°C or higher"], [0.20])
+        forecast = _mk_forecast({"34°C or higher": 0.48})
+        assert scanner._evaluate_market(market, forecast) is None
+
+    def test_closed_bucket_not_haircut(self, scanner):
+        """A closed range bucket keeps its full prob."""
+        scanner._config.open_tail_haircut = 0.80
+        market = _mk_market(["18°C"], [0.30])
+        forecast = _mk_forecast({"18°C": 0.50})
+        opp = scanner._evaluate_market(market, forecast)
+        assert opp is not None
+        assert opp.forecast_prob == pytest.approx(0.50)
+
+
+def _outcome(prob, won, open_tail=False):
+    return {"prob": prob, "won": won, "open_tail": open_tail, "resolved_at": _time.time()}
+
+
+class TestProbCalibration:
+    """#2 — isotonic remap of declared prob → historical win rate."""
+
+    def test_inert_until_min_samples(self, scanner):
+        scanner._config.calibration_min_samples = 25
+        scanner._outcome_history = [_outcome(0.5, i % 3 == 0) for i in range(10)]
+        assert scanner._calibrate_prob(0.5) == pytest.approx(0.5)
+
+    def test_pulls_overconfident_prob_down(self, scanner):
+        """Bets declared ~0.45 that mostly lose → calibrated prob drops."""
+        scanner._config.calibration_min_samples = 20
+        scanner._config.calibration_shrink = 5.0
+        # 40 outcomes at prob ~0.45, only 17% win (mirrors the live log).
+        hist = []
+        for i in range(40):
+            hist.append(_outcome(0.45, won=(i % 6 == 0)))  # ~16.7% win rate
+        scanner._outcome_history = hist
+        cal = scanner._calibrate_prob(0.45)
+        assert cal < 0.40  # pulled well below the declared 0.45
+
+    def test_disabled_is_identity(self, scanner):
+        scanner._config.prob_calibration = False
+        scanner._outcome_history = [_outcome(0.45, i % 6 == 0) for i in range(40)]
+        assert scanner._calibrate_prob(0.45) == pytest.approx(0.45)
+
+    def test_isotonic_is_monotone(self):
+        pts = [(0.1, 0.0), (0.2, 1.0), (0.3, 0.0), (0.4, 1.0), (0.5, 1.0)]
+        fitted = WeatherScanner._isotonic_fit(pts)
+        assert len(fitted) == len(pts)
+        assert fitted == sorted(fitted)  # non-decreasing per-point fit
+
+
+class TestDiscriminatorGate:
+    """#4 — live refuses to trade an uncalibrated forecast_prob bucket."""
+
+    def test_gate_open_when_thin(self, scanner):
+        scanner._config.discriminator_min_samples = 10
+        scanner._outcome_history = [_outcome(0.5, False) for _ in range(5)]
+        assert scanner._bucket_passes_gate(0.5) is True
+
+    def test_gate_blocks_underperforming_bucket(self, scanner):
+        """High bucket with win rate 0.167 << 0.40 lower bound → blocked."""
+        scanner._config.discriminator_min_samples = 10
+        scanner._outcome_history = [_outcome(0.5, won=(i % 6 == 0)) for i in range(24)]
+        assert scanner._bucket_passes_gate(0.5) is False
+
+    def test_gate_opens_when_calibrated(self, scanner):
+        """Bucket that wins above its lower bound → allowed."""
+        scanner._config.discriminator_min_samples = 10
+        scanner._outcome_history = [_outcome(0.5, won=(i % 2 == 0)) for i in range(24)]
+        assert scanner._bucket_passes_gate(0.5) is True  # 50% >= 0.40
+
+    def test_gate_skipped_in_simulation(self, scanner):
+        """In paper/dry_run the gate never blocks (it gathers evidence)."""
+        scanner._config.mode = "paper"
+        scanner._config.discriminator_min_samples = 10
+        scanner._outcome_history = [_outcome(0.5, won=(i % 6 == 0)) for i in range(24)]
+        market = _mk_market(["ok"], [0.30])
+        forecast = _mk_forecast({"ok": 0.50})
+        assert scanner._evaluate_market(market, forecast) is not None
+
+    def test_gate_blocks_in_live(self, scanner):
+        scanner._config.mode = "live"
+        scanner._config.discriminator_min_samples = 10
+        scanner._outcome_history = [_outcome(0.5, won=(i % 6 == 0)) for i in range(24)]
+        market = _mk_market(["ok"], [0.30])
+        forecast = _mk_forecast({"ok": 0.50})
+        assert scanner._evaluate_market(market, forecast) is None
+
+
+class TestStationExclusion:
+    """#5 — stations with broken-data bias are blocked, not clamped."""
+
+    def test_blocked_above_threshold(self, scanner):
+        scanner._config.bias_min_samples = 6
+        scanner._config.bias_exclude_threshold_c = 6.0
+        scanner._verification = [_vrec("KLAX", 25.0, 32.0) for _ in range(8)]  # +7°C
+        assert scanner._station_blocked("KLAX") is True
+
+    def test_not_blocked_within_threshold(self, scanner):
+        scanner._config.bias_min_samples = 6
+        scanner._config.bias_exclude_threshold_c = 6.0
+        scanner._verification = [_vrec("KDAL", 30.0, 34.0) for _ in range(8)]  # +4°C
+        assert scanner._station_blocked("KDAL") is False
+
+    def test_not_blocked_when_thin(self, scanner):
+        scanner._config.bias_min_samples = 6
+        scanner._verification = [_vrec("KLAX", 25.0, 32.0) for _ in range(3)]
+        assert scanner._station_blocked("KLAX") is False
+
+    def test_blocked_station_skips_evaluation(self, scanner):
+        scanner._config.bias_min_samples = 6
+        scanner._config.bias_exclude_threshold_c = 6.0
+        scanner._verification = [_vrec("KLAX", 25.0, 33.0) for _ in range(8)]
+        market = _mk_market(["ok"], [0.30], station_icao="KLAX")
+        forecast = _mk_forecast({"ok": 0.60})
+        assert scanner._evaluate_market(market, forecast) is None

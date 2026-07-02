@@ -381,6 +381,11 @@ class WeatherScanner:
         # Forecast-verification history for per-station bias correction.
         # NOT cleared on reset_stats: it's model science, independent of mode.
         self._verification: list[VerificationRecord] = []
+        # Resolved-outcome history for the probability calibrator (#2) and the
+        # discriminator gate (#4). Each entry: {prob, won, open_tail, resolved_at}.
+        # Persisted alongside verification; survives reset_stats / mode switches
+        # so the live gate has evidence the moment trades are cleared.
+        self._outcome_history: list[dict] = []
 
         # Stats
         self._total_scans = 0
@@ -1026,10 +1031,21 @@ class WeatherScanner:
                 )
                 for r in records
             ]
+            if isinstance(raw, dict):
+                self._outcome_history = [
+                    {
+                        "prob": float(o["prob"]),
+                        "won": bool(o["won"]),
+                        "open_tail": bool(o.get("open_tail", False)),
+                        "resolved_at": float(o.get("resolved_at", 0)),
+                    }
+                    for o in raw.get("outcomes", [])
+                ]
             logger.info(
                 "weather_verification_loaded",
                 records=len(self._verification),
                 verified=len([r for r in self._verification if r.actual_c is not None]),
+                outcomes=len(self._outcome_history),
             )
         except Exception as e:
             logger.warning("weather_verification_load_failed", error=str(e))
@@ -1053,7 +1069,16 @@ class WeatherScanner:
                         "verified_at": r.verified_at,
                     }
                     for r in self._verification
-                ]
+                ],
+                "outcomes": [
+                    {
+                        "prob": round(o["prob"], 4),
+                        "won": o["won"],
+                        "open_tail": o["open_tail"],
+                        "resolved_at": o["resolved_at"],
+                    }
+                    for o in self._outcome_history
+                ],
             }))
         except Exception as e:
             logger.warning("weather_verification_save_failed", error=str(e))
@@ -1150,8 +1175,173 @@ class WeatherScanner:
         if len(errors) < min_samples:
             return 0.0
         bias = sum(errors) / len(errors)
-        cap = getattr(self._config, "bias_max_correction_c", 3.0)
+        cap = getattr(self._config, "bias_max_correction_c", 4.0)
         return max(-cap, min(cap, bias))
+
+    def _station_blocked(self, icao: str) -> bool:
+        """True if a station's measured bias is so large it's likely bad data (#5).
+
+        A |bias| beyond bias_exclude_threshold_c can't be corrected by clamping
+        (the residual would still poison the buckets), so we refuse to trade it
+        rather than bet against a broken station. Only fires once the station has
+        enough verifications to trust the measurement.
+        """
+        if not icao:
+            return False
+        thresh = getattr(self._config, "bias_exclude_threshold_c", 6.0)
+        if thresh <= 0:
+            return False
+        errors = [
+            r.actual_c - r.forecast_mean_c
+            for r in self._verification
+            if r.station_icao == icao and r.actual_c is not None
+        ]
+        min_samples = getattr(self._config, "bias_min_samples", 6)
+        if len(errors) < min_samples:
+            return False
+        return abs(sum(errors) / len(errors)) > thresh
+
+    def _residual_sigma(self, lead_days: int) -> float:
+        """Empirical kernel-dressing σ (°C) for a forecast horizon (#1).
+
+        Measures the real dispersion of the bias-corrected ensemble vs METAR
+        from verification history, grouped by lead_days. Per-station systematic
+        bias is removed first (it's handled by the correction, not dispersion).
+        The configured forecast_uncertainty_c is a FLOOR: empirical evidence can
+        only WIDEN σ — curing the structural overconfidence that put declared
+        ≥0.40 bets at a 0.167 win rate — never narrow it below the safe default.
+        """
+        cfg_sigma = max(self._config.forecast_uncertainty_c, 0.01)
+        if not getattr(self._config, "sigma_calibration", True):
+            return cfg_sigma
+
+        # Per-station mean error (systematic bias) to demean residuals.
+        by_station: dict[str, list[float]] = {}
+        for r in self._verification:
+            if r.actual_c is not None:
+                by_station.setdefault(r.station_icao, []).append(
+                    r.actual_c - r.forecast_mean_c
+                )
+        station_mean = {k: sum(v) / len(v) for k, v in by_station.items()}
+
+        residuals = [
+            (r.actual_c - r.forecast_mean_c) - station_mean.get(r.station_icao, 0.0)
+            for r in self._verification
+            if r.actual_c is not None and r.lead_days == lead_days
+        ]
+        min_n = getattr(self._config, "sigma_min_samples", 12)
+        if len(residuals) < min_n:
+            return cfg_sigma
+        mean = sum(residuals) / len(residuals)
+        var = sum((x - mean) ** 2 for x in residuals) / (len(residuals) - 1)
+        return max(cfg_sigma, math.sqrt(var))
+
+    @staticmethod
+    def _is_open_tail(outcome: str) -> bool:
+        """True for open-ended buckets ('X or higher' / 'X or below') (#3)."""
+        lo = outcome.lower()
+        keys = ("or below", "or less", "or under", "or lower",
+                "or higher", "or more", "or above")
+        return any(k in lo for k in keys) or lo.strip().endswith("+")
+
+    @staticmethod
+    def _isotonic_fit(
+        points: list[tuple[float, float]], weights: list[float] | None = None
+    ) -> list[float]:
+        """Pool-Adjacent-Violators isotonic regression (weighted).
+
+        points: (x, y) sorted by x; weights optional (default 1). Returns the
+        fitted y per input point — the maximum-likelihood non-decreasing fit.
+        """
+        n = len(points)
+        if n == 0:
+            return []
+        if weights is None:
+            weights = [1.0] * n
+        blocks: list[list[float]] = []  # [sum_w*y, weight, count]
+        for (_, y), w in zip(points, weights):
+            blocks.append([y * w, w, 1])
+            while len(blocks) >= 2 and (blocks[-2][0] / blocks[-2][1]) >= (blocks[-1][0] / blocks[-1][1]):
+                swy2, w2, c2 = blocks.pop()
+                swy1, w1, c1 = blocks.pop()
+                blocks.append([swy1 + swy2, w1 + w2, c1 + c2])
+        out: list[float] = []
+        for swy, w, c in blocks:
+            out.extend([swy / w] * int(c))
+        return out
+
+    def _calibrate_prob(self, p: float) -> float:
+        """Remap a declared forecast_prob to its historical win rate (#2).
+
+        Bins resolved outcomes (0.05-wide), fits weighted isotonic regression
+        on the per-bin win rates, then blends toward identity by sample count
+        (weight = n/(n+shrink)). Inert — returns p unchanged — until
+        calibration_min_samples closed outcomes exist, so it never fires on noise.
+        Binning avoids the degenerate isotonic case when many bets share a prob.
+        """
+        if not getattr(self._config, "prob_calibration", True):
+            return p
+        hist = self._outcome_history
+        n = len(hist)
+        min_n = getattr(self._config, "calibration_min_samples", 25)
+        if n < min_n:
+            return p
+
+        bins: dict[int, list[int]] = {}  # bin_index → [wins, total]
+        for o in hist:
+            b = round(float(o["prob"]) / 0.05)
+            slot = bins.setdefault(b, [0, 0])
+            slot[1] += 1
+            if o["won"]:
+                slot[0] += 1
+        centers = sorted(bins)
+        pts = [(b * 0.05, bins[b][0] / bins[b][1]) for b in centers]
+        ws = [float(bins[b][1]) for b in centers]
+        fitted = self._isotonic_fit(pts, ws)  # monotone win rate per bin
+
+        pb = round(p / 0.05)
+        if pb <= centers[0]:
+            iso = fitted[0]
+        elif pb >= centers[-1]:
+            iso = fitted[-1]
+        else:
+            iso = fitted[-1]
+            for i, c in enumerate(centers):
+                if c >= pb:
+                    iso = fitted[i]
+                    break
+
+        shrink = getattr(self._config, "calibration_shrink", 20.0)
+        w = n / (n + shrink)
+        return (1 - w) * p + w * iso
+
+    def _bucket_passes_gate(self, prob: float) -> bool:
+        """Discriminator gate (#4): is the forecast_prob bucket calibrated enough to bet?
+
+        Blocks (live only — callers skip the gate when simulating) any bet whose
+        forecast_prob bucket has resolved below its own lower bound, once the
+        bucket has discriminator_min_samples of evidence. Uses durable outcome
+        history so the gate keeps protecting live trading across mode resets.
+        """
+        if not getattr(self._config, "discriminator_gate", True):
+            return True
+        lo = 0.40 if prob >= 0.40 else (0.25 if prob >= 0.25 else 0.0)
+        hi = 0.0 if lo == 0.40 else (0.40 if lo == 0.25 else 0.25)
+        wins = losses = 0
+        for o in self._outcome_history:
+            op = float(o["prob"])
+            in_bucket = op >= lo and (hi == 0.0 or op < hi)
+            if not in_bucket:
+                continue
+            if o["won"]:
+                wins += 1
+            else:
+                losses += 1
+        n = wins + losses
+        min_n = getattr(self._config, "discriminator_min_samples", 10)
+        if n < min_n:
+            return True  # not enough evidence to justify blocking
+        return (wins / n) >= lo
 
     async def _get_forecast(self, market: WeatherMarket) -> ForecastDistribution | None:
         """Get ensemble forecast for a market, using cache if fresh."""
@@ -1297,8 +1487,10 @@ class WeatherScanner:
         if bias_c:
             ensemble_max_temps = [t + bias_c for t in ensemble_max_temps]
 
-        # Build probability distribution over outcome buckets
-        buckets = self._build_distribution(ensemble_max_temps, outcomes)
+        # Build probability distribution over outcome buckets. Dressing width is
+        # the empirically-measured error at this horizon (#1), not a fixed guess.
+        lead_days = max(0, (target_date - today).days)
+        buckets = self._build_distribution(ensemble_max_temps, outcomes, lead_days)
 
         # Calculate agreement (how concentrated the distribution is)
         probs = list(buckets.values())
@@ -1317,7 +1509,7 @@ class WeatherScanner:
         )
 
     def _build_distribution(
-        self, max_temps: list[float], outcomes: list[str]
+        self, max_temps: list[float], outcomes: list[str], lead_days: int = 0
     ) -> dict[str, float]:
         """Convert ensemble max temps into probability per outcome bucket.
 
@@ -1394,7 +1586,7 @@ class WeatherScanner:
         # fake edges. σ_cal inflates uncertainty to cover model bias + grid-vs-
         # station representativeness error (~1-1.5°C measured vs the resolution
         # source). Each member then contributes a realistic spread of mass.
-        sigma = max(self._config.forecast_uncertainty_c, 0.01)
+        sigma = self._residual_sigma(lead_days)
         if unit == "F":
             sigma *= 9 / 5  # °C uncertainty → °F scale (difference, no +32 offset)
         denom = sigma * math.sqrt(2)
@@ -1469,13 +1661,27 @@ class WeatherScanner:
         """
         min_price = self._config.min_price
 
+        # Refuse stations whose measured bias is too large to trust (#5).
+        if self._station_blocked(market.station_icao):
+            logger.info(
+                "weather_station_blocked",
+                city=market.city_slug,
+                station=market.station_icao,
+            )
+            return None
+
         candidates = []  # (forecast_prob, edge, idx, label, market_price)
         for i, outcome in enumerate(market.outcomes):
             if i >= len(market.outcome_prices):
                 break
 
             market_price = market.outcome_prices[i]
+            # Raw bucket mass, then discount open tails (#3) and remap through the
+            # historical calibration curve (#2) before any filter sees it.
             forecast_prob = forecast.buckets.get(outcome, 0.0)
+            if self._is_open_tail(outcome):
+                forecast_prob *= self._config.open_tail_haircut
+            forecast_prob = self._calibrate_prob(forecast_prob)
             edge = forecast_prob - market_price
 
             # Per-outcome filters — only outcomes clearing all of these qualify.
@@ -1503,6 +1709,16 @@ class WeatherScanner:
 
         # Agreement filter: if models disagree strongly, skip
         if forecast.agreement < self._config.min_agreement:
+            return None
+
+        # Discriminator gate (#4): in live, don't trade a prob bucket the model
+        # hasn't proven it can call. dry_run/paper keep trading to gather evidence.
+        if not self.should_simulate and not self._bucket_passes_gate(best_forecast_prob):
+            logger.info(
+                "weather_discriminator_gate_block",
+                city=market.city_slug,
+                forecast_prob=round(best_forecast_prob, 3),
+            )
             return None
 
         # Expected value: prob × $1.00 - cost = prob - price
@@ -2042,6 +2258,15 @@ class WeatherScanner:
             trade.resolved_at = now
             self._total_pnl += trade.pnl
 
+            # Durable outcome record for the calibrator (#2) and gate (#4).
+            # forecast_prob here is the adjusted prob actually used to bet.
+            self._outcome_history.append({
+                "prob": trade.forecast_prob,
+                "won": trade.status == "won",
+                "open_tail": self._is_open_tail(trade.outcome),
+                "resolved_at": now,
+            })
+
             logger.info(
                 "weather_trade_resolved",
                 trade_id=trade.trade_id,
@@ -2054,7 +2279,10 @@ class WeatherScanner:
                 pnl=f"${trade.pnl:.2f}",
             )
 
-        # Persist: resolved trades removed from file, pending ones kept
+        # Persist: resolved trades removed from file, pending ones kept.
+        # Also flush outcome history (calibrator/gate evidence) if anything resolved.
+        if any(t.status in ("won", "lost") for t in self._trades):
+            self._save_verification()
         self._save_pending_trades()
 
     @staticmethod
@@ -2450,6 +2678,23 @@ class WeatherScanner:
                 "active": len(errors) >= min_samples,
             }
 
+        # Effective dressing σ per horizon (#1) — shows how much the empirical
+        # calibration widened the configured floor.
+        dressing_sigma_c = {
+            f"lead_{ld}": round(self._residual_sigma(ld), 2) for ld in (0, 1, 2)
+        }
+        # Calibrator (#2) / gate (#4) status from durable outcome history.
+        n_hist = len(self._outcome_history)
+        calibration = {
+            "outcomes": n_hist,
+            "prob_calibration_active": (
+                getattr(self._config, "prob_calibration", True)
+                and n_hist >= getattr(self._config, "calibration_min_samples", 25)
+            ),
+            "sample_at_0.45": round(self._calibrate_prob(0.45), 3),
+            "gate_open_high": self._bucket_passes_gate(0.45),
+        }
+
         return {
             "running": self._running,
             "mode": self._config.mode,
@@ -2467,6 +2712,8 @@ class WeatherScanner:
             "forecast_cache": active_forecasts[:10],
             "discriminator_by_forecast_prob": discriminator,
             "station_bias": station_bias,
+            "dressing_sigma_c": dressing_sigma_c,
+            "calibration": calibration,
             "verification_records": len(self._verification),
             "recent_trades": [_ser(t) for t in open_trades[:20]],
             "resolved_trades": [_ser(t, include_resolved=True) for t in closed_trades[:20]],

@@ -43,6 +43,30 @@ class WeatherConfig(StrategyConfig):
                                           # ensemble spread to cover model bias + grid-vs-station
                                           # error. Ensemble alone is underdispersive (~0.25°C),
                                           # real error vs the resolution source is ~1-1.5°C.
+                                          # Acts as a FLOOR: sigma_calibration can only widen it.
+
+    # Empirical σ calibration (#1): derive the dressing width from measured
+    # ensemble-vs-METAR dispersion per lead_days instead of trusting the fixed
+    # forecast_uncertainty_c. Cures the structural overconfidence (declared
+    # prob ≥0.40 resolved at 0.167 win rate).
+    sigma_calibration: bool = True
+    sigma_min_samples: int = 12        # Min verified residuals per lead before trusting empirical σ
+
+    # Probability calibration map (#2): isotonic remap of declared forecast_prob
+    # → historical win rate, blended toward identity by sample count. Inert
+    # until calibration_min_samples closed outcomes exist.
+    prob_calibration: bool = True
+    calibration_min_samples: int = 25
+    calibration_shrink: float = 20.0   # Pseudo-count: weight = n/(n+shrink) toward the empirical map
+
+    # Open-tail haircut (#3): "X or higher"/"X or below" buckets leak mass to the
+    # ±999 sentinels and are where every loser landed. Discount their forecast_prob.
+    open_tail_haircut: float = 0.80    # Multiply open-ended bucket prob by this before filters
+
+    # Discriminator gate (#4): in live, refuse to trade a forecast_prob bucket whose
+    # historical win rate is below the bucket's lower bound (i.e. not yet calibrated).
+    discriminator_gate: bool = True
+    discriminator_min_samples: int = 10  # Min closed outcomes in a bucket before the gate can block
 
     # Resolution source
     use_metar_resolution: bool = True  # Resolve dry_run/paper trades against real METAR observations
@@ -57,8 +81,10 @@ class WeatherConfig(StrategyConfig):
                                         # 6 (was 10): measured biases are large and consistent
                                         # (jeddah -1.78, China hot) and waiting costs real losses;
                                         # the ±bias_max_correction_c clamp guards the noisy tail.
-    bias_max_correction_c: float = 3.0  # Clamp on the shift — larger measured bias more likely
-                                         # signals a data problem than real model drift
+    bias_max_correction_c: float = 4.0  # Clamp on the shift (#5, raised 3.0→4.0): KLAX measured
+                                         # -4.31°C and a ±3 clamp left 1.3°C uncorrected. Stations
+                                         # beyond bias_exclude_threshold_c are dropped, not clamped.
+    bias_exclude_threshold_c: float = 6.0  # |raw bias| above this = broken data → block the station
 
     # Bet sizing
     max_bet_per_trade: float = 15.0    # Max $ per trade (Kelly sizing is the real driver)
@@ -83,10 +109,19 @@ class WeatherConfig(StrategyConfig):
             min_agreement=float(raw.get("min_agreement", 0.30)),
             max_price=float(raw.get("max_price", 0.65)),
             forecast_uncertainty_c=float(raw.get("forecast_uncertainty_c", 2.0)),
+            sigma_calibration=bool(raw.get("sigma_calibration", True)),
+            sigma_min_samples=int(raw.get("sigma_min_samples", 12)),
+            prob_calibration=bool(raw.get("prob_calibration", True)),
+            calibration_min_samples=int(raw.get("calibration_min_samples", 25)),
+            calibration_shrink=float(raw.get("calibration_shrink", 20.0)),
+            open_tail_haircut=float(raw.get("open_tail_haircut", 0.80)),
+            discriminator_gate=bool(raw.get("discriminator_gate", True)),
+            discriminator_min_samples=int(raw.get("discriminator_min_samples", 10)),
             use_metar_resolution=bool(raw.get("use_metar_resolution", True)),
             bias_correction=bool(raw.get("bias_correction", True)),
             bias_min_samples=int(raw.get("bias_min_samples", 6)),
-            bias_max_correction_c=float(raw.get("bias_max_correction_c", 3.0)),
+            bias_max_correction_c=float(raw.get("bias_max_correction_c", 4.0)),
+            bias_exclude_threshold_c=float(raw.get("bias_exclude_threshold_c", 6.0)),
             max_bet_per_trade=float(raw.get("max_bet_per_trade", 15.0)),
             bankroll=float(raw.get("bankroll", 300.0)),
             kelly_multiplier=float(raw.get("kelly_multiplier", 0.30)),
@@ -174,10 +209,19 @@ class WeatherStrategy(Strategy):
             "min_agreement": cfg.min_agreement,
             "max_price": cfg.max_price,
             "forecast_uncertainty_c": cfg.forecast_uncertainty_c,
+            "sigma_calibration": cfg.sigma_calibration,
+            "sigma_min_samples": cfg.sigma_min_samples,
+            "prob_calibration": cfg.prob_calibration,
+            "calibration_min_samples": cfg.calibration_min_samples,
+            "calibration_shrink": cfg.calibration_shrink,
+            "open_tail_haircut": cfg.open_tail_haircut,
+            "discriminator_gate": cfg.discriminator_gate,
+            "discriminator_min_samples": cfg.discriminator_min_samples,
             "use_metar_resolution": cfg.use_metar_resolution,
             "bias_correction": cfg.bias_correction,
             "bias_min_samples": cfg.bias_min_samples,
             "bias_max_correction_c": cfg.bias_max_correction_c,
+            "bias_exclude_threshold_c": cfg.bias_exclude_threshold_c,
             "max_bet_per_trade": cfg.max_bet_per_trade,
             "bankroll": cfg.bankroll,
             "kelly_multiplier": cfg.kelly_multiplier,
