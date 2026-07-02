@@ -1288,6 +1288,169 @@ Auditoría del [changelog](https://docs.polymarket.com/changelog) contra el cód
 
 **Dependencia externa a vigilar (no es código nuestro)**: el order-struct V2 (timestamp ms, EIP-712 domain v2) lo construye `py-clob-client-v2` (fijado `>=1.0.0` en requirements). Confirmar que el contenedor desplegado tenga la última v2 del paquete; un SDK desactualizado podría fallar firmas. **Matiz de rewards**: programas de liquidity con duración mínima de orden (e.g. ≥3.5s, March Madness) — `quote_refresh_s=15` cumple, pero `reprice_threshold` podría cancelar antes de ese umbral en mercados muy volátiles.
 
+### Pivote estratégico: solo liquidity + fixes del bloque liquidity (Julio 2, 2026)
+
+**Decisión operativa**: tras validar que las cinco estrategias pierden dinero en real y analizar el porqué (ver tabla), el proyecto se centra **exclusivamente en liquidity** — la única cuyo modelo de ingreso es un **subsidio** (rewards de Polymarket por cotizar) y no requiere ganarle información o latencia al mercado. Las otras cuatro cuentas quedan `enabled = false` en config.toml:
+
+| Estrategia | Edge asumido | Por qué no existe |
+|---|---|---|
+| Weather | Forecast > mercado | Mismo dato público (ECMWF); calibración peor que el mercado (win rate 0.167 vs prob declarada ≥0.40 → winner's curse: el filtro de edge selecciona los peores errores del modelo) |
+| Closing arb | Precio < prob real | Precio ≈ prob real; fills adversamente seleccionados; EV ≈ −fees |
+| Up/Down | Lag Polymarket-Binance | Carrera de latencia perdida desde un VPS con polling |
+| Copy | Skill del trader | Slippage (500ms-120s) > edge; sesgo de supervivencia en la selección de wallets |
+| Completeness | YES+NO < $1 | Gaps reales capturados por bots de ms; los detectados a 2s son asks stale |
+
+**Fixes aplicados al bloque liquidity** (los 4 hallazgos de la auditoría que corrompían su operativa):
+
+1. **M4 — signo del adverse selection (NO)**: `max(0, midpoint - (1 - fill_price)) × size`. Antes cada fill NO benigno computaba como pérdida adversa (y el adverso real como 0) → `adverse_ratio` inflado → el bot abandonaba los mercados buenos y se quedaba en los malos. Era la métrica de control de la decisión más importante (dónde cotizar) y estaba invertida.
+2. **A2+B1 — fills parciales**: `QuoteOrder.size_matched_seen` registra solo el **delta** de fill (get_order devuelve acumulado); en fill parcial se **cancela el remanente** (`_cancel_partial_remainder`, sin recursión) antes de limpiar la referencia — ya no quedan órdenes huérfanas llenándose sin tracking mientras se coloca quote duplicada.
+3. **#13 — contabilidad del auto-exit**: la SELL de rebalanceo se trackea en `pos.exit_order` (con `ref_price` = fair value al colocarla). El inventario se descuenta y la pérdida se registra (`exit_loss` en `LiquidityMetrics`, incluida en `total_loss`/`net_pnl`) **solo al confirmarse el fill** (`_check_exit_fills`, cada ciclo). Si no llena al timeout → cancel + reintento con precio fresco. Antes: inventario descontado al colocar (tokens reales sin tracking si no llenaba) y pérdida invisible para las métricas.
+4. **C2 (parcial) — kill switch**: `LiquidityProvider` recibe el `RiskConfig` compartido de la cuenta; con `kill_switch=true` cancela todo y deja de cotizar (`_refresh_all`), con guard adicional en `_place_order`. El panel ahora propaga `kill_switch` a **todos** los runners (antes solo directional).
+
+**Fixes menores de paso**: default de `quote_refresh_s` en `from_dict` sincronizado con el dataclass (120→30); multiplicadores del rebalanceo mild 1.15/0.9 → 1.25/0.9 (la asimetría de ±0.5¢ desaparecía con el redondeo al tick de 2 decimales — mild no hacía nada); `LiquidityStrategy` tolera contexts sin `_executor`; test de config desacoplado del nombre de cuenta.
+
+**Tests**: +12 (`test_adverse_no_side_*`, `test_partial_fill_*`, `test_full_fill_*`, `test_repeated_check_*`, `test_exit_*`, `test_auto_exit_skips_*`, `test_kill_switch_*`). **Suite liquidity_provider: 55/55 verde** (incluidos los 6 preexistentes, ahora arreglados). Los 2 fallos restantes en `test_reward_scanner.py` son tests de integración contra la API real (requieren red).
+
+**Plan de validación**: live con capital pequeño ($100-150) durante 3-4 semanas midiendo rewards reales (Data API) vs pérdidas por fills con las métricas ya honestas. Escalar solo si `net_pnl > 0` sostenido y fill rate <2-3%. Liquidity **no** se puede validar en paper: los rewards solo se devengan con órdenes reales en el book.
+
+### Auditoría de seguridad y calidad (Julio 2, 2026)
+
+Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos — pendientes de corrección.**
+
+---
+
+#### 🔴 Críticos (pérdida de dinero real / control de emergencia roto)
+
+**[ABIERTO] C1 — `max_daily_loss` es letra muerta en todo el bot**
+`executor.py:1445` — `update_pnl()` no tiene ningún llamador. `_daily_pnl` queda en 0.0 siempre → el check de stop-loss nunca dispara. Ninguna estrategia implementa el suyo. El parámetro del panel es teatro.
+
+**[PARCIAL — liquidity corregido Jul 2] C2 — Kill switch no cubre completeness, liquidity ni weather**
+> Jul 2, 2026: `LiquidityProvider` recibe el `RiskConfig` compartido y honra `kill_switch` (cancel-all + stop quoting en `_refresh_all`, guard en `_place_order`); el panel propaga `kill_switch` a TODOS los runners (`config_manager.py`). Completeness y weather siguen sin cubrir, pero están **deshabilitadas** en config.
+`executor.py:958` — solo lo consulta `Executor._check_risk()`. Completeness (`completeness_scanner.py:630`), liquidity (`liquidity_provider.py:1621`) y weather (`weather_scanner.py:1917`) postean órdenes directamente al CLOB con su propio cliente. El botón de emergencia del panel solo detiene directional/copy.
+
+**[ABIERTO] C3 — Protección anti-apuesta-cruzada muerta (enum vs string)**
+`base.py:85` — filtra `status in ("pending", "confirmed")` pero `TradeRecord.status` es `OrderStatus` (Enum); la comparación siempre da `False`. `get_open_positions()` devuelve siempre `[]` → `has_opposite_position` nunca bloquea → dos estrategias pueden comprar YES y NO del mismo mercado. Idem `count_paper_trades_today` y `count_active_positions`. Fix: `status.value in (...)` o cambiar a `StrEnum`.
+
+**[ABIERTO] C4 — Completeness live: `break` deja pata aceptada sin cancelar ni unwind**
+`completeness_scanner.py:649,659` — el bucle de revisión de resultados hace `break` al primer fallo; si la primera pata falló pero la segunda fue aceptada, su ID no se recopila y `_cancel_partial_orders` no la cancela → orden marketable viva → fill real → posición direccional sin hedge con `cost_total = 0` (invisible en P&L). El pipeline `_poll_fills`/`_unwind_leg` se salta completamente en este camino. Cambiar `break` por `continue` y pasar todos los IDs recopilados al pipeline.
+
+**[ABIERTO] C5 — Executor (directional/copy) tiene el bug de "fills invisibles" corregido en weather/completeness pero no portado**
+`executor.py:1244,1284-1287` — `success: true` con `orderID` vacío (FAK match instantáneo, el caso que costó $44.5 en weather) se trata como `order_rejected`. Si `post_order` lanza tras enviar, se marca `FAILED` sin verificación posterior. Los fixes `_verify_fill_via_api` (weather) y `_poll_fills` (completeness) existen pero no se aplicaron al Executor compartido.
+
+**[ABIERTO] C6 — Panel admin/admin sin CSRF, expuesto en 0.0.0.0:8080 sin TLS**
+`docker-compose.yml:8` — `PANEL_PASSWORD:-admin`. Sin CSRF en ningún POST sensible (cambio a live, kill switch, parámetros de riesgo). Cookie sin `SameSite`/`Secure`. Sin rate-limit en `/login` ni auditoría de intentos fallidos. Sin validación de rangos: se puede fijar `max_bet_per_trade` gigante o `max_daily_loss` negativo desde el panel. Explotación trivial si el operador no define `PANEL_PASSWORD`.
+
+---
+
+#### 🟠 Altos
+
+**[ABIERTO] A1 — Weather live: orderID = aceptación, no fill**
+`weather_scanner.py:1852` — `filled = bool(order_id) or ...`. Sin poll de fills ni cancel por timeout: una limit resting se marca `confirmed` y `check_resolutions` le asigna P&L a una posición que quizá nunca existió. El reconciliation loop solo recupera `failed→confirmed`, nunca degrada. Es el mismo bug corregido en completeness en junio.
+
+**[CORREGIDO Jul 2, 2026] A2 — Liquidity: fill parcial huérfana el remanente**
+> Fix: `QuoteOrder.size_matched_seen` (delta tracking) + `_cancel_partial_remainder()` cancela el remanente vivo antes de limpiar la referencia; si el cancel pierde la carrera contra un fill, re-consulta y registra el delta final.
+`liquidity_provider.py:2090-2110` — `_check_order_status` marca `filled` con cualquier `size_matched > 0` sin comparar con `order.size` → limpia la referencia sin cancelar el resto → orden viva sin tracking + quote duplicada = doble exposición. Los fills futuros de la orden huérfana no se detectan nunca.
+
+**[ABIERTO] A3 — Copy-trade muere en silencio tras redeploy**
+`strategies/copy_trade.py:107-135` — el restore mete dicts en `_bets` donde el código espera objetos `CopyBet` → `AttributeError` tragado con `logger.debug` en cada oportunidad. Además la key restaurada (`cid:side`) no coincide con la del dedup vivo (`cid:side:wallet`) → re-apuesta lo ya apostado tras un redeploy.
+
+**[ABIERTO] A4 — Directional: `cleanup_market` elimina bets pendientes antes del sweep**
+`detector.py:1217-1219` + `main.py:264-277` — mercados de 5 min se limpian a los ~15 min de su `end_date`; `sweep_stale_pending` exige >1h. Las bets se borran antes de que el sweep pueda resolverlas → pérdidas omitidas del P&L en paper; en live, **wins sin redimir**.
+
+**[ABIERTO] A5 — Race timeout-cancel vs fill en el Executor**
+`executor.py:1366-1412` — si la orden llena entre el último poll y el cancel, `cancel_order` lanza (excepción logueada), el trade se elimina del tracking con la posición real viva y sin contabilizar.
+
+**[ABIERTO] A6 — Llamadas CLOB del Executor síncronas en el event loop**
+`executor.py:831,863,1239,1242` — firma EIP-712 + HTTP síncrono bloquean el loop entero durante cada orden live (WS listener, ping, resto de estrategias). Weather y completeness sí usan `run_in_executor`; el Executor no.
+
+**[ABIERTO] A7 — `max_concurrent_positions` es un tope vitalicio**
+`executor.py:973-977` — nada transiciona trades de `MATCHED` a cerrado en memoria → tras 5 fills, `_check_risk` rechaza todo con solo `logger.debug`; la cuenta queda inutilizada en silencio hasta reinicio.
+
+**[ABIERTO] A8 — Balance optimista anulado por refresh**
+`executor.py:1249-1251,939-940` — la deducción optimista tras colocar se sobreescribe 5s después con el balance on-chain, que no descuenta órdenes GTC resting → N órdenes pueden comprometer cada una el balance total.
+
+**[ABIERTO] A9 — PriceChecker asume EDT todo el año**
+`price_checker.py:73` — `_et_to_utc` usa siempre UTC-4. De noviembre a marzo (EST, UTC-5) la ventana de Binance queda desplazada 1h → confirmación Up/Down contra el kline equivocado durante ~4 meses/año.
+
+---
+
+#### 🟡 Medios
+
+**[ABIERTO] M1 — Weather: buckets desalineados ±0.5° con resolución a grado entero**
+`weather_scanner.py:1550-1577,2419-2445` — Polymarket/Wunderground resuelve al grado entero. En °F "58-59°F" se mapea a `[58,60)` pero WU redondea 59.6→60 (gana "60-61"). En °C hay zona muerta `[28.5,29)` donde `_determine_winner` devuelve `None` → trade `expired` con pnl=0 aunque Polymarket sí resolvió. Contamina P&L y el `_outcome_history` del calibrador. Fix: redondear `actual_temp` al entero antes de bucketing.
+
+**[ABIERTO] M2 — Weather: circularidad en el calibrador de probabilidad**
+`weather_scanner.py:1681-1684,2263-2268` — `_outcome_history` guarda la prob ya calibrada, pero `_calibrate_prob` se aplica a probs pre-calibración → el mapa se compone consigo mismo (la misma trampa que el bias evitó con `raw_mean_c`). Fix: guardar en `_outcome_history` la prob cruda (post-haircut, pre-calibración) y entrenar sobre esa.
+
+**[ABIERTO] M3 — Weather: `NameError` en órdenes rechazadas**
+`weather_scanner.py:1943` — `r` no existe en ese scope. Toda orden rechazada lanza `NameError` en el handler de rechazo, cae al handler de excepción general y cuesta ~6s extra. El estado final es `failed` pero el diagnóstico (errorMsg, status del CLOB) nunca se emite.
+
+**[CORREGIDO Jul 2, 2026] M4 — Liquidity: signo invertido en adverse selection del lado NO**
+> Fix: `adverse = max(0, midpoint - (1 - fill_price)) × size` en `record_fill`. El fill NO benigno ya no computa como pérdida; el realmente adverso sí.
+`liquidity_provider.py:1798-1800` — `adverse = max(0, (1 - fill_price) - midpoint) * size` registra pérdida en el fill benigno normal y 0 en el adverso. Todo fill NO benigno infla `adverse_ratio` → `market_abandoned_adverse` abandona mercados buenos. Fix: `max(0, midpoint - (1 - fill_price)) * size`.
+
+**[ABIERTO] M5 — Restore de directional no copia `cost_usd`**
+`strategies/directional.py:114-153` — los placeholders restaurados tienen `suggested_bet=0` y sin `margin_net` → al resolver, `pnl = shares × margin_net = 0` en todas las posiciones que sobreviven un reinicio. El código de fix (`skip suggested_bet <= 0`) vive en `detector.restore_open_positions` que nadie llama.
+
+**[ABIERTO] M6 — P&L de directional acreditado sin verificar fill en dos caminos live**
+`detector.py:661-679,286-288` — balance y simulated_pnl se actualizan inmediatamente en `_check_resolved_market` y `sweep_stale_pending` sin el guard `_is_live_mode` ni confirmar que la orden llenó.
+
+**[ABIERTO] M7 — WS throttle descarta snapshots de book**
+`websocket_client.py:229-244` — el throttle de 1s por `asset_id` es compartido entre tipos de evento: un `best_bid_ask` consume el slot y un `book` que llegue <1s después se descarta silenciosamente → profundidad del tracker desincronizada; afecta al sizing de completeness (`require_book_depth`).
+
+**[ABIERTO] M8 — REST fallback marca frescura con bids stale**
+`websocket_client.py:341-363` — el fallback solo actualiza `best_ask_*` pero pone `state.last_update = now` → bids congelados marcados como frescos. `max_quote_age_s` de completeness pasa; `_unwind_leg` usaría bids stale como si fueran actuales.
+
+**[ABIERTO] M9 — Cambio live→paper huérfana órdenes reales en el CLOB**
+`executor.py:1483-1488` — `reset_trades()` limpia `_pending_orders` sin cancelar en el exchange las órdenes resting → capital bloqueado, fills posteriores invisibles. Además `account_runner.py:560-566` no llama `executor.set_mode(PAPER)` → executor queda en modo LIVE con el runner en PAPER.
+
+**[ABIERTO] M10 — `set_strategy_mode` muta estado antes de la operación falible**
+`account_runner.py:520-524` — `exec_mode=LIVE` y `account.execution_mode="live"` se asignan antes de `await executor.set_mode(LIVE)`. Si la inicialización del CLOB falla, el executor revierte su modo pero el runner y config quedan en "live".
+
+**[ABIERTO] M11 — Completeness: redeems pendientes sin reintento**
+`completeness_scanner.py:944-974` — `_pending_redeems` solo se usa en `len()` para stats. Un redeem fallido queda `confirmed` para siempre; las posiciones no se redimen salvo intervención externa.
+
+**[ABIERTO] M12 — Weather: dedup solo por `condition_id`, no por `event_slug`**
+`weather_scanner.py:588-606` — `blocked_cids` opera a nivel de bucket individual. Si el forecast se desplaza entre ciclos, el bot puede comprar dos buckets mutuamente excluyentes del mismo evento → uno siempre pierde.
+
+**[ABIERTO] M13 — Escritura de TOML no atómica**
+`config_manager.py:585` — `open(..., "wb")` + `dump()` directamente sobre el archivo; un crash a mitad corrompe `config.toml` y el bot no arranca. Falta temp + `os.replace()`.
+
+**[ABIERTO] M14 — Jinja2 sin `autoescape=True`**
+`web/__init__.py:27` — el setup no pasa `autoescape=True`; hoy mitigado por `_esc()` manual en los sinks conocidos. Cualquier `{{ campo_de_api }}` futuro introduce XSS sin aviso.
+
+**[ABIERTO] M15 — Heurística de unidades del balance frágil**
+`executor.py:868-870` — `raw / 1e6 if raw > 1000 else raw`: un balance real de $500-999 se interpreta correctamente, pero uno >$1000 se leería como ~$0.001 (bloquea todo), y uno en unidades mínimas <$1 se leería como si fuera dólares ($0-999 naturales). Dos catástrofes posibles según formato de la API.
+
+---
+
+#### 🔵 Bajos
+
+- **[CORREGIDO Jul 2, 2026] B1** — Liquidity: fill parcial re-registra `size_matched` en llamadas repetidas; `_sell_tokens` descuenta inventario al colocar la SELL, no al llenarse. *Fix: delta tracking via `size_matched_seen`; auto-exit SELL trackeada en `pos.exit_order` — inventario descontado y `exit_loss` registrado en métricas solo al confirmar el fill (`_check_exit_fills`), con expiración+reintento si no llena.*
+- **[ABIERTO] B2** — Copy: la pérdida omite el taker fee (`copy_trader.py:747`) — pérdidas subestimadas sistemáticamente.
+- **[ABIERTO] B3** — Weather: sin mínimo de 5 shares (`weather_scanner.py:1763`) — el CLOB rechaza órdenes < 5 shares.
+- **[ABIERTO] B4** — Weather: `_outcome_history` sin poda — crece sin límite en `weather_verification.json`.
+- **[ABIERTO] B5** — Weather: orphans sintéticos no filtran `side` ni verifican que sea BUY (`_record_synthetic_orphan:2129`).
+- **[ABIERTO] B6** — Completeness: `_unwind_leg` no descuenta el taker fee del SELL → pérdida real algo mayor que la contabilizada.
+- **[ABIERTO] B7** — `max_daily_loss` no resetea a medianoche UTC sino cada 24h desde el primer check (`executor.py:1437`).
+- **[ABIERTO] B8** — `net_margin` resta el gas fijo como coste por share en vez de por redención (`fees.py:150`).
+- **[ABIERTO] B9** — Docker corre como root (sin directiva `USER` en Dockerfile).
+- **[ABIERTO] B10** — `/api/health` expone estado operativo sin autenticación (`middleware.py:10`, `routes_api.py:11`).
+- **[ABIERTO] B11** — Dependencias sin pin exacto en `requirements.txt` (todo con `>=`).
+- **[ABIERTO] B12** — `_last_check_time` y `_persisted_orders` crecen sin límite en operación continua (`websocket_client.py:34`, `executor.py:207`).
+- **[ABIERTO] B13** — `_maybe_reset_daily` resetea cada 24h desde el primer check, no a medianoche UTC (`executor.py:1437`).
+
+---
+
+**Orden de corrección recomendado (por riesgo de capital):**
+1. C1+C2: kill switch global + stop-loss diario funcional para las 5 estrategias
+2. C3: enum-vs-string (fix de una línea, reactiva tres protecciones)
+3. C4+C5: completeness `break` + fills invisibles en Executor
+4. C6: password/CSRF del panel
+5. M1+M2: buckets weather ±0.5° + circularidad del calibrador
+6. M3: `NameError` weather en rechazos (fix trivial)
+7. M4: signo invertido adverse selection liquidity
+
 ---
 
 ## Idioma

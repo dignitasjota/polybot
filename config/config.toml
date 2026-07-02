@@ -151,7 +151,7 @@ rotate_count = 5
 # Cuenta 1: Estrategia direccional (Binance)
 [[accounts]]
 name = "directional_main"
-enabled = true
+enabled = false  # Desactivada 2026-07-02: sin edge demostrado; foco en liquidity
 strategy_type = "directional"
 execution_mode = "paper"  # Cambiar a "live" manualmente cuando esté listo
 
@@ -169,7 +169,7 @@ builder_passphrase_env = "BUILDER_PASSPHRASE"
 # Cuenta 2: Completeness Arbitrage (compra YES+NO cuando suma < $1.00)
 [[accounts]]
 name = "completeness_arb"
-enabled = true
+enabled = false  # Desactivada 2026-07-02: sin edge demostrado; foco en liquidity
 strategy_type = "completeness"
 execution_mode = "paper"  # Cambiar a "live" cuando directional esté en live
 
@@ -203,7 +203,7 @@ simulated_balance = 500.0
 # Cuenta 3: Copy-trading (paper trading para evaluar rentabilidad)
 [[accounts]]
 name = "copy_vidarx"
-enabled = true
+enabled = false  # Desactivada 2026-07-02: sin edge demostrado; foco en liquidity
 strategy_type = "copy_trade"
 execution_mode = "paper"  # Cambiar a "live" manualmente después de validar
 
@@ -302,7 +302,7 @@ simulated_balance = 500.0           # Capital inicial para paper trading
 # Cuenta 5: Weather Prediction (predicción meteorológica con ensemble models)
 [[accounts]]
 name = "weather_forecast"
-enabled = true
+enabled = false  # Desactivada 2026-07-02: sin edge demostrado; foco en liquidity
 strategy_type = "weather"
 execution_mode = "paper"  # Cambiar a "live" después de validar
 
