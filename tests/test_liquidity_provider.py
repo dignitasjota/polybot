@@ -551,6 +551,8 @@ async def test_adverse_abandonment():
     class MockScanner:
         def get_top_markets(self, n):
             return [market]
+        def get_all_markets(self):
+            return [market]
 
     provider.set_scanner(MockScanner())
 
@@ -769,3 +771,312 @@ async def test_get_auth_headers_no_client():
 
     headers = provider._get_auth_headers()
     assert headers == {}
+
+
+# ── Auditoría Jul 2026: fixes M4, A2+B1, #13, C2 ─────────────────────
+
+class _FakeRisk:
+    """Minimal RiskConfig stand-in."""
+    def __init__(self, kill_switch=False):
+        self.kill_switch = kill_switch
+
+
+import sys as _sys
+import types as _types
+
+
+@pytest.fixture
+def fake_clob_sdk(monkeypatch):
+    """Inject a fake py_clob_client_v2 so live-path lazy imports resolve."""
+    fake = _types.ModuleType("py_clob_client_v2")
+    fake.OrderArgs = lambda **kw: kw
+    ob = _types.ModuleType("py_clob_client_v2.order_builder")
+    const = _types.ModuleType("py_clob_client_v2.order_builder.constants")
+    const.BUY = "BUY"
+    const.SELL = "SELL"
+    clob_types = _types.ModuleType("py_clob_client_v2.clob_types")
+    clob_types.OrderPayload = lambda **kw: kw
+    monkeypatch.setitem(_sys.modules, "py_clob_client_v2", fake)
+    monkeypatch.setitem(_sys.modules, "py_clob_client_v2.order_builder", ob)
+    monkeypatch.setitem(_sys.modules, "py_clob_client_v2.order_builder.constants", const)
+    monkeypatch.setitem(_sys.modules, "py_clob_client_v2.clob_types", clob_types)
+    return fake
+
+
+class _FakeClobPartial:
+    """Fake CLOB client: one order with controllable size_matched/status."""
+    def __init__(self, size_matched=0.0, status="LIVE", missing=False):
+        self.size_matched = size_matched
+        self.order_status = status
+        self.missing = missing
+        self.cancelled_ids = []
+
+    def get_order(self, order_id):
+        if self.missing:
+            return None
+        return {"status": self.order_status, "size_matched": self.size_matched}
+
+    def cancel_order(self, payload):
+        oid = payload.get("orderID", "") if isinstance(payload, dict) else getattr(payload, "orderID", "")
+        self.cancelled_ids.append(oid)
+        return {"canceled": True}
+
+
+# M4 — signo del adverse selection en el lado NO
+
+@pytest.mark.asyncio
+async def test_adverse_no_side_benign_fill_is_zero():
+    """BUY NO llenado en su quote normal (venta YES sobre el mid) NO es adverso.
+
+    Antes del fix, este caso registraba adverse = +distance × size en cada
+    fill NO benigno, inflando adverse_ratio y abandonando mercados buenos.
+    """
+    cfg = _make_config()
+    provider = LiquidityProvider(config=cfg)
+    market = _make_market(midpoint=0.50)
+    await provider._open_position(market)
+
+    # NO comprado a 0.48 (espacio NO) = vender YES a 0.52, sobre el mid 0.50.
+    provider.record_fill(market.condition_id, is_yes=False, size=10.0, fill_price=0.48)
+
+    pos = provider._positions[market.condition_id]
+    assert pos.total_adverse_loss == 0.0
+
+
+@pytest.mark.asyncio
+async def test_adverse_no_side_real_adverse_recorded():
+    """El mid subió POR ENCIMA de nuestra venta YES efectiva → sí es adverso."""
+    cfg = _make_config()
+    provider = LiquidityProvider(config=cfg)
+    market = _make_market(midpoint=0.50)
+    await provider._open_position(market)
+
+    pos = provider._positions[market.condition_id]
+    pos.midpoint = 0.60  # el mercado se movió contra nosotros tras el fill
+
+    # NO comprado a 0.48 → venta YES efectiva a 0.52 < mid 0.60 → adverso 0.08×10
+    provider.record_fill(market.condition_id, is_yes=False, size=10.0, fill_price=0.48)
+    assert pos.total_adverse_loss == pytest.approx(0.8)
+
+
+# A2 + B1 — fills parciales: delta tracking y cancel del remanente
+
+@pytest.mark.asyncio
+async def test_partial_fill_records_delta_and_cancels_remainder(fake_clob_sdk):
+    cfg = _make_config(mode="live")
+    provider = LiquidityProvider(config=cfg)
+    market = _make_market(midpoint=0.50)
+    await provider._open_position(market)
+    pos = provider._positions[market.condition_id]
+
+    order = QuoteOrder(
+        order_id="real-123", token_id="tok_yes_1", side="BUY",
+        price=0.48, size=40.0, is_yes=True,
+        condition_id=market.condition_id, status="active",
+    )
+    pos.bid_order = order
+    fake = _FakeClobPartial(size_matched=5.0, status="LIVE")
+    provider._client = fake
+    provider._initialized = True
+
+    status = await provider._check_order_status(order)
+
+    assert status == "MATCHED"
+    assert order.status == "filled"
+    assert pos.fills_yes == pytest.approx(5.0)         # delta, no el total de la orden
+    assert order.size_matched_seen == pytest.approx(5.0)
+    assert "real-123" in fake.cancelled_ids            # remanente cancelado (no huérfano)
+
+
+@pytest.mark.asyncio
+async def test_full_fill_no_cancel_needed(fake_clob_sdk):
+    cfg = _make_config(mode="live")
+    provider = LiquidityProvider(config=cfg)
+    market = _make_market(midpoint=0.50)
+    await provider._open_position(market)
+    pos = provider._positions[market.condition_id]
+
+    order = QuoteOrder(
+        order_id="real-456", token_id="tok_yes_1", side="BUY",
+        price=0.48, size=40.0, is_yes=True,
+        condition_id=market.condition_id, status="active",
+    )
+    pos.bid_order = order
+    fake = _FakeClobPartial(size_matched=40.0, status="MATCHED")
+    provider._client = fake
+    provider._initialized = True
+
+    status = await provider._check_order_status(order)
+
+    assert status == "MATCHED"
+    assert order.status == "filled"
+    assert pos.fills_yes == pytest.approx(40.0)
+    assert fake.cancelled_ids == []                    # lleno completo: nada que cancelar
+
+
+@pytest.mark.asyncio
+async def test_repeated_check_does_not_double_count(fake_clob_sdk):
+    """B1: get_order devuelve size_matched ACUMULADO; no debe re-registrarse."""
+    cfg = _make_config(mode="live")
+    provider = LiquidityProvider(config=cfg)
+    market = _make_market(midpoint=0.50)
+    await provider._open_position(market)
+    pos = provider._positions[market.condition_id]
+
+    order = QuoteOrder(
+        order_id="real-789", token_id="tok_yes_1", side="BUY",
+        price=0.48, size=40.0, is_yes=True,
+        condition_id=market.condition_id, status="active",
+        size_matched_seen=5.0,                          # ya registramos 5
+    )
+    pos.bid_order = order
+    pos.fills_yes = 5.0
+    fake = _FakeClobPartial(size_matched=5.0, status="LIVE")  # sin fill nuevo
+    provider._client = fake
+    provider._initialized = True
+
+    await provider._check_order_status(order)
+    assert pos.fills_yes == pytest.approx(5.0)          # sin doble conteo
+
+
+# #13 — auto-exit: inventario solo se descuenta al confirmarse el fill
+
+@pytest.mark.asyncio
+async def test_exit_fill_settles_inventory_and_loss(fake_clob_sdk):
+    from src.liquidity_metrics import LiquidityMetrics
+    metrics = LiquidityMetrics(total_capital=250.0)
+    cfg = _make_config(mode="live")
+    provider = LiquidityProvider(config=cfg, metrics=metrics)
+    market = _make_market(midpoint=0.50)
+    await provider._open_position(market)
+    pos = provider._positions[market.condition_id]
+    pos.fills_yes = 10.0                                # inventario YES sin match
+
+    pos.exit_order = QuoteOrder(
+        order_id="exit-1", token_id="tok_yes_1", side="SELL",
+        price=0.45, size=10.0, is_yes=True,
+        condition_id=market.condition_id, status="active",
+        placed_at=time.time(), ref_price=0.50,
+    )
+    provider._client = _FakeClobPartial(size_matched=10.0, status="MATCHED")
+    provider._initialized = True
+
+    await provider._check_exit_fills()
+
+    assert pos.fills_yes == pytest.approx(0.0)          # descontado AL FILL
+    assert pos.exit_order is None
+    assert provider._total_auto_exits == 1
+    # Pérdida del exit contabilizada: (0.50 - 0.45) × 10 = 0.50
+    assert metrics._get_today().exit_loss == pytest.approx(0.5)
+    assert metrics._get_today().total_loss == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_exit_unfilled_keeps_inventory_and_expires(fake_clob_sdk):
+    cfg = _make_config(mode="live", auto_exit_timeout_s=1.0)
+    provider = LiquidityProvider(config=cfg)
+    market = _make_market(midpoint=0.50)
+    await provider._open_position(market)
+    pos = provider._positions[market.condition_id]
+    pos.fills_yes = 10.0
+    pos.unmatched_since = time.time() - 999
+
+    pos.exit_order = QuoteOrder(
+        order_id="exit-2", token_id="tok_yes_1", side="SELL",
+        price=0.45, size=10.0, is_yes=True,
+        condition_id=market.condition_id, status="active",
+        placed_at=time.time() - 10,                     # pasó el timeout
+        ref_price=0.50,
+    )
+    fake = _FakeClobPartial(size_matched=0.0, status="LIVE")
+    provider._client = fake
+    provider._initialized = True
+
+    await provider._check_exit_fills()
+
+    assert pos.fills_yes == pytest.approx(10.0)         # inventario intacto
+    assert pos.exit_order is None                       # orden expirada → reintento
+    assert "exit-2" in fake.cancelled_ids
+    assert pos.unmatched_since > 0                      # auto-exit reintentará
+
+
+@pytest.mark.asyncio
+async def test_auto_exit_skips_position_with_active_exit_order():
+    """No apilar una segunda SELL mientras la primera sigue viva."""
+    cfg = _make_config(mode="live", auto_exit_timeout_s=0.0)
+    provider = LiquidityProvider(config=cfg)
+    market = _make_market(midpoint=0.50)
+    await provider._open_position(market)
+    pos = provider._positions[market.condition_id]
+    pos.fills_yes = 10.0
+    pos.unmatched_since = time.time() - 999
+    pos.exit_order = QuoteOrder(
+        order_id="exit-3", token_id="tok_yes_1", side="SELL",
+        price=0.45, size=10.0, is_yes=True,
+        condition_id=market.condition_id, status="active",
+        placed_at=time.time(),
+    )
+
+    placed = []
+    async def _fake_sell(pos_, **kw):
+        placed.append(kw)
+    provider._sell_tokens = _fake_sell
+    provider._client = _FakeClobPartial()
+    provider._initialized = True
+
+    await provider._check_auto_exits()
+    assert placed == []
+
+
+# C2 — kill switch cubre liquidity
+
+@pytest.mark.asyncio
+async def test_kill_switch_blocks_place_order():
+    cfg = _make_config()
+    provider = LiquidityProvider(config=cfg, risk=_FakeRisk(kill_switch=True))
+    result = await provider._place_order(
+        token_id="tok", price=0.5, size=10, is_yes=True, condition_id="0xabc",
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_cancels_all_and_stops_cycle():
+    cfg = _make_config()
+    risk = _FakeRisk(kill_switch=False)
+    provider = LiquidityProvider(config=cfg, risk=risk)
+
+    class _FakeScanner:
+        def get_top_markets(self, n):
+            return []
+        def get_all_markets(self):
+            return []
+    provider._scanner = _FakeScanner()
+
+    market = _make_market(midpoint=0.50)
+    await provider._open_position(market)
+    pos = provider._positions[market.condition_id]
+    assert pos.bid_order is not None                    # paper quotes colocadas
+
+    risk.kill_switch = True
+    await provider._refresh_all()
+
+    assert pos.bid_order is None                        # cancel-all ejecutado
+    assert pos.ask_order is None
+    assert provider._kill_switch_engaged is True
+
+    # Al desactivar, el ciclo vuelve a operar
+    risk.kill_switch = False
+    await provider._refresh_all()
+    assert provider._kill_switch_engaged is False
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_none_risk_is_noop():
+    """Sin RiskConfig (tests antiguos, wiring legacy) todo sigue funcionando."""
+    cfg = _make_config()
+    provider = LiquidityProvider(config=cfg)                # risk=None
+    result = await provider._place_order(
+        token_id="tok", price=0.5, size=10, is_yes=True, condition_id="0xabc",
+    )
+    assert result is not None

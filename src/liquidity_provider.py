@@ -57,6 +57,8 @@ class QuoteOrder:
     condition_id: str
     placed_at: float = 0.0
     status: str = "active"  # active / filled / cancelled
+    size_matched_seen: float = 0.0  # Cumulative fill already recorded (delta tracking)
+    ref_price: float = 0.0  # Fair value at placement (auto-exit SELLs: for loss accounting)
 
 
 @dataclass
@@ -90,6 +92,7 @@ class MarketPosition:
 
     # Unmatched inventory tracking (for auto-exit)
     unmatched_since: float = 0.0  # timestamp when unmatched inventory first detected
+    exit_order: QuoteOrder | None = None  # Outstanding auto-exit SELL (tracked until filled)
 
     # Dynamic spread tracking (Phase 3.5: adaptive quoting)
     consecutive_no_moves: int = 0  # Counts how many refresh cycles midpoint didn't move >0.5¢
@@ -158,11 +161,14 @@ class LiquidityProvider:
         credentials: CredentialsConfig | None = None,
         tracker: MarketTracker | None = None,
         metrics: LiquidityMetrics | None = None,
+        risk=None,  # RiskConfig — shared with the account; honors kill_switch
     ):
         self._config = config
         self._credentials = credentials
         self._tracker = tracker
         self._metrics = metrics
+        self._risk = risk
+        self._kill_switch_engaged = False  # Edge detection for cancel-all-once
 
         # ClobClient — initialized in start() for live/dry_run
         self._client = None
@@ -908,9 +914,23 @@ class LiquidityProvider:
         if not self._scanner:
             return
 
+        # Kill switch: stop quoting AND pull every resting order once. The
+        # panel's emergency stop previously only covered the Executor path
+        # (directional/copy) — liquidity kept quoting through it.
+        if self._risk is not None and getattr(self._risk, "kill_switch", False):
+            if not self._kill_switch_engaged:
+                self._kill_switch_engaged = True
+                logger.warning("liquidity_kill_switch_engaged", action="cancel_all")
+                await self._cancel_all_orders()
+            return
+        self._kill_switch_engaged = False
+
         # Check fills on all active orders BEFORE making any changes
         if not self.should_simulate:
             await self._check_active_fills()
+            # Settle/expire outstanding auto-exit SELLs (inventory is only
+            # decremented on confirmed fill, never at placement)
+            await self._check_exit_fills()
 
         # Orphan recovery: if we have positions but ALL orders are None,
         # our USDC is likely locked in orphaned CLOB orders we lost track of.
@@ -1313,7 +1333,10 @@ class LiquidityProvider:
                 long_mult = 1.3
                 short_mult = 0.8
             else:
-                long_mult = 1.15
+                # Mild band: must survive the 2-decimal tick rounding — with
+                # 1.15/0.9 the net asymmetry was ±0.5¢ at typical distances and
+                # rounding erased it entirely (mild rebalancing did nothing).
+                long_mult = 1.25
                 short_mult = 0.9
 
             if skew > 0:
@@ -1592,6 +1615,10 @@ class LiquidityProvider:
         condition_id: str,
     ) -> QuoteOrder | None:
         """Place a single order (live or paper)."""
+        # Last-line kill switch guard (covers every quoting path)
+        if self._risk is not None and getattr(self._risk, "kill_switch", False):
+            logger.warning("order_blocked_kill_switch", condition_id=condition_id[:16])
+            return None
         if self.should_simulate:
             if self.is_dry_run:
                 logger.info(
@@ -1792,12 +1819,20 @@ class LiquidityProvider:
         pos.fill_count += 1
         self._total_fills += 1
 
-        # Estimate adverse selection: difference between fill price and midpoint
+        # Estimate adverse selection: how far the market moved THROUGH our quote.
+        # YES side: we bought YES at fill_price (bid, below mid). Adverse when the
+        # midpoint dropped below our buy price → fill_price - midpoint.
+        # NO side: we bought NO at fill_price (NO-space), i.e. sold YES at
+        # (1 - fill_price), above mid. Adverse when the midpoint rose ABOVE our
+        # effective sale price → midpoint - (1 - fill_price). The previous formula
+        # had this reversed and charged every benign NO fill (sale above mid, the
+        # normal case) as adverse — inflating adverse_ratio and abandoning good
+        # markets — while real adverse NO fills registered 0.
         midpoint = pos.midpoint
         if is_yes:
             adverse = max(0, fill_price - midpoint) * size
         else:
-            adverse = max(0, (1 - fill_price) - midpoint) * size
+            adverse = max(0, midpoint - (1 - fill_price)) * size
         pos.total_adverse_loss += adverse
 
         # Maker rebate: we earn a % of the taker fee on each fill
@@ -1924,6 +1959,9 @@ class LiquidityProvider:
         now = time.time()
 
         for cid, pos in list(self._positions.items()):
+            # An exit SELL is already working this position — don't stack another.
+            if pos.exit_order and pos.exit_order.status == "active":
+                continue
             if pos.unmatched_since <= 0:
                 continue
             if cid in self._redeem_lock:
@@ -1961,7 +1999,15 @@ class LiquidityProvider:
         self, pos: MarketPosition, token_id: str, size: float,
         price: float, side_label: str,
     ):
-        """Place a SELL order to exit unmatched inventory."""
+        """Place a SELL order to exit unmatched inventory.
+
+        The order is TRACKED (pos.exit_order): inventory is only decremented
+        and the loss only recorded when the fill is confirmed by
+        _check_exit_fills. The previous version decremented fills_yes/no at
+        placement — if the GTC sell never filled, real tokens sat in the
+        wallet untracked and the auto-exit never retried (unmatched_since was
+        cleared). The exit loss also never reached the metrics.
+        """
         try:
             from py_clob_client_v2 import OrderArgs, OrderType
             from py_clob_client_v2.order_builder.constants import SELL
@@ -1977,21 +2023,29 @@ class LiquidityProvider:
 
             order_id = resp.get("orderID", "") if resp else ""
             if order_id:
+                # Fair value of what we're dumping, in the token's own space —
+                # the loss reference for metrics when the sell fills.
+                ref_price = pos.midpoint if side_label == "YES" else (1.0 - pos.midpoint)
+                pos.exit_order = QuoteOrder(
+                    order_id=order_id,
+                    token_id=token_id,
+                    side="SELL",
+                    price=price,
+                    size=size,
+                    is_yes=(side_label == "YES"),
+                    condition_id=pos.condition_id,
+                    placed_at=time.time(),
+                    ref_price=ref_price,
+                )
                 logger.info(
                     "auto_exit_sell_placed",
                     condition_id=pos.condition_id[:16],
                     side=side_label,
                     size=size,
                     price=price,
+                    ref_price=round(ref_price, 4),
                     order_id=order_id[:12],
                 )
-                # Clear unmatched fills — capital will return when order fills
-                if side_label == "YES":
-                    pos.fills_yes -= size
-                else:
-                    pos.fills_no -= size
-                pos.unmatched_since = 0.0
-                self._total_auto_exits += 1
             else:
                 logger.warning("auto_exit_no_order_id", condition_id=pos.condition_id[:16])
 
@@ -2002,6 +2056,90 @@ class LiquidityProvider:
                 side=side_label,
                 error=str(e),
             )
+
+    async def _check_exit_fills(self):
+        """Track outstanding auto-exit SELLs: settle fills, expire stragglers.
+
+        - Fill delta confirmed → decrement the sold side's inventory, record the
+          realized exit loss ((ref_price - sell_price) × delta) in metrics, and
+          count the exit.
+        - Order still unfilled after auto_exit_timeout_s → cancel it and leave
+          the inventory intact; _check_auto_exits will re-place at a fresh price
+          next cycle (unmatched_since was never cleared).
+        """
+        if self.should_simulate or not self._client:
+            return
+
+        timeout = getattr(self._config, 'auto_exit_timeout_s', 300.0)
+        now = time.time()
+
+        for pos in list(self._positions.values()):
+            order = pos.exit_order
+            if not order or order.status != "active":
+                continue
+
+            try:
+                order_data = self._client.get_order(order.order_id)
+            except Exception as e:
+                logger.warning(
+                    "exit_order_check_failed",
+                    order_id=order.order_id[:12], error=str(e),
+                )
+                continue
+
+            status = ((order_data or {}).get("status", "") or "").upper()
+            size_matched = float((order_data or {}).get("size_matched", 0) or 0)
+
+            # Settle any new fill delta
+            new_fill = size_matched - order.size_matched_seen
+            if new_fill > 1e-9:
+                if order.is_yes:
+                    pos.fills_yes = max(0.0, pos.fills_yes - new_fill)
+                else:
+                    pos.fills_no = max(0.0, pos.fills_no - new_fill)
+                loss = max(0.0, (order.ref_price - order.price)) * new_fill
+                if self._metrics:
+                    self._metrics.record_exit_loss(loss)
+                order.size_matched_seen = size_matched
+                logger.info(
+                    "auto_exit_fill_settled",
+                    condition_id=pos.condition_id[:16],
+                    side="YES" if order.is_yes else "NO",
+                    filled=round(new_fill, 4),
+                    exit_loss=round(loss, 4),
+                )
+
+            fully_filled = size_matched >= order.size - 0.01
+            gone = not order_data or status in ("CANCELLED", "EXPIRED")
+
+            if fully_filled or gone:
+                order.status = "filled" if fully_filled else "cancelled"
+                pos.exit_order = None
+                if fully_filled:
+                    self._total_auto_exits += 1
+                # Recompute unmatched state from what actually remains
+                unmatched = abs(pos.fills_yes - pos.fills_no)
+                pos.unmatched_since = now if unmatched > 0.5 else 0.0
+                continue
+
+            # Still resting past the timeout → cancel; retry with fresh pricing
+            if now - order.placed_at > timeout:
+                try:
+                    from py_clob_client_v2.clob_types import OrderPayload
+                    self._client.cancel_order(OrderPayload(orderID=order.order_id))
+                except Exception as e:
+                    logger.warning(
+                        "exit_order_cancel_failed",
+                        order_id=order.order_id[:12], error=str(e),
+                    )
+                    continue
+                order.status = "cancelled"
+                pos.exit_order = None
+                logger.info(
+                    "auto_exit_expired_will_retry",
+                    condition_id=pos.condition_id[:16],
+                    unfilled=round(order.size - size_matched, 4),
+                )
 
     # ── Fill detection ─────────────────────────────────────────────────
 
@@ -2090,22 +2228,40 @@ class LiquidityProvider:
             size_matched = float(order_data.get("size_matched", 0) or 0)
 
             if size_matched > 0:
-                # Order was (partially) filled! Record the fill
-                logger.info(
-                    "fill_detected_on_check",
-                    order_id=order.order_id[:12],
-                    status=status,
-                    size_matched=round(size_matched, 4),
-                    price=order.price,
-                    side="YES" if order.is_yes else "NO",
-                    condition_id=order.condition_id[:16],
-                )
-                self.record_fill(
-                    condition_id=order.condition_id,
-                    is_yes=order.is_yes,
-                    size=size_matched,
-                    fill_price=order.price,
-                )
+                # Record only the NEW fill since the last check: get_order returns
+                # the CUMULATIVE size_matched, so re-recording it would double-count.
+                new_fill = size_matched - order.size_matched_seen
+                if new_fill > 1e-9:
+                    logger.info(
+                        "fill_detected_on_check",
+                        order_id=order.order_id[:12],
+                        status=status,
+                        size_matched=round(size_matched, 4),
+                        new_fill=round(new_fill, 4),
+                        order_size=order.size,
+                        price=order.price,
+                        side="YES" if order.is_yes else "NO",
+                        condition_id=order.condition_id[:16],
+                    )
+                    self.record_fill(
+                        condition_id=order.condition_id,
+                        is_yes=order.is_yes,
+                        size=new_fill,
+                        fill_price=order.price,
+                    )
+                    order.size_matched_seen = size_matched
+
+                if size_matched >= order.size - 0.01 or status in ("CANCELLED", "EXPIRED"):
+                    # Fully filled, or the remainder is already gone from the book.
+                    order.status = "filled"
+                    return "MATCHED"
+
+                # PARTIAL fill with a live remainder. The caller clears our
+                # reference on "filled", which would orphan that remainder: it
+                # keeps filling with no tracking while the refresh places a
+                # duplicate quote (double exposure). Cancel the remainder first,
+                # then report as filled so the quote gets cleanly replaced.
+                await self._cancel_partial_remainder(order)
                 order.status = "filled"
                 return "MATCHED"
 
@@ -2135,6 +2291,53 @@ class LiquidityProvider:
             return order.status
 
     # ── Order cancellation ────────────────────────────────────────────
+
+    async def _cancel_partial_remainder(self, order: QuoteOrder):
+        """Cancel the live remainder of a partially-filled order.
+
+        Called from _check_order_status, so it must NOT recurse back into it
+        (unlike _cancel_order, which re-checks status before cancelling).
+        If the cancel fails — usually because the remainder matched in the
+        meantime — re-query once and record the final fill delta so nothing
+        is lost.
+        """
+        if self.should_simulate or not self._client:
+            return
+
+        try:
+            from py_clob_client_v2.clob_types import OrderPayload
+            self._client.cancel_order(OrderPayload(orderID=order.order_id))
+            self._total_orders_cancelled += 1
+            if self._metrics:
+                self._metrics.record_order_cancelled()
+            logger.info(
+                "partial_fill_remainder_cancelled",
+                order_id=order.order_id[:12],
+                matched=round(order.size_matched_seen, 4),
+                remainder=round(order.size - order.size_matched_seen, 4),
+                side="YES" if order.is_yes else "NO",
+            )
+        except Exception as e:
+            # Cancel raced a fill: query the final state and record the delta.
+            logger.warning(
+                "partial_remainder_cancel_failed",
+                order_id=order.order_id[:12],
+                error=str(e),
+            )
+            try:
+                order_data = self._client.get_order(order.order_id)
+                final_matched = float((order_data or {}).get("size_matched", 0) or 0)
+                late_fill = final_matched - order.size_matched_seen
+                if late_fill > 1e-9:
+                    self.record_fill(
+                        condition_id=order.condition_id,
+                        is_yes=order.is_yes,
+                        size=late_fill,
+                        fill_price=order.price,
+                    )
+                    order.size_matched_seen = final_matched
+            except Exception:
+                self._errors += 1
 
     async def _cancel_order(self, order: QuoteOrder):
         """Cancel a single order, checking for fills first."""

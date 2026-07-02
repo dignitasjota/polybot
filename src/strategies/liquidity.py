@@ -79,7 +79,7 @@ class LiquidityConfig(StrategyConfig):
             use_heartbeat=raw.get("use_heartbeat", False),
             heartbeat_interval=float(raw.get("heartbeat_interval", 5.0)),
             scoring_check_interval=float(raw.get("scoring_check_interval", 60.0)),
-            quote_refresh_s=float(raw.get("quote_refresh_s", 120.0)),
+            quote_refresh_s=float(raw.get("quote_refresh_s", 30.0)),
             auto_exit_enabled=raw.get("auto_exit_enabled", True),
             auto_exit_timeout_s=float(raw.get("auto_exit_timeout_s", 60.0)),
             auto_exit_max_loss_pct=float(raw.get("auto_exit_max_loss_pct", 0.05)),
@@ -138,12 +138,15 @@ class LiquidityStrategy(Strategy):
             credentials=credentials,
             tracker=tracker,
             metrics=self._metrics,
+            # Shared RiskConfig (same object the panel mutates) so the panel's
+            # kill switch actually stops liquidity, not just the Executor path.
+            risk=getattr(getattr(context, "_executor", None), "risk", None),
         )
         self._provider.set_scanner(self._scanner)
 
         # Wire auto-redeem: when matched pairs are detected, use executor's redeem
-        executor = context._executor
-        if hasattr(executor, 'redeem_position'):
+        executor = getattr(context, "_executor", None)
+        if executor is not None and hasattr(executor, 'redeem_position'):
             self._provider.set_redeem_callback(executor.redeem_position)
 
     @property

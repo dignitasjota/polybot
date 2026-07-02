@@ -50,6 +50,7 @@ class DailySnapshot:
 
     # Losses (USDC)
     adverse_loss: float = 0.0
+    exit_loss: float = 0.0  # Realized loss from auto-exit sells of unmatched inventory
 
     # Computed
     @property
@@ -68,7 +69,7 @@ class DailySnapshot:
 
     @property
     def total_loss(self) -> float:
-        return self.adverse_loss
+        return self.adverse_loss + self.exit_loss
 
     @property
     def net_pnl(self) -> float:
@@ -103,6 +104,7 @@ class DailySnapshot:
             "maker_rebate": round(self.maker_rebate, 2),
             "total_gross": round(self.total_gross, 2),
             "adverse_loss": round(self.adverse_loss, 2),
+            "exit_loss": round(self.exit_loss, 2),
             "total_loss": round(self.total_loss, 2),
             "net_pnl": round(self.net_pnl, 2),
             "adverse_ratio": round(self.adverse_ratio, 3),
@@ -167,6 +169,10 @@ class LiquidityMetrics:
 
     def record_spread_income(self, amount: float):
         self._get_today().spread_income += amount
+
+    def record_exit_loss(self, amount: float):
+        """Realized loss from an auto-exit sell (unmatched inventory dumped)."""
+        self._get_today().exit_loss += amount
 
     def record_scoring(self, scoring: int, not_scoring: int):
         day = self._get_today()

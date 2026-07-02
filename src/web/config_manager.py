@@ -180,10 +180,13 @@ class ConfigManager:
                 val = min(val, 20)
             self.config.data.max_markets_monitored = val
 
-        # Update live runner risk configs
+        # Update live runner risk configs.
+        # kill_switch is GLOBAL: it must reach every account (liquidity reads
+        # its shared RiskConfig each cycle). The rest of the params stay
+        # directional-specific.
         for runner in self.bot.accounts:
+            runner.account.risk.kill_switch = r.kill_switch
             if runner.strategy_type == "directional":
-                runner.account.risk.kill_switch = r.kill_switch
                 runner.account.risk.max_bet_per_trade = r.max_bet_per_trade
                 runner.account.risk.max_daily_loss = r.max_daily_loss
                 if "simulated_balance" in params:
