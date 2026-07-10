@@ -1321,9 +1321,18 @@ Antes de que liquidity vaya a live, los dos fixes del "bloque 2" de la auditorí
 - **M8 — REST fallback refresca bid+ask**: el fallback del WS solo actualizaba `best_ask` pero marcaba el quote fresco, dejando el `best_bid` congelado → el midpoint de liquidity (y el unwind de completeness) se contaminaban con un bid stale. Ahora `_poll_rest_prices` consulta ambos lados (`_fetch_rest_price`, buy→ask / sell→bid) antes de estampar `last_update`.
 - **B7/B13 (de paso) — reset diario del Executor a medianoche UTC real**: `_maybe_reset_daily` usa el día UTC (`_utc_day()`) en vez de una ventana rodante de 24h. Deja el mecanismo del Executor correcto para cuando directional/copy cableen `update_pnl` al volver a live.
 
-**Pendiente de C1**: el stop-loss del Executor (directional/copy) y de completeness/weather sigue sin cablearse — su P&L vive fuera del Executor y están en paper. Se cablea cuando cada una vuelva a live.
-
 **Tests**: +6 stop-loss en `test_liquidity_provider.py` + nuevo `test_block2_risk.py` (6: REST fallback bid/ask, reset UTC del Executor). **Suite liquidity+metrics+block2: 87/87 verde.**
+
+### C1 completo: stop-loss diario en las 5 estrategias (Julio 10, 2026)
+
+Cerrado el pendiente de C1: las otras 4 estrategias también tienen stop-loss diario. En vez de cablear el Executor central (que **en paper ni siquiera llama `_check_risk`** → no cortaría en las estrategias que están en paper), se implementa **a nivel de cada estrategia** con un helper compartido `src/risk_guard.py::DailyLossGuard`: cada estrategia lo alimenta con su P&L realizado al settlear y lo consulta antes de apostar. Vive en el mismo objeto que decide y settlea, así funciona igual en paper y live sin acoplamiento frágil.
+
+- **directional** (`detector.py`): guard con `self.risk.max_daily_loss`; `record()` en `_settle_pending`, el sweep y `_check_resolved_market`; check antes de registrar la bet (`is_new_bet=False` si tripped); `reset()` en `reset_stats`.
+- **copy_trade** (`copy_trader.py`): nuevo param `max_daily_loss` (desde `account.risk` en `account_runner`); `record()` en `_settle_bet` (ambos brazos); check antes de emitir; `reset()` en `reset_stats`.
+- **completeness** (`completeness_scanner.py`): `max_daily_loss` desde el `RiskConfig` compartido (vía `context._executor.risk`); `record()` en los 4 puntos de P&L (paper, no-pair unwind, exceso, redeem); check al inicio de `_execute_arb`.
+- **weather** (`weather_scanner.py`): igual, `record()` en el settlement de `check_resolutions`, check al inicio de `_execute_trade`.
+
+El guard resetea en el límite del día UTC (un tripped se levanta solo al día siguiente) y `max_daily_loss <= 0` lo desactiva. Con esto **C1 deja de ser letra muerta en las 5 estrategias**. El mecanismo `_daily_pnl`/`update_pnl` del Executor sigue existiendo (con el reset UTC de B7/B13) pero ya no es el driver — cada estrategia se autoprotege. **Tests**: +6 `test_risk_guard.py` (helper) +6 integración (corte real en weather/completeness, cableado+reset en detector/copy). **220 verde** (weather 96 + completeness 65 + risk_guard 12 + liquidity 61 - solapes).
 
 ### Auditoría de seguridad y calidad (Julio 2, 2026)
 
@@ -1333,9 +1342,9 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 
 #### 🔴 Críticos (pérdida de dinero real / control de emergencia roto)
 
-**[PARCIAL — liquidity funcional Jul 10] C1 — `max_daily_loss` es letra muerta en todo el bot**
-`executor.py:1445` — `update_pnl()` no tiene ningún llamador. `_daily_pnl` queda en 0.0 siempre → el check de stop-loss nunca dispara. El parámetro del panel es teatro.
-> Jul 10, 2026: **liquidity** (la que va a live) tiene stop-loss diario REAL: `_refresh_all` compara `metrics.today_net_pnl()` contra `-max_daily_loss` del `RiskConfig` compartido → cancel-all + stop quoting al superarse, con guard en `_place_order`. Se reanuda solo al rollover UTC (net rueda a 0). Expuesto en `get_stats` (`daily_loss_halted`, `today_net_pnl`, `max_daily_loss`). El mecanismo del Executor (directional/copy) sigue sin alimentarse porque su P&L vive en el detector/copy_trader, no en el Executor — pendiente de cablear `update_pnl` desde los settlements cuando esas vuelvan a live; están en paper. Completeness/weather (también paper) necesitarían su propio check como el de liquidity.
+**[CORREGIDO Jul 10, 2026] C1 — `max_daily_loss` es letra muerta en todo el bot**
+`executor.py:1445` — `update_pnl()` no tenía ningún llamador. `_daily_pnl` quedaba en 0.0 siempre → el check de stop-loss nunca disparaba. El parámetro del panel era teatro.
+> Fix en dos fases: (1) **liquidity** con stop-loss basado en `metrics.today_net_pnl()` vs `-max_daily_loss` (cancel-all + stop quoting, guard en `_place_order`, expuesto en `get_stats`). (2) **directional/copy/completeness/weather** con el helper compartido `DailyLossGuard` (`src/risk_guard.py`): cada estrategia lo alimenta al settlear y lo consulta antes de apostar (ver "C1 completo: stop-loss diario en las 5 estrategias"). El stop-loss se implementó a nivel de estrategia porque el Executor **no llama `_check_risk` en paper** → un check central no cortaría las estrategias que están en paper. B7/B13 (reset UTC del Executor) también corregidos.
 
 **[PARCIAL — liquidity corregido Jul 2] C2 — Kill switch no cubre completeness, liquidity ni weather**
 > Jul 2, 2026: `LiquidityProvider` recibe el `RiskConfig` compartido y honra `kill_switch` (cancel-all + stop quoting en `_refresh_all`, guard en `_place_order`); el panel propaga `kill_switch` a TODOS los runners (`config_manager.py`). Completeness y weather siguen sin cubrir el kill switch en su propio camino de ejecución, pero corren en **paper** (sin órdenes reales), así que no hay exposición real que cortar.
