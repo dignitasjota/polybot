@@ -1313,6 +1313,18 @@ Auditoría del [changelog](https://docs.polymarket.com/changelog) contra el cód
 
 **Plan de validación**: live con capital pequeño ($100-150) durante 3-4 semanas midiendo rewards reales (Data API) vs pérdidas por fills con las métricas ya honestas. Escalar solo si `net_pnl > 0` sostenido y fill rate <2-3%. Liquidity **no** se puede validar en paper: los rewards solo se devengan con órdenes reales en el book.
 
+### Bloque 2: stop-loss diario + staleness del WS (Julio 10, 2026)
+
+Antes de que liquidity vaya a live, los dos fixes del "bloque 2" de la auditoría:
+
+- **C1 (liquidity) — stop-loss diario funcional**: `max_daily_loss` era letra muerta en todo el bot (`update_pnl` sin llamador). Ahora liquidity compara `metrics.today_net_pnl()` (rewards+rebate − adverse − exit_loss, con rollover UTC automático) contra `-max_daily_loss` del `RiskConfig` compartido en cada `_refresh_all`: al superarse → `cancel_all` + stop quoting + guard en `_place_order`, y se reanuda solo al día UTC siguiente (net rueda a 0). Nuevo helper `LiquidityMetrics.today_net_pnl()`; flag `_daily_loss_halted`; expuesto en `get_stats` (`daily_loss_halted`, `today_net_pnl`, `max_daily_loss`). Es el único límite de riesgo que importaba para liquidity en live.
+- **M8 — REST fallback refresca bid+ask**: el fallback del WS solo actualizaba `best_ask` pero marcaba el quote fresco, dejando el `best_bid` congelado → el midpoint de liquidity (y el unwind de completeness) se contaminaban con un bid stale. Ahora `_poll_rest_prices` consulta ambos lados (`_fetch_rest_price`, buy→ask / sell→bid) antes de estampar `last_update`.
+- **B7/B13 (de paso) — reset diario del Executor a medianoche UTC real**: `_maybe_reset_daily` usa el día UTC (`_utc_day()`) en vez de una ventana rodante de 24h. Deja el mecanismo del Executor correcto para cuando directional/copy cableen `update_pnl` al volver a live.
+
+**Pendiente de C1**: el stop-loss del Executor (directional/copy) y de completeness/weather sigue sin cablearse — su P&L vive fuera del Executor y están en paper. Se cablea cuando cada una vuelva a live.
+
+**Tests**: +6 stop-loss en `test_liquidity_provider.py` + nuevo `test_block2_risk.py` (6: REST fallback bid/ask, reset UTC del Executor). **Suite liquidity+metrics+block2: 87/87 verde.**
+
 ### Auditoría de seguridad y calidad (Julio 2, 2026)
 
 Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos — pendientes de corrección.**
@@ -1321,8 +1333,9 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 
 #### 🔴 Críticos (pérdida de dinero real / control de emergencia roto)
 
-**[ABIERTO] C1 — `max_daily_loss` es letra muerta en todo el bot**
-`executor.py:1445` — `update_pnl()` no tiene ningún llamador. `_daily_pnl` queda en 0.0 siempre → el check de stop-loss nunca dispara. Ninguna estrategia implementa el suyo. El parámetro del panel es teatro.
+**[PARCIAL — liquidity funcional Jul 10] C1 — `max_daily_loss` es letra muerta en todo el bot**
+`executor.py:1445` — `update_pnl()` no tiene ningún llamador. `_daily_pnl` queda en 0.0 siempre → el check de stop-loss nunca dispara. El parámetro del panel es teatro.
+> Jul 10, 2026: **liquidity** (la que va a live) tiene stop-loss diario REAL: `_refresh_all` compara `metrics.today_net_pnl()` contra `-max_daily_loss` del `RiskConfig` compartido → cancel-all + stop quoting al superarse, con guard en `_place_order`. Se reanuda solo al rollover UTC (net rueda a 0). Expuesto en `get_stats` (`daily_loss_halted`, `today_net_pnl`, `max_daily_loss`). El mecanismo del Executor (directional/copy) sigue sin alimentarse porque su P&L vive en el detector/copy_trader, no en el Executor — pendiente de cablear `update_pnl` desde los settlements cuando esas vuelvan a live; están en paper. Completeness/weather (también paper) necesitarían su propio check como el de liquidity.
 
 **[PARCIAL — liquidity corregido Jul 2] C2 — Kill switch no cubre completeness, liquidity ni weather**
 > Jul 2, 2026: `LiquidityProvider` recibe el `RiskConfig` compartido y honra `kill_switch` (cancel-all + stop quoting en `_refresh_all`, guard en `_place_order`); el panel propaga `kill_switch` a TODOS los runners (`config_manager.py`). Completeness y weather siguen sin cubrir el kill switch en su propio camino de ejecución, pero corren en **paper** (sin órdenes reales), así que no hay exposición real que cortar.
@@ -1398,8 +1411,9 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 **[ABIERTO] M7 — WS throttle descarta snapshots de book**
 `websocket_client.py:229-244` — el throttle de 1s por `asset_id` es compartido entre tipos de evento: un `best_bid_ask` consume el slot y un `book` que llegue <1s después se descarta silenciosamente → profundidad del tracker desincronizada; afecta al sizing de completeness (`require_book_depth`).
 
-**[ABIERTO] M8 — REST fallback marca frescura con bids stale**
-`websocket_client.py:341-363` — el fallback solo actualiza `best_ask_*` pero pone `state.last_update = now` → bids congelados marcados como frescos. `max_quote_age_s` de completeness pasa; `_unwind_leg` usaría bids stale como si fueran actuales.
+**[CORREGIDO Jul 10, 2026] M8 — REST fallback marca frescura con bids stale**
+`websocket_client.py:341-363` — el fallback solo actualizaba `best_ask_*` pero ponía `state.last_update = now` → bids congelados marcados como frescos.
+> Fix: `_poll_rest_prices` consulta ambos lados (`side=buy`→best ask, `side=sell`→best bid) vía el nuevo helper `_fetch_rest_price` y solo estampa `last_update` cuando refresca al menos un lado. El midpoint de liquidity y el `_unwind_leg`/`max_quote_age_s` de completeness dejan de leer un bid stale certificado como fresco. Tests en `test_block2_risk.py`.
 
 **[ABIERTO] M9 — Cambio live→paper huérfana órdenes reales en el CLOB**
 `executor.py:1483-1488` — `reset_trades()` limpia `_pending_orders` sin cancelar en el exchange las órdenes resting → capital bloqueado, fills posteriores invisibles. Además `account_runner.py:560-566` no llama `executor.set_mode(PAPER)` → executor queda en modo LIVE con el runner en PAPER.
@@ -1432,13 +1446,13 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 - **[ABIERTO] B4** — Weather: `_outcome_history` sin poda — crece sin límite en `weather_verification.json`.
 - **[ABIERTO] B5** — Weather: orphans sintéticos no filtran `side` ni verifican que sea BUY (`_record_synthetic_orphan:2129`).
 - **[ABIERTO] B6** — Completeness: `_unwind_leg` no descuenta el taker fee del SELL → pérdida real algo mayor que la contabilizada.
-- **[ABIERTO] B7** — `max_daily_loss` no resetea a medianoche UTC sino cada 24h desde el primer check (`executor.py:1437`).
+- **[CORREGIDO Jul 10, 2026] B7** — `max_daily_loss` no resetea a medianoche UTC sino cada 24h desde el primer check. *Fix: `_maybe_reset_daily` compara el día UTC (`_utc_day()`) en vez de una ventana rodante de 24h; resetea `_daily_pnl` y `_daily_pnl_by_mode` en el límite del día.*
 - **[ABIERTO] B8** — `net_margin` resta el gas fijo como coste por share en vez de por redención (`fees.py:150`).
 - **[ABIERTO] B9** — Docker corre como root (sin directiva `USER` en Dockerfile).
 - **[ABIERTO] B10** — `/api/health` expone estado operativo sin autenticación (`middleware.py:10`, `routes_api.py:11`).
 - **[ABIERTO] B11** — Dependencias sin pin exacto en `requirements.txt` (todo con `>=`).
 - **[ABIERTO] B12** — `_last_check_time` y `_persisted_orders` crecen sin límite en operación continua (`websocket_client.py:34`, `executor.py:207`).
-- **[ABIERTO] B13** — `_maybe_reset_daily` resetea cada 24h desde el primer check, no a medianoche UTC (`executor.py:1437`).
+- **[CORREGIDO Jul 10, 2026] B13** — duplicado de B7 (`_maybe_reset_daily` reset a medianoche UTC). Corregido junto con B7.
 
 ---
 
