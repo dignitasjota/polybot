@@ -70,10 +70,13 @@ class CompletenessStrategy(Strategy):
         credentials=None,
     ):
         super().__init__(config, context)
+        # Shared RiskConfig (same object the panel mutates) → daily stop-loss.
+        risk = getattr(getattr(context, "_executor", None), "risk", None)
         self._scanner = CompletenessScanner(
             config=config,
             tracker=tracker,
             credentials=credentials,
+            max_daily_loss=getattr(risk, "max_daily_loss", 0.0) if risk else 0.0,
         )
 
         # Wire redeem callback from executor

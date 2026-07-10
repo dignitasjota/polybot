@@ -33,6 +33,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from src.risk_guard import DailyLossGuard
+
 if TYPE_CHECKING:
     from src.config import CredentialsConfig
 
@@ -355,9 +357,11 @@ class WeatherScanner:
     _FORECAST_CONCURRENCY = 2
     _RATE_LIMIT_BACKOFF_S = 300  # When 429, pause all fetches for 5 minutes
 
-    def __init__(self, config, credentials: CredentialsConfig | None = None):
+    def __init__(self, config, credentials: CredentialsConfig | None = None,
+                 max_daily_loss: float = 0.0):
         self._config = config
         self._credentials = credentials
+        self._loss_guard = DailyLossGuard(max_daily_loss)  # C1 daily stop-loss
 
         # HTTP session (lazy init)
         self._session = None
@@ -413,6 +417,7 @@ class WeatherScanner:
         self._trades_lost = 0
         self._total_pnl = 0.0
         self._forecast_cache.clear()
+        self._loss_guard.reset()  # C1: fresh daily P&L for the new mode
         # Persist empty state
         self._save_pending_trades()
         logger.info("weather_stats_reset", mode=self._config.mode)
@@ -1756,6 +1761,16 @@ class WeatherScanner:
 
     async def _execute_trade(self, opp: WeatherOpportunity):
         """Execute a weather trade based on detected opportunity."""
+        # Daily stop-loss (C1): stop betting once today's realized P&L breached
+        # -max_daily_loss. Resets at the UTC day boundary.
+        if self._loss_guard.tripped():
+            logger.warning(
+                "weather_daily_loss_halt",
+                daily_pnl=round(self._loss_guard.daily_pnl, 2),
+                limit=round(-self._loss_guard.max_daily_loss, 2),
+            )
+            return
+
         market = opp.market
 
         # Calculate bet size
@@ -2257,6 +2272,7 @@ class WeatherScanner:
 
             trade.resolved_at = now
             self._total_pnl += trade.pnl
+            self._loss_guard.record(trade.pnl)  # C1 daily stop-loss
 
             # Durable outcome record for the calibrator (#2) and gate (#4).
             # forecast_prob here is the adjusted prob actually used to bet.

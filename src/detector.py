@@ -8,6 +8,7 @@ import structlog
 
 from src.config import RiskConfig, StrategyConfig
 from src.market_tracker import MarketState, MarketTracker
+from src.risk_guard import DailyLossGuard
 from src.price_checker import CRYPTO_BUFFER_PCT, CRYPTO_SYMBOLS, PriceChecker
 
 # All crypto names we recognize (CRYPTO_SYMBOLS keys + extras not on Binance)
@@ -74,6 +75,7 @@ class ClosingArbitrageDetector:
         self.config = config
         self.tracker = tracker
         self.risk = risk or RiskConfig()
+        self._loss_guard = DailyLossGuard(self.risk.max_daily_loss)  # C1 stop-loss
         self._starting_balance = starting_balance
         self._balance = starting_balance  # Current simulated balance (dynamic)
         self._opportunities_log: list[Opportunity] = []
@@ -287,6 +289,7 @@ class ClosingArbitrageDetector:
                             self._stats["simulated_pnl"] = round(
                                 self._stats["simulated_pnl"] + pnl, 2
                             )
+                            self._loss_guard.record(pnl)  # C1 daily stop-loss
                             logger.info(
                                 "sweep_settled",
                                 question=opp.question[:60],
@@ -332,6 +335,7 @@ class ClosingArbitrageDetector:
         self._no_depth_cooldown.clear()
         self._settled_conditions.clear()
         self._confirmed_orders.clear()  # Clear executor-confirmed orders on reset
+        self._loss_guard.reset()  # C1: fresh daily P&L for the new mode
         self._last_logged.clear()
         # Don't clear _last_log_time - keep throttle state to avoid spam on mode switch
         self._last_check_price.clear()  # Clear dirty flags for fresh checks in new mode
@@ -546,6 +550,7 @@ class ClosingArbitrageDetector:
             if not self._is_live_mode or was_confirmed_by_executor:
                 self._balance = round(self._balance + pnl, 2)
                 self._stats["simulated_pnl"] = round(self._stats["simulated_pnl"] + pnl, 2)
+                self._loss_guard.record(pnl)  # C1 daily stop-loss
 
             logger.info(
                 "opportunity_settled",
@@ -670,6 +675,7 @@ class ClosingArbitrageDetector:
                 self._balance = round(self._balance + pnl, 2)
                 self._stats["settled_wins"] += 1
                 self._stats["simulated_pnl"] = round(self._stats["simulated_pnl"] + pnl, 2)
+                self._loss_guard.record(pnl)  # C1 daily stop-loss (always a win here)
                 logger.info(
                     "post_resolution_settled",
                     question=bet_opp.question[:80],
@@ -1127,6 +1133,17 @@ class ClosingArbitrageDetector:
                 opp.suggested_bet = 0.0
                 opp.potential_profit = 0.0
                 is_new_bet = False
+
+        # Daily stop-loss (C1): once today's realized P&L breaches
+        # -max_daily_loss, stop opening new bets. Resets at the UTC day boundary.
+        if is_new_bet and opp.suggested_bet > 0 and self._loss_guard.tripped():
+            logger.warning(
+                "directional_daily_loss_halt",
+                daily_pnl=round(self._loss_guard.daily_pnl, 2),
+                limit=round(-self._loss_guard.max_daily_loss, 2),
+                question=opp.question[:60],
+            )
+            is_new_bet = False
 
         if is_new_bet and opp.suggested_bet > 0:
             self._bet_placed[key] = opp

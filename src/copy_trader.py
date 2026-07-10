@@ -9,6 +9,7 @@ import structlog
 
 from src.config import CopyTradeConfig
 from src.detector import Opportunity
+from src.risk_guard import DailyLossGuard
 
 logger = structlog.get_logger("polymarket.copy_trader")
 
@@ -64,10 +65,12 @@ class CopyTrader:
     Tracks all bets and settles them when markets resolve.
     """
 
-    def __init__(self, config: CopyTradeConfig, starting_balance: float = 500.0):
+    def __init__(self, config: CopyTradeConfig, starting_balance: float = 500.0,
+                 max_daily_loss: float = 0.0):
         self.config = config
         self._starting_balance = starting_balance
         self._balance = starting_balance
+        self._loss_guard = DailyLossGuard(max_daily_loss)  # C1 daily stop-loss
         self._session: aiohttp.ClientSession | None = None
         self._running = False
         self._bg_task: asyncio.Task | None = None
@@ -139,6 +142,7 @@ class CopyTrader:
         """Reset all stats and bets (e.g. when switching from paper to live)."""
         self._bets.clear()
         self._all_bets.clear()
+        self._loss_guard.reset()  # C1: fresh daily P&L for the new mode
         if new_balance is not None:
             self._balance = new_balance
             self._starting_balance = new_balance
@@ -497,6 +501,16 @@ class CopyTrader:
         if bet_size < 0.10:
             return
 
+        # Daily stop-loss (C1): stop copying once today's realized P&L breached
+        # -max_daily_loss. Resets at the UTC day boundary.
+        if self._loss_guard.tripped():
+            logger.warning(
+                "copy_daily_loss_halt",
+                daily_pnl=round(self._loss_guard.daily_pnl, 2),
+                limit=round(-self._loss_guard.max_daily_loss, 2),
+            )
+            return
+
         shares = bet_size / trade.price if trade.price > 0 else 0
         fee = taker_fee(trade.price, shares)
         margin_net = (1.0 - trade.price) - taker_fee_per_share(trade.price) - GAS_REDEEM_USD
@@ -747,6 +761,7 @@ class CopyTrader:
             bet.actual_pnl = round(-bet.bet_size, 4)
             self._stats["settled_losses"] += 1
 
+        self._loss_guard.record(bet.actual_pnl)  # C1 daily stop-loss
         self._stats["simulated_pnl"] = round(
             self._balance - self._starting_balance, 2
         )

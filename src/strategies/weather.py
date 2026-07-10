@@ -141,7 +141,13 @@ class WeatherStrategy(Strategy):
         credentials=None,
     ):
         super().__init__(config, context)
-        self._scanner = WeatherScanner(config=config, credentials=credentials)
+        # Shared RiskConfig (same object the panel mutates) → daily stop-loss.
+        risk = getattr(getattr(context, "_executor", None), "risk", None)
+        self._scanner = WeatherScanner(
+            config=config,
+            credentials=credentials,
+            max_daily_loss=getattr(risk, "max_daily_loss", 0.0) if risk else 0.0,
+        )
         self._resolution_task: asyncio.Task | None = None
 
     @property

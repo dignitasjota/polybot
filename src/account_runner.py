@@ -223,6 +223,7 @@ class AccountRunner:
         ct = CopyTrader(
             account.copy_trade,
             starting_balance=account.risk.simulated_balance,
+            max_daily_loss=account.risk.max_daily_loss,
         )
         self._legacy_copy_trader = ct
 

@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from src.fees import GAS_REDEEM_USD, taker_fee, TAKER_FEE_RATES, DEFAULT_CATEGORY, category_from_tags
+from src.risk_guard import DailyLossGuard
 
 if TYPE_CHECKING:
     from src.config import CredentialsConfig
@@ -116,10 +117,12 @@ class CompletenessScanner:
         config,  # CompletenessConfig
         tracker: MarketTracker | None = None,
         credentials: CredentialsConfig | None = None,
+        max_daily_loss: float = 0.0,
     ):
         self._config = config
         self._tracker = tracker
         self._credentials = credentials
+        self._loss_guard = DailyLossGuard(max_daily_loss)  # C1 daily stop-loss
 
         # ClobClient — initialized in start() for live
         self._client = None
@@ -155,6 +158,7 @@ class CompletenessScanner:
         self._trades.clear()
         self._pending_redeems.clear()
         self._cooldown.clear()
+        self._loss_guard.reset()  # C1: fresh daily P&L for the new mode
         self._total_scans = 0
         self._opportunities_found = 0
         self._trades_executed = 0
@@ -507,6 +511,16 @@ class CompletenessScanner:
 
     async def _execute_arb(self, opp: ArbOpportunity):
         """Execute the arb: buy all outcomes, then redeem."""
+        # Daily stop-loss (C1): completeness arb is "risk-free" in theory, but
+        # legging in live can realize losses. Stop executing once today's P&L
+        # breached -max_daily_loss. Resets at the UTC day boundary.
+        if self._loss_guard.tripped():
+            logger.warning(
+                "completeness_daily_loss_halt",
+                daily_pnl=round(self._loss_guard.daily_pnl, 2),
+                limit=round(-self._loss_guard.max_daily_loss, 2),
+            )
+            return
         self._cooldown[opp.condition_id] = time.time()
 
         shares = opp.max_shares
@@ -540,6 +554,7 @@ class CompletenessScanner:
         self._trades.append(trade)
         self._trades_executed += 1
         self._total_profit += trade.actual_pnl
+        self._loss_guard.record(trade.actual_pnl)  # C1 daily stop-loss
 
         logger.info(
             "paper_arb_executed",
@@ -730,6 +745,7 @@ class CompletenessScanner:
                 trade.cost_total = 0.0
                 trade.actual_pnl = round(unwind_pnl, 4)
                 self._total_profit += trade.actual_pnl
+                self._loss_guard.record(trade.actual_pnl)  # C1 daily stop-loss
                 self._trades_failed += 1
                 self._trades.append(trade)
                 logger.warning(
@@ -765,6 +781,7 @@ class CompletenessScanner:
             trade.actual_pnl = round(unwind_pnl, 4)
             if unwind_pnl:
                 self._total_profit += round(unwind_pnl, 4)
+                self._loss_guard.record(round(unwind_pnl, 4))  # C1 daily stop-loss
 
             trade.status = "confirmed"
             self._trades.append(trade)
@@ -956,6 +973,7 @@ class CompletenessScanner:
                     # realized — don't overwrite it.
                     trade.actual_pnl = round(trade.actual_pnl + trade.expected_profit, 4)
                     self._total_profit += trade.expected_profit
+                    self._loss_guard.record(trade.expected_profit)  # C1 daily stop-loss
                     logger.info(
                         "arb_redeemed",
                         trade_id=trade.trade_id,
