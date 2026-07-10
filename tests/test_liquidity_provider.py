@@ -777,8 +777,9 @@ async def test_get_auth_headers_no_client():
 
 class _FakeRisk:
     """Minimal RiskConfig stand-in."""
-    def __init__(self, kill_switch=False):
+    def __init__(self, kill_switch=False, max_daily_loss=100.0):
         self.kill_switch = kill_switch
+        self.max_daily_loss = max_daily_loss
 
 
 import sys as _sys
@@ -1080,3 +1081,122 @@ async def test_kill_switch_none_risk_is_noop():
         token_id="tok", price=0.5, size=10, is_yes=True, condition_id="0xabc",
     )
     assert result is not None
+
+
+# ── C1 (bloque 2): stop-loss diario de liquidity ─────────────────────
+
+from src.liquidity_metrics import LiquidityMetrics
+
+
+@pytest.mark.asyncio
+async def test_daily_loss_halts_quoting_and_cancels():
+    """Si el net_pnl del día ≤ -max_daily_loss: cancel-all + stop, guard en place."""
+    metrics = LiquidityMetrics(total_capital=250.0)
+    cfg = _make_config()
+    risk = _FakeRisk(max_daily_loss=20.0)
+    provider = LiquidityProvider(config=cfg, metrics=metrics, risk=risk)
+
+    class _FakeScanner:
+        def get_top_markets(self, n): return []
+        def get_all_markets(self): return []
+    provider._scanner = _FakeScanner()
+
+    market = _make_market(midpoint=0.50)
+    await provider._open_position(market)
+    assert provider._positions[market.condition_id].bid_order is not None
+
+    # Registrar una pérdida por fill que supera el límite (25 > 20)
+    metrics._get_today().adverse_loss = 25.0
+    assert metrics.today_net_pnl() == pytest.approx(-25.0)
+
+    await provider._refresh_all()
+
+    pos = provider._positions[market.condition_id]
+    assert provider._daily_loss_halted is True
+    assert pos.bid_order is None and pos.ask_order is None  # cancel-all
+    # Guard de última línea: no coloca órdenes nuevas mientras halted
+    blocked = await provider._place_order(
+        token_id="tok", price=0.5, size=10, is_yes=True, condition_id="0xabc",
+    )
+    assert blocked is None
+
+
+@pytest.mark.asyncio
+async def test_daily_loss_not_halted_below_limit():
+    metrics = LiquidityMetrics(total_capital=250.0)
+    cfg = _make_config()
+    provider = LiquidityProvider(config=cfg, metrics=metrics, risk=_FakeRisk(max_daily_loss=100.0))
+
+    class _FakeScanner:
+        def get_top_markets(self, n): return []
+        def get_all_markets(self): return []
+    provider._scanner = _FakeScanner()
+
+    metrics._get_today().adverse_loss = 25.0   # -25 > -100 → no halt
+    await provider._refresh_all()
+    assert provider._daily_loss_halted is False
+
+
+@pytest.mark.asyncio
+async def test_daily_loss_lifts_when_pnl_recovers():
+    """El halt se levanta si el net del día vuelve por encima del límite (rollover simula esto)."""
+    metrics = LiquidityMetrics(total_capital=250.0)
+    cfg = _make_config()
+    provider = LiquidityProvider(config=cfg, metrics=metrics, risk=_FakeRisk(max_daily_loss=20.0))
+
+    class _FakeScanner:
+        def get_top_markets(self, n): return []
+        def get_all_markets(self): return []
+    provider._scanner = _FakeScanner()
+
+    metrics._get_today().adverse_loss = 25.0
+    await provider._refresh_all()
+    assert provider._daily_loss_halted is True
+
+    # Nuevo día = net 0 (o rewards que recuperan): halt se levanta
+    metrics._get_today().adverse_loss = 0.0
+    await provider._refresh_all()
+    assert provider._daily_loss_halted is False
+
+
+@pytest.mark.asyncio
+async def test_daily_loss_disabled_when_no_risk_or_zero_limit():
+    """Sin RiskConfig o con max_daily_loss=0, el stop-loss no actúa (opt-out)."""
+    metrics = LiquidityMetrics(total_capital=250.0)
+    cfg = _make_config()
+
+    class _FakeScanner:
+        def get_top_markets(self, n): return []
+        def get_all_markets(self): return []
+
+    # Sin risk
+    p1 = LiquidityProvider(config=cfg, metrics=metrics)
+    p1._scanner = _FakeScanner()
+    metrics._get_today().adverse_loss = 999.0
+    await p1._refresh_all()
+    assert p1._daily_loss_halted is False
+
+    # max_daily_loss = 0 → desactivado
+    p2 = LiquidityProvider(config=cfg, metrics=LiquidityMetrics(), risk=_FakeRisk(max_daily_loss=0.0))
+    p2._scanner = _FakeScanner()
+    p2._metrics._get_today().adverse_loss = 999.0
+    await p2._refresh_all()
+    assert p2._daily_loss_halted is False
+
+
+def test_today_net_pnl_helper():
+    m = LiquidityMetrics(total_capital=250.0)
+    m._get_today().rewards_earned = 10.0
+    m._get_today().adverse_loss = 3.0
+    m._get_today().exit_loss = 2.0
+    assert m.today_net_pnl() == pytest.approx(5.0)  # 10 - (3+2)
+
+
+def test_stats_expose_risk_halts():
+    metrics = LiquidityMetrics(total_capital=250.0)
+    cfg = _make_config()
+    provider = LiquidityProvider(config=cfg, metrics=metrics, risk=_FakeRisk(max_daily_loss=20.0))
+    stats = provider.get_stats()
+    assert "daily_loss_halted" in stats
+    assert "today_net_pnl" in stats
+    assert stats["max_daily_loss"] == 20.0

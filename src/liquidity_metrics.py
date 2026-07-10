@@ -199,6 +199,14 @@ class LiquidityMetrics:
     def get_today(self) -> dict:
         return self._get_today().to_dict(self._total_capital)
 
+    def today_net_pnl(self) -> float:
+        """Realized net P&L for the current UTC day (rewards+rebate - losses).
+
+        Drives the daily stop-loss. Rolls over to 0 automatically at midnight
+        UTC (a fresh DailySnapshot), so the halt lifts on its own next day.
+        """
+        return self._get_today().net_pnl
+
     def get_daily(self, date: str) -> dict | None:
         snap = self._days.get(date)
         return snap.to_dict(self._total_capital) if snap else None

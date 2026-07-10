@@ -169,6 +169,7 @@ class LiquidityProvider:
         self._metrics = metrics
         self._risk = risk
         self._kill_switch_engaged = False  # Edge detection for cancel-all-once
+        self._daily_loss_halted = False    # Daily stop-loss tripped (auto-resets next UTC day)
 
         # ClobClient — initialized in start() for live/dry_run
         self._client = None
@@ -932,6 +933,28 @@ class LiquidityProvider:
             # decremented on confirmed fill, never at placement)
             await self._check_exit_fills()
 
+        # Daily stop-loss (C1): if today's realized net P&L breaches
+        # -max_daily_loss, pull every order and stop quoting until the next UTC
+        # day — net_pnl rolls to 0 at midnight so the halt lifts on its own.
+        # Guards against a run of adverse fills that rewards don't cover; this
+        # is the one risk limit that mattered for liquidity going live
+        # (max_daily_loss was dead code across the whole bot before).
+        max_daily_loss = getattr(self._risk, "max_daily_loss", 0.0) if self._risk else 0.0
+        if max_daily_loss and max_daily_loss > 0 and self._metrics is not None:
+            today_net = self._metrics.today_net_pnl()
+            if today_net <= -max_daily_loss:
+                if not self._daily_loss_halted:
+                    self._daily_loss_halted = True
+                    logger.warning(
+                        "liquidity_daily_loss_halt",
+                        net_pnl=round(today_net, 2),
+                        limit=round(-max_daily_loss, 2),
+                        action="cancel_all",
+                    )
+                    await self._cancel_all_orders()
+                return
+            self._daily_loss_halted = False
+
         # Orphan recovery: if we have positions but ALL orders are None,
         # our USDC is likely locked in orphaned CLOB orders we lost track of.
         # Cancel everything and start fresh.
@@ -1618,6 +1641,10 @@ class LiquidityProvider:
         # Last-line kill switch guard (covers every quoting path)
         if self._risk is not None and getattr(self._risk, "kill_switch", False):
             logger.warning("order_blocked_kill_switch", condition_id=condition_id[:16])
+            return None
+        # Last-line daily stop-loss guard
+        if self._daily_loss_halted:
+            logger.warning("order_blocked_daily_loss", condition_id=condition_id[:16])
             return None
         if self.should_simulate:
             if self.is_dry_run:
@@ -2428,6 +2455,13 @@ class LiquidityProvider:
             "emergency_cancels": self._emergency_cancels,
             "ghost_removals": self._ghost_removals,
             "markets_abandoned": self._markets_abandoned,
+            # Risk halts
+            "kill_switch_engaged": self._kill_switch_engaged,
+            "daily_loss_halted": self._daily_loss_halted,
+            "today_net_pnl": round(self._metrics.today_net_pnl(), 2) if self._metrics else 0.0,
+            "max_daily_loss": (
+                getattr(self._risk, "max_daily_loss", 0.0) if self._risk else 0.0
+            ),
             "total_redeems": self._total_redeems,
             "total_auto_exits": self._total_auto_exits,
             # Heartbeat
