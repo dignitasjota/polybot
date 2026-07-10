@@ -338,31 +338,55 @@ class WebSocketClient:
         if polls > 0:
             logger.info("rest_fallback_stopped", polls=polls)
 
-    async def _poll_rest_prices(self, token_ids: list[str]):
-        """Fetch current prices from CLOB REST API for all tracked tokens."""
+    async def _fetch_rest_price(self, token_id: str, side: str) -> float | None:
+        """Fetch one side's price from the CLOB REST API. side=buy→best ask, sell→best bid."""
         assert self._http_session is not None
+        try:
+            async with self._http_session.get(
+                f"{CLOB_REST_URL}/price",
+                params={"token_id": token_id, "side": side},
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                return float(data.get("price", 0))
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return None
+
+    async def _poll_rest_prices(self, token_ids: list[str]):
+        """Fetch current prices from CLOB REST API for all tracked tokens.
+
+        Fetches BOTH sides (buy→best ask, sell→best bid) before stamping
+        last_update. The old version only refreshed best_ask but marked the
+        quote fresh, leaving best_bid frozen — which poisoned every midpoint /
+        best-bid consumer (liquidity's quoting midpoint, completeness unwind)
+        with a stale bid certified as current. (M8)
+        """
         for token_id in token_ids:
-            try:
-                async with self._http_session.get(
-                    f"{CLOB_REST_URL}/price",
-                    params={"token_id": token_id, "side": "buy"},
-                    timeout=aiohttp.ClientTimeout(total=3),
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
-                    price = float(data.get("price", 0))
-                    if price > 0:
-                        state = self.tracker.get_by_token(token_id)
-                        if state:
-                            is_yes = token_id == state.yes_token_id
-                            if is_yes:
-                                state.best_ask_yes = price
-                            else:
-                                state.best_ask_no = price
-                            state.last_update = time.time()
-            except (aiohttp.ClientError, asyncio.TimeoutError):
+            state = self.tracker.get_by_token(token_id)
+            if not state:
                 continue
+            ask = await self._fetch_rest_price(token_id, "buy")
+            bid = await self._fetch_rest_price(token_id, "sell")
+            is_yes = token_id == state.yes_token_id
+            updated = False
+            if ask is not None and ask > 0:
+                if is_yes:
+                    state.best_ask_yes = ask
+                else:
+                    state.best_ask_no = ask
+                updated = True
+            if bid is not None and bid > 0:
+                if is_yes:
+                    state.best_bid_yes = bid
+                else:
+                    state.best_bid_no = bid
+                updated = True
+            # Only certify freshness when at least one side actually refreshed;
+            # now that we poll both, the normal case keeps bid+ask coherent.
+            if updated:
+                state.last_update = time.time()
 
         # Trigger detector after REST update
         if self._on_opportunity_callback:

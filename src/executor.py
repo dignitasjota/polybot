@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 
 import structlog
@@ -11,6 +12,12 @@ from src.config import CredentialsConfig, RiskConfig, get_secret
 from src.detector import Opportunity
 
 logger = structlog.get_logger("polymarket.executor")
+
+
+def _utc_day() -> str:
+    """Current UTC calendar day, e.g. '2026-07-10'."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
 
 # Polymarket CLOB V2 contracts on Polygon (updated April 28, 2026)
 CTF_EXCHANGE = "0xE111180000d2663C0091e4f400237545B87B996B"
@@ -177,7 +184,7 @@ class Executor:
         self._client = None  # py_clob_client.ClobClient
         self._trades: list[TradeRecord] = []
         self._daily_pnl: float = 0.0
-        self._daily_reset_time: float = 0.0
+        self._daily_reset_day: str = _utc_day()  # UTC date marker for the daily reset
         self._initialized = False
 
         # Live balance tracking
@@ -1435,12 +1442,17 @@ class Executor:
         return ""
 
     def _maybe_reset_daily(self):
-        """Reset daily P&L counter at midnight UTC."""
-        now = time.time()
-        # Reset every 24 hours
-        if now - self._daily_reset_time > 86400:
+        """Reset daily P&L at the UTC date boundary.
+
+        Was a rolling 24h window anchored on the first check (an arbitrary
+        instant), so the daily loss limit reset at a drifting time of day
+        instead of midnight UTC (B7/B13).
+        """
+        today = _utc_day()
+        if today != self._daily_reset_day:
             self._daily_pnl = 0.0
-            self._daily_reset_time = now
+            self._daily_pnl_by_mode = {"paper": 0.0, "live": 0.0}
+            self._daily_reset_day = today
 
     def update_pnl(self, pnl: float):
         """Update daily P&L (called when a trade settles)."""
