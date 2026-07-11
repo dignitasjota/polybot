@@ -124,6 +124,7 @@
 <div class="section">
     <h3>CHANGE PASSWORD</h3>
     <form method="POST" action="/panel/settings/password">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <div class="form-row">
             <div class="form-group">
                 <label>Current Password</label>

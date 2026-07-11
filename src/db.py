@@ -6,6 +6,9 @@ import time
 
 import aiosqlite
 import bcrypt
+import structlog
+
+logger = structlog.get_logger("polymarket.db")
 
 DB_PATH = os.environ.get("PANEL_DB_PATH", "data/panel.db")
 
@@ -107,17 +110,33 @@ async def init_db():
             await db.execute("ALTER TABLE users ADD COLUMN account_name TEXT DEFAULT 'admin'")
             await db.commit()
 
-        # Create default admin if no users exist
+        # Create default admin if no users exist.
         cursor = await db.execute("SELECT COUNT(*) FROM users")
         row = await cursor.fetchone()
         if row[0] == 0:
-            password = os.environ.get("PANEL_PASSWORD", "admin")
+            password = os.environ.get("PANEL_PASSWORD", "")
+            generated = False
+            if not password or password == "admin":
+                # Never leave admin/admin reachable. Generate a strong random
+                # password and log it ONCE so the operator can grab it, instead
+                # of shipping a guessable default (C6).
+                import secrets
+                password = secrets.token_urlsafe(18)
+                generated = True
             hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
             await db.execute(
                 "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
                 ("admin", hashed, "admin"),
             )
             await db.commit()
+            if generated:
+                logger.warning(
+                    "panel_admin_password_generated",
+                    username="admin",
+                    password=password,
+                    note="PANEL_PASSWORD unset or 'admin' — random password generated. "
+                         "Save it now and set PANEL_PASSWORD; it won't be shown again.",
+                )
     finally:
         await db.close()
 

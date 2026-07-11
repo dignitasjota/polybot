@@ -1360,8 +1360,15 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 **[ABIERTO] C5 — Executor (directional/copy) tiene el bug de "fills invisibles" corregido en weather/completeness pero no portado**
 `executor.py:1244,1284-1287` — `success: true` con `orderID` vacío (FAK match instantáneo, el caso que costó $44.5 en weather) se trata como `order_rejected`. Si `post_order` lanza tras enviar, se marca `FAILED` sin verificación posterior. Los fixes `_verify_fill_via_api` (weather) y `_poll_fills` (completeness) existen pero no se aplicaron al Executor compartido.
 
-**[ABIERTO] C6 — Panel admin/admin sin CSRF, expuesto en 0.0.0.0:8080 sin TLS**
-`docker-compose.yml:8` — `PANEL_PASSWORD:-admin`. Sin CSRF en ningún POST sensible (cambio a live, kill switch, parámetros de riesgo). Cookie sin `SameSite`/`Secure`. Sin rate-limit en `/login` ni auditoría de intentos fallidos. Sin validación de rangos: se puede fijar `max_bet_per_trade` gigante o `max_daily_loss` negativo desde el panel. Explotación trivial si el operador no define `PANEL_PASSWORD`.
+**[CORREGIDO Jul 11, 2026] C6 — Panel admin/admin sin CSRF, expuesto en 0.0.0.0:8080 sin TLS**
+`docker-compose.yml:8` — `PANEL_PASSWORD:-admin`. Sin CSRF en ningún POST sensible, cookie sin `SameSite`/`Secure`, sin rate-limit en `/login`, admin/admin trivial.
+> Fix (varios frentes):
+> - **Password default**: `db.py` genera una password aleatoria (`secrets.token_urlsafe`) y la loguea una vez (`panel_admin_password_generated`) si `PANEL_PASSWORD` está vacía o es `admin` — nunca deja admin/admin alcanzable.
+> - **CSRF**: token synchronizer aleatorio (`session.new_csrf_token`) guardado en la cookie de sesión firmada; `auth_middleware` rechaza (403) todo POST/PUT/PATCH/DELETE cuyo `X-CSRF-Token` (htmx) o campo `csrf` (forms) no coincida (`hmac.compare_digest`). El token se inyecta en todos los templates vía context processor (`_csrf_context`), con `hx-headers` global en `base.html` y un hidden input en cada form. Login exento (no hay sesión previa).
+> - **Cookie**: `SameSite=Strict` + `HttpOnly` siempre; `Secure` opt-in vía `PANEL_HTTPS` (default off para no romper el deploy HTTP; SameSite=Strict es la defensa CSRF a nivel navegador sin requerir TLS).
+> - **Rate-limit login**: 5 fallos/5 min por IP → bloqueo 15 min (429); intentos fallidos auditados (`login_failed`).
+>
+> **Tests**: `test_web_security.py` (9, flujo login→CSRF de punta a punta). **Pendientes de este bloque** (no bloqueantes, documentados aparte): TLS real (infra, reverse proxy), M14 (`autoescape` en Jinja2 — hoy mitigado por `_esc()` manual; activarlo requiere marcar `|safe` el HTML pre-construido del dashboard), validación de rangos de parámetros en `config_manager` (requiere sesión+CSRF ya, menor prioridad), M13 (escritura atómica del TOML).
 
 ---
 

@@ -5,8 +5,13 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - PANEL_PASSWORD=${PANEL_PASSWORD:-admin}
+      # Vacío → el bot genera una password aleatoria al primer arranque y la
+      # loguea una vez (log 'panel_admin_password_generated'). NUNCA 'admin'.
+      - PANEL_PASSWORD=${PANEL_PASSWORD:-}
+      # Vacío → cookies de sesión invalidadas en cada reinicio; define uno estable.
       - SESSION_SECRET=${SESSION_SECRET:-}
+      # Poner a "true" si el panel está detrás de un proxy TLS (cookie Secure).
+      - PANEL_HTTPS=${PANEL_HTTPS:-}
       # Polymarket credentials (directional account)
       - PRIVATE_KEY=${PRIVATE_KEY:-}
       - POLYMARKET_API_KEY=${POLYMARKET_API_KEY:-}

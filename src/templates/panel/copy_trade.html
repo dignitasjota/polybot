@@ -114,6 +114,7 @@
 <div class="section">
     <h3>PARAMETERS</h3>
     <form method="POST" action="/panel/copy-trade/params">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <div class="form-row">
             <div class="form-group">
                 <label>Fixed Bet Size ($)</label>

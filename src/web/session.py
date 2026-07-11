@@ -6,12 +6,23 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import time
 
 SESSION_COOKIE = "s"
 SESSION_MAX_AGE = 86400 * 7  # 7 days
 
 _secret: bytes = b""
+
+
+def new_csrf_token() -> str:
+    """Random per-session CSRF token (synchronizer-token pattern).
+
+    Stored inside the HMAC-signed session cookie, so an attacker can't forge a
+    session carrying a token they know. The middleware compares it against the
+    token submitted in each mutating request.
+    """
+    return secrets.token_urlsafe(32)
 
 
 def init_session_secret():

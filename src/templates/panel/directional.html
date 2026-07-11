@@ -9,6 +9,7 @@
     <h3>KILL SWITCH</h3>
     <div style="display:flex;align-items:center;gap:15px;">
         <form method="POST" action="/panel/directional/params">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
             <input type="hidden" name="_field" value="kill_switch">
             <input type="hidden" name="kill_switch" value="{{ 'false' if params.kill_switch else 'true' }}">
             {% if params.kill_switch %}
@@ -30,6 +31,7 @@
 <div class="section">
     <h3>MARKET FILTER</h3>
     <form method="POST" action="/panel/directional/params">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <div class="form-row">
             <div class="form-group">
                 <label>Crypto Only</label>
@@ -113,6 +115,7 @@
 <div class="section">
     <h3>STRATEGY PARAMETERS</h3>
     <form method="POST" action="/panel/directional/params">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <div class="form-row">
             <div class="form-group">
                 <label>Min Margin Net ($)</label>

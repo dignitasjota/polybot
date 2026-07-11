@@ -47,6 +47,7 @@
 <div class="section">
     <h3>BET SIZING</h3>
     <form method="POST" action="/panel/weather/params">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <div class="form-row">
             <div class="form-group">
                 <label>Max Bet Per Trade ($)</label>
@@ -86,6 +87,7 @@
 <div class="section">
     <h3>EDGE THRESHOLDS</h3>
     <form method="POST" action="/panel/weather/params">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <div class="form-row">
             <div class="form-group">
                 <label>Min Edge</label>
@@ -113,6 +115,7 @@
 <div class="section">
     <h3>TIMING</h3>
     <form method="POST" action="/panel/weather/params">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <div class="form-row">
             <div class="form-group">
                 <label>Scan Interval (s)</label>

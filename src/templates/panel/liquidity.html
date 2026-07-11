@@ -33,6 +33,7 @@
     </div>
     <div style="margin-top:10px;">
         <form method="POST" action="/panel/liquidity/scan" style="display:inline;">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
             <button type="submit" class="btn btn-success">Scan Now</button>
         </form>
     </div>
@@ -42,6 +43,7 @@
 <div class="section">
     <h3>SCANNER CONFIGURATION</h3>
     <form method="POST" action="/panel/liquidity/params">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <div class="form-row">
             <div class="form-group">
                 <label>Scan Interval (sec)</label>
@@ -241,6 +243,7 @@
 
     <div style="margin-top:10px;">
         <form method="POST" action="/panel/liquidity/cancel-all" style="display:inline;"
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
               onsubmit="return confirm('Cancel ALL liquidity orders?');">
             <button type="submit" class="btn" style="background:#ff4444;color:#000;">Cancel All Orders</button>
         </form>

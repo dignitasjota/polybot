@@ -165,7 +165,7 @@
 </style>
 {% block extra_head %}{% endblock %}
 </head>
-<body>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
     <h1>POLYMARKET MULTI-STRATEGY BOT</h1>
     <nav class="nav">
         <a href="/" class="{% if active_tab == 'dashboard' %}active{% endif %}">Dashboard</a>

@@ -16,15 +16,29 @@ from src.web.routes_panel import routes as panel_routes
 from src.web.session import init_session_secret
 
 
+async def _csrf_context(request: web.Request) -> dict:
+    """Expose the session's CSRF token to every template (forms + hx-headers)."""
+    session = request.get("session", {})
+    return {"csrf_token": session.get("csrf", "")}
+
+
 def create_app(bot) -> web.Application:
-    app = web.Application(middlewares=[auth_middleware])
+    # auth_middleware runs first (outermost): it sets request["session"] before
+    # context_processors_middleware reads it for _csrf_context.
+    app = web.Application(
+        middlewares=[auth_middleware, aiohttp_jinja2.context_processors_middleware]
+    )
     app["bot"] = bot
 
     init_session_secret()
 
     # Jinja2 templates
     templates_dir = Path(__file__).parent.parent / "templates"
-    aiohttp_jinja2.setup(app, loader=jinja2.FileSystemLoader(str(templates_dir)))
+    aiohttp_jinja2.setup(
+        app,
+        loader=jinja2.FileSystemLoader(str(templates_dir)),
+        context_processors=[_csrf_context],
+    )
 
     # Static files
     static_dir = Path(__file__).parent.parent / "static"
