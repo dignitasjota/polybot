@@ -20,6 +20,27 @@ logger = structlog.get_logger("polymarket.strategies")
 # Cannot be overridden by per-account config — protects DB from saturation.
 PAPER_DAILY_TRADE_CAP = 500
 
+# Trade statuses that count as an OPEN position (placed and not failed/cancelled).
+# Includes live/matched: in live a resting or matched order IS an active position
+# on that side, so the cross-strategy conflict guard must see it.
+_OPEN_STATUSES = frozenset({"pending", "live", "matched", "mined", "confirmed"})
+
+
+def _status_str(trade: Any) -> str:
+    """Normalize a trade's status to a lowercase string.
+
+    TradeRecord.status is an OrderStatus enum whose .value is the string
+    (OrderStatus.PENDING.value == 'pending'); restored/legacy trades may store
+    a plain string. Comparing the enum member directly against strings silently
+    always returned False (C3), disabling both the cross-strategy opposite-side
+    guard and the paper daily cap. Reading .value (falling back to the raw value)
+    handles enum and string alike.
+    """
+    s = getattr(trade, "status", None)
+    if s is None:
+        return ""
+    return str(getattr(s, "value", s)).lower()
+
 
 # ─── Configuration ────────────────────────────────────────────────────────
 
@@ -82,7 +103,7 @@ class AccountContext:
             ]
         return [
             t for t in trades
-            if getattr(t, "status", None) in ("pending", "confirmed")
+            if _status_str(t) in _OPEN_STATUSES
         ]
 
     def has_position(self, condition_id: str, side: str, mode: str) -> bool:
