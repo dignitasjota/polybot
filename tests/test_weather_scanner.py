@@ -172,10 +172,23 @@ class TestBuildDistribution:
         assert dist == {}
 
     def test_fahrenheit_range_distribution(self, scanner):
-        """Fahrenheit range outcomes: temps in °C converted to °F for bucketing."""
+        """Fahrenheit buckets siguen la resolución a grado entero (M1).
+
+        15.5°C = 59.9°F → Wunderground lo reporta como 60°F → gana "60-61°F".
+        (El test antiguo lo asignaba a "58-59°F" con el bucket [58,60) — la
+        semántica desalineada +0.5°F que causaba misgrades sistemáticos.)
+        """
         outcomes = ["57°F or below", "58-59°F", "60-61°F", "62°F or higher"]
-        # All ensemble members predict 15.5°C = 59.9°F → should fall in "58-59°F"
-        max_temps = [15.5] * 51  # 15.5°C = 59.9°F
+        max_temps = [15.5] * 51  # 15.5°C = 59.9°F → redondea a 60
+
+        dist = scanner._build_distribution(max_temps, outcomes)
+        assert dist["60-61°F"] == pytest.approx(1.0)
+        assert dist["58-59°F"] == pytest.approx(0.0)
+
+    def test_fahrenheit_midrange_stays_in_bucket(self, scanner):
+        """58.6°F redondea a 59 → sí es "58-59°F"."""
+        outcomes = ["57°F or below", "58-59°F", "60-61°F", "62°F or higher"]
+        max_temps = [14.78] * 51  # 14.78°C = 58.6°F → redondea a 59
 
         dist = scanner._build_distribution(max_temps, outcomes)
         assert dist["58-59°F"] == pytest.approx(1.0)
@@ -1189,3 +1202,238 @@ class TestStationExclusion:
         market = _mk_market(["ok"], [0.30], station_icao="KLAX")
         forecast = _mk_forecast({"ok": 0.60})
         assert scanner._evaluate_market(market, forecast) is None
+
+
+# ── Bloque weather Jul 2026: A1, M1, M2, M12, B4, B5 ─────────────────
+
+class TestIntegerResolution:
+    """M1: buckets y winner alineados con la resolución a grado entero."""
+
+    def test_celsius_dead_zone_eliminated(self, scanner):
+        """28.7°C redondea a 29 → gana "29°C or higher". Antes: zona muerta
+        [28.5, 29) donde ningún outcome ganaba y el trade expiraba."""
+        outcomes = ["27°C or below", "28°C", "29°C or higher"]
+        assert scanner._determine_winner(28.7, outcomes) == "29°C or higher"
+
+    def test_celsius_half_rounds_up(self, scanner):
+        assert scanner._determine_winner(28.5, ["28°C", "29°C or higher"]) == "29°C or higher"
+
+    def test_fahrenheit_winner_rounds(self, scanner):
+        """59.6°F (15.33°C) redondea a 60 → "60-61°F", no "58-59°F"."""
+        outcomes = ["57°F or below", "58-59°F", "60-61°F", "62°F or higher"]
+        # 15.335°C = 59.6°F
+        assert scanner._determine_winner(15.335, outcomes) == "60-61°F"
+
+    def test_or_below_boundary(self, scanner):
+        """57.4°F → 57 → "57°F or below"; 57.6°F → 58 → "58-59°F"."""
+        outcomes = ["57°F or below", "58-59°F"]
+        assert scanner._determine_winner(14.11, outcomes) == "57°F or below"  # 57.4°F
+        assert scanner._determine_winner(14.23, outcomes) == "58-59°F"        # 57.6°F
+
+    def test_round_half_up_vs_bankers(self, scanner):
+        # Python round(28.5)=28 (banker's); half-up debe dar 29.
+        assert scanner._round_half_up(28.5) == 29
+        assert scanner._round_half_up(27.5) == 28
+        assert scanner._round_half_up(-0.5) == 0
+
+    def test_distribution_or_higher_preimage(self, scanner):
+        """"29 or higher" cubre desde 28.5 (pre-imagen del redondeo)."""
+        outcomes = ["28°C or below", "29°C or higher"]
+        dist = scanner._build_distribution([28.7] * 50, outcomes)
+        assert dist["29°C or higher"] == pytest.approx(1.0)
+
+
+class TestCalibratorRawProb:
+    """M2: el calibrador entrena sobre la prob cruda, no la calibrada."""
+
+    def test_opportunity_carries_raw_prob(self, scanner):
+        market = _mk_market(["ok"], [0.30])
+        forecast = _mk_forecast({"ok": 0.55})
+        opp = scanner._evaluate_market(market, forecast)
+        assert opp is not None
+        # Sin historial, calibrador inerte: raw == calibrada
+        assert opp.raw_prob == pytest.approx(0.55)
+        assert opp.forecast_prob == pytest.approx(0.55)
+
+    def test_raw_prob_unaffected_by_calibration(self, scanner):
+        """Con calibrador activo, raw_prob sigue siendo la pre-calibración."""
+        scanner._config.calibration_min_samples = 10
+        scanner._config.calibration_shrink = 1.0
+        # Historial: prob 0.55 gana siempre → calibrada sube sobre la cruda
+        scanner._outcome_history = [
+            {"prob": 0.55, "won": True, "open_tail": False, "resolved_at": _time.time()}
+            for _ in range(20)
+        ]
+        market = _mk_market(["ok"], [0.30])
+        forecast = _mk_forecast({"ok": 0.55})
+        opp = scanner._evaluate_market(market, forecast)
+        assert opp is not None
+        assert opp.raw_prob == pytest.approx(0.55)        # cruda intacta
+        assert opp.forecast_prob > 0.55                    # calibrada movida
+
+    @pytest.mark.asyncio
+    async def test_resolution_records_raw_prob(self, scanner):
+        """El outcome_history guarda raw_prob, no forecast_prob calibrada."""
+        from src.weather_scanner import WeatherTrade
+        from datetime import date as _date, timedelta as _td
+        scanner._fetch_actual_temp_for_trade = AsyncMock(return_value=28.0)
+        scanner._config.use_metar_resolution = False
+        trade = WeatherTrade(
+            trade_id="t1", condition_id="c1", question="q", city="dallas",
+            outcome="28°C", shares=10, price=0.5, cost=5.0,
+            forecast_prob=0.72,   # calibrada (la apuesta)
+            raw_prob=0.55,        # cruda (lo que el modelo dijo)
+            edge=0.2, target_date=_date.today() - _td(days=1),
+            outcomes=["28°C", "29°C or higher"], unit="C", status="confirmed",
+        )
+        scanner._trades = [trade]
+        await scanner.check_resolutions()
+        assert trade.status == "won"
+        assert scanner._outcome_history[-1]["prob"] == pytest.approx(0.55)
+
+    @pytest.mark.asyncio
+    async def test_orphan_prob_zero_not_recorded(self, scanner):
+        """B5: un orphan sintético (prob 0) no contamina el calibrador."""
+        from src.weather_scanner import WeatherTrade
+        from datetime import date as _date, timedelta as _td
+        scanner._fetch_actual_temp_for_trade = AsyncMock(return_value=28.0)
+        scanner._config.use_metar_resolution = False
+        trade = WeatherTrade(
+            trade_id="wx_orphan_x", condition_id="c1", question="q", city="dallas",
+            outcome="28°C", shares=10, price=0.5, cost=5.0,
+            forecast_prob=0.0, raw_prob=0.0, edge=0.0,
+            target_date=_date.today() - _td(days=1),
+            outcomes=["28°C"], unit="C", status="confirmed",
+        )
+        scanner._trades = [trade]
+        await scanner.check_resolutions()
+        assert trade.status == "won"          # el P&L sí se contabiliza
+        assert scanner._outcome_history == [] # pero no entrena el calibrador
+
+
+class TestEventDedup:
+    """M12: no comprar dos buckets del mismo evento."""
+
+    @pytest.mark.asyncio
+    async def test_second_bucket_of_same_event_blocked(self, scanner):
+        from src.weather_scanner import WeatherTrade
+        scanner._trades = [WeatherTrade(
+            trade_id="t1", condition_id="cidA", question="Highest temp in Dallas on Jul 12?",
+            city="dallas", outcome="66-67°F", shares=10, price=0.5, cost=5.0,
+            forecast_prob=0.5, edge=0.1, status="pending",
+        )]
+        executed = []
+        async def _fake_execute(opp):
+            executed.append(opp)
+        scanner._execute_trade = _fake_execute
+
+        market = _mk_market(["68-69°F"], [0.30])
+        market.event_title = "Highest temp in Dallas on Jul 12?"  # mismo evento
+        market.condition_ids = ["cidB"]                            # otro bucket
+        scanner._discover_markets = AsyncMock(return_value=[market])
+        scanner._get_forecast = AsyncMock(return_value=_mk_forecast({"68-69°F": 0.60}))
+        await scanner._run_scan_cycle()
+        assert executed == []   # bloqueado por evento, no por condition_id
+
+
+class TestLiveFillVerification:
+    """A1: orderID = aceptación; el fill se verifica con poll + cancel."""
+
+    @pytest.mark.asyncio
+    async def test_poll_order_fill_full(self, scanner, monkeypatch):
+        monkeypatch.setattr(scanner, "_FILL_POLL_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(scanner, "_FILL_POLL_INTERVAL_S", 0.01)
+        scanner._get_order_matched = AsyncMock(return_value=20.0)
+        matched = await scanner._poll_order_fill("oid", 20.0)
+        assert matched == pytest.approx(20.0)
+
+    @pytest.mark.asyncio
+    async def test_poll_order_fill_timeout_partial(self, scanner, monkeypatch):
+        monkeypatch.setattr(scanner, "_FILL_POLL_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(scanner, "_FILL_POLL_INTERVAL_S", 0.01)
+        scanner._get_order_matched = AsyncMock(return_value=7.0)
+        matched = await scanner._poll_order_fill("oid", 20.0)
+        assert matched == pytest.approx(7.0)
+
+
+class TestLiveExecuteFillFlow:
+    """A1 integración: _live_execute con orden resting (poll → cancel → downsize)."""
+
+    def _live_scanner_setup(self, scanner, monkeypatch, post_response):
+        import sys, types
+        fake = types.ModuleType("py_clob_client_v2")
+        fake.OrderArgs = lambda **kw: kw
+        ob = types.ModuleType("py_clob_client_v2.order_builder")
+        const = types.ModuleType("py_clob_client_v2.order_builder.constants")
+        const.BUY = "BUY"
+        ct = types.ModuleType("py_clob_client_v2.clob_types")
+        ct.OrderPayload = lambda **kw: kw
+        monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake)
+        monkeypatch.setitem(sys.modules, "py_clob_client_v2.order_builder", ob)
+        monkeypatch.setitem(sys.modules, "py_clob_client_v2.order_builder.constants", const)
+        monkeypatch.setitem(sys.modules, "py_clob_client_v2.clob_types", ct)
+
+        scanner._config.mode = "live"
+        scanner._client = MagicMock()
+        scanner._client.create_order = MagicMock(return_value="signed")
+        scanner._client.post_order = MagicMock(return_value=post_response)
+        scanner._get_current_price = AsyncMock(return_value=0.30)
+        scanner._save_pending_trades = MagicMock()
+        monkeypatch.setattr(scanner, "_FILL_POLL_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(scanner, "_FILL_POLL_INTERVAL_S", 0.01)
+
+    def _mk_opp_trade(self, scanner):
+        from src.weather_scanner import WeatherTrade
+        market = _mk_market(["ok"], [0.30])
+        market.token_ids = ["tok1"]
+        market.condition_ids = ["cid1"]
+        forecast = _mk_forecast({"ok": 0.60})
+        opp = scanner._evaluate_market(market, forecast)
+        assert opp is not None
+        trade = WeatherTrade(
+            trade_id="t1", condition_id="cid1", question="q", city="dallas",
+            outcome="ok", shares=20.0, price=0.30, cost=6.0,
+            forecast_prob=opp.forecast_prob, edge=opp.edge,
+        )
+        return opp, trade
+
+    @pytest.mark.asyncio
+    async def test_resting_partial_fill_downsizes_and_cancels(self, scanner, monkeypatch):
+        self._live_scanner_setup(scanner, monkeypatch, {"orderID": "oid1"})
+        scanner._get_order_matched = AsyncMock(return_value=8.0)  # 8 de 20
+        scanner._cancel_order_by_id = AsyncMock()
+
+        opp, trade = self._mk_opp_trade(scanner)
+        await scanner._live_execute(trade, opp)
+
+        assert trade.status == "confirmed"
+        assert trade.shares == pytest.approx(8.0)          # downsized al fill real
+        assert trade.cost == pytest.approx(8.0 * 0.30)
+        scanner._cancel_order_by_id.assert_awaited_once()  # remanente cancelado
+
+    @pytest.mark.asyncio
+    async def test_resting_zero_fill_is_failed(self, scanner, monkeypatch):
+        self._live_scanner_setup(scanner, monkeypatch, {"orderID": "oid2"})
+        scanner._get_order_matched = AsyncMock(return_value=0.0)
+        scanner._cancel_order_by_id = AsyncMock()
+
+        opp, trade = self._mk_opp_trade(scanner)
+        await scanner._live_execute(trade, opp)
+
+        assert trade.status == "failed"                    # antes: confirmed fantasma
+        assert "cid1" in scanner._retry_cooldown
+        scanner._cancel_order_by_id.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_fak_match_confirms_without_poll(self, scanner, monkeypatch):
+        self._live_scanner_setup(
+            scanner, monkeypatch,
+            {"success": True, "tradeIDs": ["x"], "orderID": ""},
+        )
+        scanner._get_order_matched = AsyncMock()
+
+        opp, trade = self._mk_opp_trade(scanner)
+        await scanner._live_execute(trade, opp)
+
+        assert trade.status == "confirmed"
+        scanner._get_order_matched.assert_not_awaited()    # FAK: sin poll

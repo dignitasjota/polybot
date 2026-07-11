@@ -1334,6 +1334,21 @@ Cerrado el pendiente de C1: las otras 4 estrategias también tienen stop-loss di
 
 El guard resetea en el límite del día UTC (un tripped se levanta solo al día siguiente) y `max_daily_loss <= 0` lo desactiva. Con esto **C1 deja de ser letra muerta en las 5 estrategias**. El mecanismo `_daily_pnl`/`update_pnl` del Executor sigue existiendo (con el reset UTC de B7/B13) pero ya no es el driver — cada estrategia se autoprotege. **Tests**: +6 `test_risk_guard.py` (helper) +6 integración (corte real en weather/completeness, cableado+reset en detector/copy). **220 verde** (weather 96 + completeness 65 + risk_guard 12 + liquidity 61 - solapes).
 
+### Bloque weather: saneamiento completo (Julio 11, 2026)
+
+Los 8 hallazgos de weather de la auditoría, cerrados en una tanda (A1, M1, M2, M3, M12, B3, B4, B5):
+
+- **A1 — fill verification en live**: un `orderID` resting ya no cuenta como `confirmed`. `_live_execute` hace poll de `size_matched` (`_poll_order_fill`, 2s × 30s), cancela el remanente al timeout (`_cancel_order_by_id` — una limit resting es una opción gratis para el mercado) con re-lectura post-cancel por si un fill ganó la carrera, y **redimensiona el trade al fill real** (`shares`/`cost`). Fill cero → `failed` + cooldown. FAK match (tradeIDs sin orderID) → confirmado directo, sin poll.
+- **M1 — resolución a grado entero**: los buckets de `_build_distribution` son ahora las **pre-imágenes del redondeo half-up** ("66-67" → `[65.5, 67.5)`; "or higher" → `[t-0.5, ∞)`; "or below" → `(-∞, t+0.5)`) y `_determine_winner` redondea la observación al entero (`_round_half_up`, half-up porque `round()` de Python es banker's) y compara con lógica entera. Elimina el sesgo +0.5°F en mercados de EEUU y la zona muerta `[x.5, x+1)` en °C donde el trade expiraba aunque Polymarket sí liquidaba.
+- **M2 — circularidad del calibrador rota**: `WeatherOpportunity`/`WeatherTrade` llevan `raw_prob` (post-haircut, PRE-calibración, persistido). El `_outcome_history` — y por tanto `_calibrate_prob` y el gate del discriminador — se alimenta de la prob **cruda**, no de la calibrada: el mapa ya no se compone consigo mismo (misma solución que `raw_mean_c` en el bias). Legacy sin `raw_prob` → fallback a `forecast_prob`.
+- **M3 — `NameError` en rechazos**: `response_keys` usa `result` (el nombre real en scope); cada rechazo ya no lanza `NameError` ni cae al handler de excepción (+6s de polling inútil).
+- **M12 — dedup por evento**: `blocked_events` (por `event_title`) además de `blocked_cids` — los buckets de un evento son mutuamente excluyentes; tener dos garantiza una pérdida.
+- **B3 — mínimo 5 shares** antes de colocar (el CLOB rechaza menos). **B4 — poda** de `_outcome_history` a 90 días. **B5 — orphans**: el loop de reconciliación salta fills no-BUY (un SELL manual ya no se convierte en BUY sintético con P&L fantasma) y los orphans con prob 0 no entrenan el calibrador.
+
+**Tests**: +17 (`TestIntegerResolution` 6, `TestCalibratorRawProb` 4, `TestEventDedup` 1, `TestLiveFillVerification` 2, `TestLiveExecuteFillFlow` 3, +1 °F midrange) y el test antiguo de buckets °F actualizado a la semántica correcta (59.9°F → redondea a 60 → "60-61", no "58-59"). **333 verde** en la suite completa.
+
+**Nota honesta**: esto sanea la *ejecución* y la *medición* de weather. El veredicto del modelo sigue pendiente de re-validación en dry_run — la calibración (discriminador ≥ prob declarada) es la condición para live, no este saneamiento.
+
 ### Auditoría de seguridad y calidad (Julio 2, 2026)
 
 Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos — pendientes de corrección.**
@@ -1376,7 +1391,7 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 
 #### 🟠 Altos
 
-**[ABIERTO] A1 — Weather live: orderID = aceptación, no fill**
+**[CORREGIDO Jul 11, 2026] A1 — Weather live: orderID = aceptación, no fill**
 `weather_scanner.py:1852` — `filled = bool(order_id) or ...`. Sin poll de fills ni cancel por timeout: una limit resting se marca `confirmed` y `check_resolutions` le asigna P&L a una posición que quizá nunca existió. El reconciliation loop solo recupera `failed→confirmed`, nunca degrada. Es el mismo bug corregido en completeness en junio.
 
 **[CORREGIDO Jul 2, 2026] A2 — Liquidity: fill parcial huérfana el remanente**
@@ -1408,13 +1423,13 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 
 #### 🟡 Medios
 
-**[ABIERTO] M1 — Weather: buckets desalineados ±0.5° con resolución a grado entero**
+**[CORREGIDO Jul 11, 2026] M1 — Weather: buckets desalineados ±0.5° con resolución a grado entero**
 `weather_scanner.py:1550-1577,2419-2445` — Polymarket/Wunderground resuelve al grado entero. En °F "58-59°F" se mapea a `[58,60)` pero WU redondea 59.6→60 (gana "60-61"). En °C hay zona muerta `[28.5,29)` donde `_determine_winner` devuelve `None` → trade `expired` con pnl=0 aunque Polymarket sí resolvió. Contamina P&L y el `_outcome_history` del calibrador. Fix: redondear `actual_temp` al entero antes de bucketing.
 
-**[ABIERTO] M2 — Weather: circularidad en el calibrador de probabilidad**
+**[CORREGIDO Jul 11, 2026] M2 — Weather: circularidad en el calibrador de probabilidad**
 `weather_scanner.py:1681-1684,2263-2268` — `_outcome_history` guarda la prob ya calibrada, pero `_calibrate_prob` se aplica a probs pre-calibración → el mapa se compone consigo mismo (la misma trampa que el bias evitó con `raw_mean_c`). Fix: guardar en `_outcome_history` la prob cruda (post-haircut, pre-calibración) y entrenar sobre esa.
 
-**[ABIERTO] M3 — Weather: `NameError` en órdenes rechazadas**
+**[CORREGIDO Jul 11, 2026] M3 — Weather: `NameError` en órdenes rechazadas**
 `weather_scanner.py:1943` — `r` no existe en ese scope. Toda orden rechazada lanza `NameError` en el handler de rechazo, cae al handler de excepción general y cuesta ~6s extra. El estado final es `failed` pero el diagnóstico (errorMsg, status del CLOB) nunca se emite.
 
 **[CORREGIDO Jul 2, 2026] M4 — Liquidity: signo invertido en adverse selection del lado NO**
@@ -1443,7 +1458,7 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 **[ABIERTO] M11 — Completeness: redeems pendientes sin reintento**
 `completeness_scanner.py:944-974` — `_pending_redeems` solo se usa en `len()` para stats. Un redeem fallido queda `confirmed` para siempre; las posiciones no se redimen salvo intervención externa.
 
-**[ABIERTO] M12 — Weather: dedup solo por `condition_id`, no por `event_slug`**
+**[CORREGIDO Jul 11, 2026] M12 — Weather: dedup solo por `condition_id`, no por `event_slug`**
 `weather_scanner.py:588-606` — `blocked_cids` opera a nivel de bucket individual. Si el forecast se desplaza entre ciclos, el bot puede comprar dos buckets mutuamente excluyentes del mismo evento → uno siempre pierde.
 
 **[CORREGIDO Jul 11, 2026] M13 — Escritura de TOML no atómica**
@@ -1464,9 +1479,9 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 
 - **[CORREGIDO Jul 2, 2026] B1** — Liquidity: fill parcial re-registra `size_matched` en llamadas repetidas; `_sell_tokens` descuenta inventario al colocar la SELL, no al llenarse. *Fix: delta tracking via `size_matched_seen`; auto-exit SELL trackeada en `pos.exit_order` — inventario descontado y `exit_loss` registrado en métricas solo al confirmar el fill (`_check_exit_fills`), con expiración+reintento si no llena.*
 - **[ABIERTO] B2** — Copy: la pérdida omite el taker fee (`copy_trader.py:747`) — pérdidas subestimadas sistemáticamente.
-- **[ABIERTO] B3** — Weather: sin mínimo de 5 shares (`weather_scanner.py:1763`) — el CLOB rechaza órdenes < 5 shares.
-- **[ABIERTO] B4** — Weather: `_outcome_history` sin poda — crece sin límite en `weather_verification.json`.
-- **[ABIERTO] B5** — Weather: orphans sintéticos no filtran `side` ni verifican que sea BUY (`_record_synthetic_orphan:2129`).
+- **[CORREGIDO Jul 11, 2026] B3** — Weather: sin mínimo de 5 shares. *Fix: floor de 5 shares en `_execute_trade` (log `weather_below_min_shares`).*
+- **[CORREGIDO Jul 11, 2026] B4** — Weather: `_outcome_history` sin poda. *Fix: poda a 90 días en `_verify_forecasts`, mismo horizonte que la verificación.*
+- **[CORREGIDO Jul 11, 2026] B5** — Weather: orphans sintéticos no filtran `side`. *Fix: el loop de reconciliación salta fills no-BUY; los orphans (prob 0) ya no entrenan el calibrador (guard `hist_prob > 0` en el outcome append).*
 - **[ABIERTO] B6** — Completeness: `_unwind_leg` no descuenta el taker fee del SELL → pérdida real algo mayor que la contabilizada.
 - **[CORREGIDO Jul 10, 2026] B7** — `max_daily_loss` no resetea a medianoche UTC sino cada 24h desde el primer check. *Fix: `_maybe_reset_daily` compara el día UTC (`_utc_day()`) en vez de una ventana rodante de 24h; resetea `_daily_pnl` y `_daily_pnl_by_mode` en el límite del día.*
 - **[ABIERTO] B8** — `net_margin` resta el gas fijo como coste por share en vez de por redención (`fees.py:150`).

@@ -308,7 +308,8 @@ class WeatherOpportunity:
     forecast: ForecastDistribution
     best_outcome_idx: int         # Index of outcome with most edge
     best_outcome_label: str       # e.g. "15°C"
-    forecast_prob: float          # Our estimated probability
+    forecast_prob: float          # Our estimated probability (post-calibration)
+    raw_prob: float               # Pre-calibration prob (post-haircut) — trains the calibrator (M2)
     market_price: float           # What market says
     edge: float                   # forecast_prob - market_price
     expected_value: float         # edge * payout_per_share
@@ -329,6 +330,7 @@ class WeatherTrade:
     cost: float
     forecast_prob: float
     edge: float
+    raw_prob: float = 0.0         # Pre-calibration prob — feeds _outcome_history (M2)
     target_date: date | None = None  # Market resolution date (for orphan resolution)
     outcomes: list[str] = field(default_factory=list)  # All outcomes (for resolution without _markets)
     unit: str = "C"               # "C" or "F" — needed for resolution
@@ -594,6 +596,15 @@ class WeatherScanner:
                 t.condition_id for t in self._trades
                 if t.status in ("pending", "confirmed")
             } | set(self._retry_cooldown)
+            # Event-level dedup (M12): a temperature event's buckets are
+            # mutually exclusive — holding two ("66-67°F" AND "68-69°F" of the
+            # same city/date) guarantees at least one loss. Block the whole
+            # event once we hold any bucket of it. WeatherTrade.question stores
+            # the event title (unique per city+date).
+            blocked_events = {
+                t.question for t in self._trades
+                if t.status in ("pending", "confirmed") and t.question
+            }
 
             # Sort by edge (highest first)
             opportunities.sort(key=lambda o: o.edge, reverse=True)
@@ -603,11 +614,14 @@ class WeatherScanner:
                     break
                 # Skip if we already have an active/cooling-down trade here
                 cid = opp.market.condition_ids[opp.best_outcome_idx]
-                if cid in blocked_cids:
+                event_title = opp.market.event_title
+                if cid in blocked_cids or (event_title and event_title in blocked_events):
                     continue
                 self._opportunities_found += 1
                 await self._execute_trade(opp)
                 blocked_cids.add(cid)
+                if event_title:
+                    blocked_events.add(event_title)
                 executed_this_cycle += 1
 
         # Prune resolved trades older than 7 days to limit memory growth
@@ -641,6 +655,8 @@ class WeatherScanner:
     _MAX_TRADES_KEPT = 500         # Hard cap on list size
     _RETRY_COOLDOWN_S = 6 * 3600   # Back off this long after a failed/illiquid attempt
     _RECONCILE_INTERVAL_S = 600    # Sweep funder activity every 10 min to catch orphan fills
+    _FILL_POLL_INTERVAL_S = 2.0    # A1: seconds between size_matched polls after placing
+    _FILL_POLL_TIMEOUT_S = 30.0    # A1: give a resting order this long, then cancel the rest
 
     def _prune_old_trades(self):
         """Remove resolved trades older than 7 days to prevent unbounded memory growth.
@@ -1159,7 +1175,18 @@ class WeatherScanner:
                 or (r.actual_c is None and (today - r.target_date).days < 7)
             )
         ]
-        if changed or len(self._verification) != before:
+        # Prune outcome history too (B4): same 90-day horizon as verification.
+        # It lives in the same JSON and previously grew without bound.
+        before_hist = len(self._outcome_history)
+        self._outcome_history = [
+            o for o in self._outcome_history
+            if now - float(o.get("resolved_at", 0) or 0) < 90 * 86400
+        ]
+        if (
+            changed
+            or len(self._verification) != before
+            or len(self._outcome_history) != before_hist
+        ):
             self._save_verification()
 
     def _station_bias(self, icao: str) -> float:
@@ -1549,6 +1576,12 @@ class WeatherScanner:
         # Parse outcome buckets: extract temperature ranges
         parsed_buckets: list[tuple[str, float, float]] = []  # (label, low_incl, high_excl)
 
+        # Bucket bounds are the PRE-IMAGES of the integer outcomes under
+        # half-up rounding (M1): Polymarket/Wunderground resolves to a whole
+        # degree, so "lo-hi" wins when round(actual) ∈ [lo, hi], i.e. actual
+        # ∈ [lo-0.5, hi+0.5). The old bounds ([lo, hi+1) for °F ranges,
+        # [temp, ∞) for "or higher") were shifted +0.5 relative to how markets
+        # actually settle, and left a dead zone [x.5, x+1) between °C buckets.
         for outcome in outcomes:
             lower = outcome.lower()
 
@@ -1556,15 +1589,15 @@ class WeatherScanner:
                 temp = self._parse_outcome_temp(outcome)
                 if temp is None:
                     continue
-                # "57°F or below" → (-inf, 58)  (i.e. ≤57, which means <58 in integer world)
-                parsed_buckets.append((outcome, -999, temp + 1 if unit == "F" else temp + 0.5))
+                # "57 or below" → round(actual) ≤ 57 → actual < 57.5
+                parsed_buckets.append((outcome, -999, temp + 0.5))
 
             elif "or higher" in lower or "or more" in lower or "or above" in lower or "+" in lower:
                 temp = self._parse_outcome_temp(outcome)
                 if temp is None:
                     continue
-                # "76°F or higher" → [76, +inf)
-                parsed_buckets.append((outcome, temp, 999))
+                # "76 or higher" → round(actual) ≥ 76 → actual ≥ 75.5
+                parsed_buckets.append((outcome, temp - 0.5, 999))
 
             else:
                 # Range "66-67°F" or single "18°C"
@@ -1572,13 +1605,13 @@ class WeatherScanner:
                 if m:
                     low = float(m.group(1))
                     high = float(m.group(2))
-                    # "66-67°F" → [66, 68)  (covers 66.0..67.99)
-                    parsed_buckets.append((outcome, low, high + 1))
+                    # "66-67" → round(actual) ∈ [66, 67] → [65.5, 67.5)
+                    parsed_buckets.append((outcome, low - 0.5, high + 0.5))
                 else:
                     temp = self._parse_outcome_temp(outcome)
                     if temp is None:
                         continue
-                    # Single degree: "18°C" → [17.5, 18.5)
+                    # Single degree: "18" → round(actual) == 18 → [17.5, 18.5)
                     parsed_buckets.append((outcome, temp - 0.5, temp + 0.5))
 
         if not parsed_buckets:
@@ -1675,7 +1708,7 @@ class WeatherScanner:
             )
             return None
 
-        candidates = []  # (forecast_prob, edge, idx, label, market_price)
+        candidates = []  # (forecast_prob, edge, idx, label, market_price, raw_prob)
         for i, outcome in enumerate(market.outcomes):
             if i >= len(market.outcome_prices):
                 break
@@ -1683,10 +1716,13 @@ class WeatherScanner:
             market_price = market.outcome_prices[i]
             # Raw bucket mass, then discount open tails (#3) and remap through the
             # historical calibration curve (#2) before any filter sees it.
-            forecast_prob = forecast.buckets.get(outcome, 0.0)
+            # raw_prob (post-haircut, PRE-calibration) is kept separately: the
+            # calibrator must train on the model's raw output, not on its own
+            # corrected output — otherwise the map composes with itself (M2).
+            raw_prob = forecast.buckets.get(outcome, 0.0)
             if self._is_open_tail(outcome):
-                forecast_prob *= self._config.open_tail_haircut
-            forecast_prob = self._calibrate_prob(forecast_prob)
+                raw_prob *= self._config.open_tail_haircut
+            forecast_prob = self._calibrate_prob(raw_prob)
             edge = forecast_prob - market_price
 
             # Per-outcome filters — only outcomes clearing all of these qualify.
@@ -1703,25 +1739,28 @@ class WeatherScanner:
             if market_price < min_price:
                 continue
 
-            candidates.append((forecast_prob, edge, i, outcome, market_price))
+            candidates.append((forecast_prob, edge, i, outcome, market_price, raw_prob))
 
         if not candidates:
             return None
 
         # Highest conviction first; break ties by larger edge.
         candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
-        best_forecast_prob, best_edge, best_idx, best_label, best_market_price = candidates[0]
+        (best_forecast_prob, best_edge, best_idx, best_label,
+         best_market_price, best_raw_prob) = candidates[0]
 
         # Agreement filter: if models disagree strongly, skip
         if forecast.agreement < self._config.min_agreement:
             return None
 
         # Discriminator gate (#4): in live, don't trade a prob bucket the model
-        # hasn't proven it can call. dry_run/paper keep trading to gather evidence.
-        if not self.should_simulate and not self._bucket_passes_gate(best_forecast_prob):
+        # hasn't proven it can call. dry_run/paper keep trading to gather
+        # evidence. Keyed by RAW prob — same axis the outcome history uses (M2).
+        if not self.should_simulate and not self._bucket_passes_gate(best_raw_prob):
             logger.info(
                 "weather_discriminator_gate_block",
                 city=market.city_slug,
+                raw_prob=round(best_raw_prob, 3),
                 forecast_prob=round(best_forecast_prob, 3),
             )
             return None
@@ -1750,6 +1789,7 @@ class WeatherScanner:
             best_outcome_idx=best_idx,
             best_outcome_label=best_label,
             forecast_prob=best_forecast_prob,
+            raw_prob=best_raw_prob,
             market_price=best_market_price,
             edge=best_edge,
             expected_value=ev_per_share,
@@ -1779,6 +1819,16 @@ class WeatherScanner:
             return
 
         shares = bet_size / opp.market_price
+        # CLOB minimum order size is 5 shares (B3): smaller orders get
+        # rejected in live, burning the cycle and a retry cooldown for nothing.
+        if shares < 5.0:
+            logger.debug(
+                "weather_below_min_shares",
+                city=market.city_slug,
+                shares=round(shares, 2),
+                bet=round(bet_size, 2),
+            )
+            return
         cost = bet_size
 
         trade = WeatherTrade(
@@ -1792,6 +1842,7 @@ class WeatherScanner:
             cost=round(cost, 4),
             forecast_prob=opp.forecast_prob,
             edge=opp.edge,
+            raw_prob=opp.raw_prob,
             target_date=market.target_date,
             outcomes=list(market.outcomes),
             unit=market.unit,
@@ -1935,12 +1986,47 @@ class WeatherScanner:
             filled, order_id, trade_ids, success, err_msg, api_status = (
                 self._parse_post_order_response(result)
             )
-            if filled:
+            if filled and order_id:
+                # A resting orderID is ACCEPTANCE, not a fill (A1). Poll the
+                # matched size, cancel any remainder at the timeout (a resting
+                # limit is a free option for the market — late fills are
+                # adverse), and size the trade to what actually filled.
+                matched = await self._poll_order_fill(order_id, trade.shares)
+                if matched < trade.shares * 0.999:
+                    await self._cancel_order_by_id(order_id)
+                    # Re-read once: a fill may have raced the cancel.
+                    matched = max(matched, await self._get_order_matched(order_id))
+                if matched <= 0.01:
+                    trade.status = "failed"
+                    self._retry_cooldown[cid] = time.time()
+                    logger.info(
+                        "weather_order_unfilled",
+                        trade_id=trade.trade_id,
+                        order_id=order_id[:12],
+                        city=trade.city,
+                        outcome=trade.outcome,
+                    )
+                else:
+                    trade.shares = round(matched, 2)
+                    trade.cost = round(matched * trade.price, 4)
+                    trade.status = "confirmed"
+                    logger.info(
+                        "weather_live_trade",
+                        trade_id=trade.trade_id,
+                        order_id=order_id[:12],
+                        matched=round(matched, 2),
+                        city=trade.city,
+                        outcome=trade.outcome,
+                        price=f"${trade.price:.3f}",
+                        edge=f"{trade.edge:.1%}",
+                    )
+            elif filled:
+                # FAK / immediate match: no resting order, fill already happened.
                 trade.status = "confirmed"
                 logger.info(
                     "weather_live_trade",
                     trade_id=trade.trade_id,
-                    order_id=order_id[:12] if order_id else "(matched)",
+                    order_id="(matched)",
                     tradeIDs=len(trade_ids),
                     status=api_status,
                     city=trade.city,
@@ -1955,7 +2041,11 @@ class WeatherScanner:
                     "weather_order_rejected",
                     errorMsg=err_msg[:200],
                     status=api_status,
-                    response_keys=list(r.keys())[:10],
+                    # M3: `r` no existía en este scope — cada rechazo lanzaba
+                    # NameError y caía al handler de excepción (+6s de polling).
+                    response_keys=(
+                        list(result.keys())[:10] if isinstance(result, dict) else []
+                    ),
                 )
 
         except Exception as e:
@@ -1989,6 +2079,40 @@ class WeatherScanner:
         self._trades.append(trade)
         self._trades_executed += 1
         self._save_pending_trades()
+
+    async def _get_order_matched(self, order_id: str) -> float:
+        """Matched size of an order per the CLOB (0.0 if unknown/vanished)."""
+        try:
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(
+                None, lambda: self._client.get_order(order_id)
+            )
+            return float((data or {}).get("size_matched", 0) or 0)
+        except Exception as e:
+            logger.warning("weather_order_check_error", order_id=order_id[:12], error=str(e))
+            return 0.0
+
+    async def _poll_order_fill(self, order_id: str, target_shares: float) -> float:
+        """Poll size_matched until full fill or timeout (A1). Returns max seen."""
+        matched = 0.0
+        deadline = time.time() + self._FILL_POLL_TIMEOUT_S
+        while True:
+            matched = max(matched, await self._get_order_matched(order_id))
+            if matched >= target_shares * 0.999 or time.time() >= deadline:
+                return matched
+            await asyncio.sleep(self._FILL_POLL_INTERVAL_S)
+
+    async def _cancel_order_by_id(self, order_id: str) -> None:
+        """Best-effort cancel of a resting remainder."""
+        try:
+            from py_clob_client_v2.clob_types import OrderPayload
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None, lambda: self._client.cancel_order(OrderPayload(orderID=order_id))
+            )
+            logger.info("weather_order_cancelled", order_id=order_id[:12])
+        except Exception as e:
+            logger.warning("weather_order_cancel_failed", order_id=order_id[:12], error=str(e))
 
     async def _get_current_price(self, token_id: str) -> float | None:
         """Fetch current best ask price from CLOB for a token.
@@ -2110,6 +2234,13 @@ class WeatherScanner:
                 for r in fills:
                     cid = r.get("conditionId")
                     if not cid:
+                        continue
+                    # B5: only BUY fills are evidence of our (buy-only) trades.
+                    # A manual SELL from the same wallet used to become a
+                    # synthetic BUY orphan with cost=price×size that later
+                    # "resolved" with phantom P&L.
+                    side = str(r.get("side", "") or "").upper()
+                    if side and side != "BUY":
                         continue
                     local = by_cid.get(cid, [])
                     if any(t.status in ("confirmed", "pending", "won", "lost") for t in local):
@@ -2275,13 +2406,20 @@ class WeatherScanner:
             self._loss_guard.record(trade.pnl)  # C1 daily stop-loss
 
             # Durable outcome record for the calibrator (#2) and gate (#4).
-            # forecast_prob here is the adjusted prob actually used to bet.
-            self._outcome_history.append({
-                "prob": trade.forecast_prob,
-                "won": trade.status == "won",
-                "open_tail": self._is_open_tail(trade.outcome),
-                "resolved_at": now,
-            })
+            # Keyed by the RAW prob (post-haircut, pre-calibration): training
+            # on the calibrated prob made the map compose with itself (M2) —
+            # the same circularity the bias correction avoids via raw_mean_c.
+            # Legacy trades without raw_prob fall back to forecast_prob.
+            # Synthetic orphans (prob 0 — we never forecast them) are skipped:
+            # they'd poison the calibrator's low bin with meaningless entries.
+            hist_prob = trade.raw_prob if trade.raw_prob > 0 else trade.forecast_prob
+            if hist_prob > 0:
+                self._outcome_history.append({
+                    "prob": hist_prob,
+                    "won": trade.status == "won",
+                    "open_tail": self._is_open_tail(trade.outcome),
+                    "resolved_at": now,
+                })
 
             logger.info(
                 "weather_trade_resolved",
@@ -2417,11 +2555,22 @@ class WeatherScanner:
         return None
 
 
+    @staticmethod
+    def _round_half_up(x: float) -> int:
+        """Round to nearest integer, halves up (28.5→29), matching how
+        Wunderground reports whole degrees. Python's round() is banker's
+        rounding (28.5→28) and would misgrade exact halves."""
+        return math.floor(x + 0.5)
+
     def _determine_winner(self, actual_temp_c: float, outcomes: list[str]) -> str | None:
         """Determine which outcome won given the actual temperature (°C from API).
 
-        Converts to °F if outcomes use Fahrenheit. Uses same bucket ranges
-        as _build_distribution.
+        Rounds the observation to a whole degree first (M1) — Polymarket
+        resolves against Wunderground's integer reading — then compares with
+        plain integer logic. The old float comparisons were shifted +0.5 in °F
+        (59.6°F rounds to 60 → "60-61" wins, but [58,60) gave it to "58-59")
+        and left a dead zone [x.5, x+1) between °C buckets where no outcome
+        matched and the trade expired even though Polymarket settled.
         """
         # Detect unit and convert actual temp if needed
         unit = "C"
@@ -2431,33 +2580,32 @@ class WeatherScanner:
                 break
 
         actual = actual_temp_c * 9 / 5 + 32 if unit == "F" else actual_temp_c
+        rounded = self._round_half_up(actual)
 
         for outcome in outcomes:
             lower = outcome.lower()
 
             if "or below" in lower or "or less" in lower or "or under" in lower or "or lower" in lower:
                 temp = self._parse_outcome_temp(outcome)
-                if temp is not None:
-                    boundary = temp + 1 if unit == "F" else temp + 0.5
-                    if actual < boundary:
-                        return outcome
+                if temp is not None and rounded <= temp:
+                    return outcome
 
             elif "or higher" in lower or "or more" in lower or "or above" in lower or "+" in outcome:
                 temp = self._parse_outcome_temp(outcome)
-                if temp is not None and actual >= temp:
+                if temp is not None and rounded >= temp:
                     return outcome
 
             else:
                 # Range "66-67°F" or single "18°C"
                 m = re.search(r"(-?\d+)\s*[-–]\s*(-?\d+)", outcome)
                 if m:
-                    low = float(m.group(1))
-                    high = float(m.group(2))
-                    if low <= actual < high + 1:
+                    low = int(m.group(1))
+                    high = int(m.group(2))
+                    if low <= rounded <= high:
                         return outcome
                 else:
                     temp = self._parse_outcome_temp(outcome)
-                    if temp is not None and temp - 0.5 <= actual < temp + 0.5:
+                    if temp is not None and rounded == int(temp):
                         return outcome
 
         return None
@@ -2493,6 +2641,7 @@ class WeatherScanner:
                 "price": t.price,
                 "cost": t.cost,
                 "forecast_prob": t.forecast_prob,
+                "raw_prob": t.raw_prob,
                 "edge": t.edge,
                 "target_date": t.target_date.isoformat() if t.target_date else None,
                 "outcomes": t.outcomes,
@@ -2576,6 +2725,7 @@ class WeatherScanner:
                 price=r["price"],
                 cost=r["cost"],
                 forecast_prob=r.get("forecast_prob", 0),
+                raw_prob=r.get("raw_prob", 0.0),
                 edge=r.get("edge", 0),
                 target_date=target_date,
                 outcomes=r.get("outcomes", []),
