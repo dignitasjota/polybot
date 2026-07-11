@@ -34,6 +34,10 @@ BALANCE_REFRESH_INTERVAL = 3600  # seconds between balance refreshes (1 hour)
 RELAYER_URL = "https://relayer-v2.polymarket.com"
 ZERO_BYTES32 = "0x" + "00" * 32
 
+# Data API — ground truth for on-chain fills (used to recover orphan fills when
+# post_order returns ambiguously or raises after sending). No auth needed.
+DATA_API = "https://data-api.polymarket.com"
+
 # Minimal ABI for CTF redeemPositions
 REDEEM_ABI = [
     {
@@ -1231,6 +1235,8 @@ class Executor:
             mode="live",
         )
 
+        sent_at = time.time()  # Stamp BEFORE the try so the except can still
+                               # search the Data API for a fill that landed.
         try:
             from py_clob_client_v2 import OrderArgs
             from py_clob_client_v2.order_builder.constants import BUY
@@ -1248,17 +1254,32 @@ class Executor:
             # Submit to CLOB
             response = self._client.post_order(signed_order)
 
-            if response and response.get("orderID"):
-                trade.order_id = response["orderID"]
-                trade.status = OrderStatus.LIVE
-                # Track for monitoring
-                self._pending_orders[trade.order_id] = trade
+            # A post_order response can signal a real fill three ways: orderID
+            # populated (resting/partial), tradeIDs non-empty (FAK matched at
+            # submit — no resting order), or success=true without IDs. Reading
+            # only orderID silently dropped FAK matches as "rejected" while the
+            # money was already committed — the invisible-loss bug fixed in
+            # weather/completeness, now ported here (C5).
+            filled, order_id, trade_ids, success, err_msg, api_status = (
+                self._parse_post_order_response(response)
+            )
+
+            if filled:
+                # FAK match (no resting order) is already MATCHED; a populated
+                # orderID is a resting/partial order to monitor.
+                trade.order_id = order_id or (str(trade_ids[0]) if trade_ids else "")
+                if order_id:
+                    trade.status = OrderStatus.LIVE
+                    self._pending_orders[trade.order_id] = trade
+                else:
+                    trade.status = OrderStatus.MATCHED  # filled at submit
                 # Deduct optimistically now, real refresh follows async
                 if self._live_balance is not None:
                     self._live_balance -= opp.suggested_bet
                 logger.info(
                     "order_placed",
-                    order_id=trade.order_id,
+                    order_id=trade.order_id or "(fak)",
+                    matched_at_submit=bool(trade_ids and not order_id),
                     question=opp.question[:60],
                     side=opp.token_side,
                     price=f"${opp.token_price:.4f}",
@@ -1285,16 +1306,101 @@ class Executor:
                 await self._persist_new_trade(trade, opp, "pending")
             else:
                 trade.status = OrderStatus.FAILED
-                trade.error = str(response)
-                logger.error("order_rejected", response=str(response))
+                trade.error = err_msg or str(response)
+                logger.error("order_rejected", errorMsg=err_msg[:200], status=api_status)
 
         except Exception as e:
-            trade.status = OrderStatus.FAILED
-            trade.error = str(e)
-            logger.error("order_failed", error=str(e), question=opp.question[:60])
+            # An exception after sending doesn't mean the order isn't live:
+            # a network/timeout glitch can leave it in the CLOB while we lose
+            # the ID. Verify via the Data API before giving up (C5).
+            logger.warning("order_send_exception", error=str(e), cid=opp.condition_id[:12])
+            hit = await self._verify_fill_via_api(opp.condition_id, since_ts=sent_at - 5)
+            if hit:
+                trade.order_id = str(hit.get("transactionHash", "") or "")[:66]
+                trade.status = OrderStatus.MATCHED
+                if self._live_balance is not None:
+                    self._live_balance -= opp.suggested_bet
+                asyncio.create_task(self._refresh_balance_delayed(delay_seconds=5))
+                await self._persist_new_trade(trade, opp, "pending")
+                logger.warning(
+                    "orphan_fill_recovered",
+                    cid=opp.condition_id[:12],
+                    tx=str(hit.get("transactionHash", ""))[:12],
+                )
+            else:
+                trade.status = OrderStatus.FAILED
+                trade.error = str(e)
+                logger.error("order_failed", error=str(e), question=opp.question[:60])
 
         self._trades.append(trade)
         return trade
+
+    @staticmethod
+    def _parse_post_order_response(
+        result: object,
+    ) -> tuple[bool, str, list, bool, str, str]:
+        """Extract fill evidence from a CLOB V2 post_order response.
+
+        Returns ``(filled, order_id, trade_ids, success, err_msg, status)``.
+        A fill can be signalled by a populated ``orderID`` (resting/partial),
+        a non-empty ``tradeIDs`` (FAK/immediate match), or ``success: true``.
+        """
+        r = result if isinstance(result, dict) else {}
+        order_id = r.get("orderID", "") or ""
+        trade_ids = r.get("tradeIDs", []) or []
+        api_status = r.get("status", "") or ""
+        success = bool(r.get("success", False))
+        err_msg = r.get("errorMsg", "") or ""
+        filled = bool(order_id) or bool(trade_ids) or success
+        return filled, order_id, trade_ids, success, err_msg, api_status
+
+    async def _fetch_user_fills_via_api(
+        self, since_ts: float, condition_id: str | None = None
+    ) -> list[dict]:
+        """TRADE-type activity for our funder since ``since_ts`` (Data API).
+
+        Ground truth for on-chain fills: whatever the Data API lists for our
+        wallet IS what happened, regardless of what post_order returned.
+        """
+        if not self._funder:
+            return []
+        try:
+            import aiohttp
+            params = {"user": self._funder, "type": "TRADE", "limit": "100"}
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"{DATA_API}/activity", params=params) as resp:
+                    if resp.status != 200:
+                        return []
+                    data = await resp.json()
+        except Exception as e:
+            logger.warning("executor_data_api_error", error=str(e))
+            return []
+        items = data if isinstance(data, list) else data.get("data", []) or []
+        out: list[dict] = []
+        for r in items:
+            ts = float(r.get("timestamp", 0) or 0)
+            if ts < since_ts:
+                continue
+            if condition_id and r.get("conditionId") != condition_id:
+                continue
+            out.append(r)
+        return out
+
+    async def _verify_fill_via_api(
+        self, condition_id: str, since_ts: float, attempts: int = 3, delay_s: float = 2.0
+    ) -> dict | None:
+        """Poll the Data API briefly for our recent fill on a condition.
+
+        Used when post_order raised or was ambiguous: the order may already be
+        filled on-chain; we just don't have the ID yet.
+        """
+        for _ in range(attempts):
+            await asyncio.sleep(delay_s)
+            hits = await self._fetch_user_fills_via_api(since_ts, condition_id)
+            if hits:
+                return hits[0]
+        return None
 
     # ── Order Monitoring ──────────────────────────────────────────
 
