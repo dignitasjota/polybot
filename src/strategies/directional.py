@@ -14,6 +14,7 @@ from typing import Any
 import structlog
 
 from src.detector import ClosingArbitrageDetector, Opportunity
+from src.fees import net_margin
 from src.strategies.base import AccountContext, Strategy, StrategyConfig
 from src.strategies.registry import register_strategy
 
@@ -128,22 +129,33 @@ class DirectionalStrategy(Strategy):
             token_side = getattr(trade, "token_side", None)
             if not condition_id or not token_side:
                 continue
+            # cost_usd = actual dollars spent. Without it the placeholder had
+            # suggested_bet=0 → shares=0 → any later resolution booked pnl=$0,
+            # erasing the real cost from the metrics (M5). Skip cost-less ghost
+            # trades entirely; they can't resolve to a meaningful P&L.
+            cost_usd = getattr(trade, "cost_usd", 0.0) or 0.0
+            if cost_usd <= 0:
+                continue
+            price = getattr(trade, "price", 0.0) or 0.0
             key = f"{condition_id}:{token_side}"
-            # Build a minimal Opportunity placeholder so dedupe checks fire.
+            # Rebuild a placeholder that both dedupes AND resolves correctly:
+            # suggested_bet carries the real cost and margin_net is reconstructed
+            # from the fill price so `shares * margin_net` gives a real win P&L.
             opp = Opportunity(
                 timestamp=getattr(trade, "created_at", 0.0),
                 condition_id=condition_id,
                 question=getattr(trade, "question", ""),
                 token_side=token_side,
                 token_id=getattr(trade, "token_id", "") or "",
-                token_price=getattr(trade, "price", 0.0) or 0.0,
+                token_price=price,
                 implied_probability=0.0,
-                margin_gross=0.0,
+                margin_gross=max(0.0, 1.0 - price),
                 fee_estimated=0.0,
-                margin_net=0.0,
+                margin_net=net_margin(price) if price > 0 else 0.0,
                 depth_at_price=0.0,
                 resolved=False,
                 winning_token_id="",
+                suggested_bet=cost_usd,
                 source_strategy="directional",
                 mode=self.config.mode,
             )

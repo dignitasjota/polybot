@@ -1334,6 +1334,21 @@ Cerrado el pendiente de C1: las otras 4 estrategias también tienen stop-loss di
 
 El guard resetea en el límite del día UTC (un tripped se levanta solo al día siguiente) y `max_daily_loss <= 0` lo desactiva. Con esto **C1 deja de ser letra muerta en las 5 estrategias**. El mecanismo `_daily_pnl`/`update_pnl` del Executor sigue existiendo (con el reset UTC de B7/B13) pero ya no es el driver — cada estrategia se autoprotege. **Tests**: +6 `test_risk_guard.py` (helper) +6 integración (corte real en weather/completeness, cableado+reset en detector/copy). **220 verde** (weather 96 + completeness 65 + risk_guard 12 + liquidity 61 - solapes).
 
+### Bloque directional: saneamiento del Executor + detector (Julio 11, 2026)
+
+Los 8 hallazgos de directional/Executor de la auditoría (A4-A9, M5, M6):
+
+- **A9 — DST**: `_et_to_utc` usa `ZoneInfo("America/New_York")` (respeta EST/EDT) en vez de hardcodear UTC-4. De nov a mar cada ventana Up/Down quedaba 1h desplazada → la confirmación direccional corría contra el kline de Binance equivocado ~4 meses/año.
+- **A8 — balance disponible**: `_check_risk` usa `_available_balance()` = on-chain − Σ(coste de órdenes pending/live), en vez del `_live_balance` optimista que el refresh borraba. Se eliminó la deducción optimista (doble conteo). N órdenes GTC resting ya no comprometen cada una el balance total.
+- **A7 — cupo no vitalicio**: el redeem marca el trade `CONFIRMED` en memoria (sale del conteo de `active_trades`); las posiciones `MATCHED` más viejas que `_MATCHED_ACTIVE_TTL` (4h; directional cierra en ≤1h) tampoco cuentan → cubre las perdedoras que nunca se rediman. Antes `max_concurrent_positions` se volvía un tope vitalicio que congelaba la cuenta tras N fills.
+- **A5 — race timeout-cancel vs fill**: `_cancel_order` re-consulta `size_matched` antes de cancelar; si la orden llenó → `_book_fill` (MATCHED, cost al fill real) en vez de marcarla CANCELLED y perder la posición. Si el cancel falla, re-verifica por si ganó la carrera.
+- **A6 — event loop**: `create_order`/`post_order`/`get_order`/`cancel_order`/`get_balance_allowance` van por `_in_executor` (run_in_executor). Antes bloqueaban el loop entero (WS, ping, otras estrategias) durante cada orden live → pong timeouts y reconexiones a mitad de operar.
+- **A4 — cleanup preserva pending**: `cleanup_market` ya no hace pop de bets con `outcome=="pending"` → el sweep (que exige age>1h) puede resolverlas. Antes se perdían: en paper la pérdida desaparecía del P&L, en live un win podía quedar sin redimir.
+- **M5 — restore con cost**: el placeholder de `restore_open_positions` copia `suggested_bet=cost_usd` y reconstruye `margin_net` (`net_margin(price)`); skip de trades con cost≤0. Antes resolvían con pnl=$0, borrando el coste real.
+- **M6 — guard live en settlements**: `sweep_stale_pending` y `_check_resolved_market` solo acreditan balance en live si el executor confirmó la orden (como `_settle_pending`). Antes inflaban el balance/P&L con trades que podían no haberse ejecutado.
+
+**Tests**: +10 (`test_directional_block.py`). Suite completa verde.
+
 ### Bloque weather: saneamiento completo (Julio 11, 2026)
 
 Los 8 hallazgos de weather de la auditoría, cerrados en una tanda (A1, M1, M2, M3, M12, B3, B4, B5):
@@ -1401,22 +1416,22 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 **[ABIERTO] A3 — Copy-trade muere en silencio tras redeploy**
 `strategies/copy_trade.py:107-135` — el restore mete dicts en `_bets` donde el código espera objetos `CopyBet` → `AttributeError` tragado con `logger.debug` en cada oportunidad. Además la key restaurada (`cid:side`) no coincide con la del dedup vivo (`cid:side:wallet`) → re-apuesta lo ya apostado tras un redeploy.
 
-**[ABIERTO] A4 — Directional: `cleanup_market` elimina bets pendientes antes del sweep**
+**[CORREGIDO Jul 11, 2026] A4 — Directional: `cleanup_market` elimina bets pendientes antes del sweep**
 `detector.py:1217-1219` + `main.py:264-277` — mercados de 5 min se limpian a los ~15 min de su `end_date`; `sweep_stale_pending` exige >1h. Las bets se borran antes de que el sweep pueda resolverlas → pérdidas omitidas del P&L en paper; en live, **wins sin redimir**.
 
-**[ABIERTO] A5 — Race timeout-cancel vs fill en el Executor**
+**[CORREGIDO Jul 11, 2026] A5 — Race timeout-cancel vs fill en el Executor**
 `executor.py:1366-1412` — si la orden llena entre el último poll y el cancel, `cancel_order` lanza (excepción logueada), el trade se elimina del tracking con la posición real viva y sin contabilizar.
 
-**[ABIERTO] A6 — Llamadas CLOB del Executor síncronas en el event loop**
+**[CORREGIDO Jul 11, 2026] A6 — Llamadas CLOB del Executor síncronas en el event loop**
 `executor.py:831,863,1239,1242` — firma EIP-712 + HTTP síncrono bloquean el loop entero durante cada orden live (WS listener, ping, resto de estrategias). Weather y completeness sí usan `run_in_executor`; el Executor no.
 
-**[ABIERTO] A7 — `max_concurrent_positions` es un tope vitalicio**
+**[CORREGIDO Jul 11, 2026] A7 — `max_concurrent_positions` es un tope vitalicio**
 `executor.py:973-977` — nada transiciona trades de `MATCHED` a cerrado en memoria → tras 5 fills, `_check_risk` rechaza todo con solo `logger.debug`; la cuenta queda inutilizada en silencio hasta reinicio.
 
-**[ABIERTO] A8 — Balance optimista anulado por refresh**
+**[CORREGIDO Jul 11, 2026] A8 — Balance optimista anulado por refresh**
 `executor.py:1249-1251,939-940` — la deducción optimista tras colocar se sobreescribe 5s después con el balance on-chain, que no descuenta órdenes GTC resting → N órdenes pueden comprometer cada una el balance total.
 
-**[ABIERTO] A9 — PriceChecker asume EDT todo el año**
+**[CORREGIDO Jul 11, 2026] A9 — PriceChecker asume EDT todo el año**
 `price_checker.py:73` — `_et_to_utc` usa siempre UTC-4. De noviembre a marzo (EST, UTC-5) la ventana de Binance queda desplazada 1h → confirmación Up/Down contra el kline equivocado durante ~4 meses/año.
 
 ---
@@ -1436,10 +1451,10 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 > Fix: `adverse = max(0, midpoint - (1 - fill_price)) × size` en `record_fill`. El fill NO benigno ya no computa como pérdida; el realmente adverso sí.
 `liquidity_provider.py:1798-1800` — `adverse = max(0, (1 - fill_price) - midpoint) * size` registra pérdida en el fill benigno normal y 0 en el adverso. Todo fill NO benigno infla `adverse_ratio` → `market_abandoned_adverse` abandona mercados buenos. Fix: `max(0, midpoint - (1 - fill_price)) * size`.
 
-**[ABIERTO] M5 — Restore de directional no copia `cost_usd`**
+**[CORREGIDO Jul 11, 2026] M5 — Restore de directional no copia `cost_usd`**
 `strategies/directional.py:114-153` — los placeholders restaurados tienen `suggested_bet=0` y sin `margin_net` → al resolver, `pnl = shares × margin_net = 0` en todas las posiciones que sobreviven un reinicio. El código de fix (`skip suggested_bet <= 0`) vive en `detector.restore_open_positions` que nadie llama.
 
-**[ABIERTO] M6 — P&L de directional acreditado sin verificar fill en dos caminos live**
+**[CORREGIDO Jul 11, 2026] M6 — P&L de directional acreditado sin verificar fill en dos caminos live**
 `detector.py:661-679,286-288` — balance y simulated_pnl se actualizan inmediatamente en `_check_resolved_market` y `sweep_stale_pending` sin el guard `_is_live_mode` ni confirmar que la orden llenó.
 
 **[ABIERTO] M7 — WS throttle descarta snapshots de book**

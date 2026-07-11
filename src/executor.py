@@ -203,6 +203,9 @@ class Executor:
         self._trades: list[TradeRecord] = []
         self._daily_pnl: float = 0.0
         self._daily_reset_day: str = _utc_day()  # UTC date marker for the daily reset
+        # A MATCHED position older than this is treated as resolved for the
+        # concurrency cap (A7). Directional markets close within ~1h; 4h margin.
+        self._MATCHED_ACTIVE_TTL = 4 * 3600
         self._initialized = False
 
         # Live balance tracking
@@ -645,6 +648,12 @@ class Executor:
                         and trade.mode == "live"
                         and trade.status in (OrderStatus.MATCHED, OrderStatus.CONFIRMED)
                     ):
+                        # Terminal in memory too (A7): _check_risk counts
+                        # LIVE/MATCHED/PENDING as active. A redeemed position is
+                        # resolved — its capital came back — so it must leave the
+                        # count or max_concurrent_positions becomes a lifetime cap
+                        # that silently freezes the account after N fills.
+                        trade.status = OrderStatus.CONFIRMED
                         await self._persist_status_update(
                             trade, "redeemed", settled_at=now,
                         )
@@ -853,8 +862,9 @@ class Executor:
             return
         try:
             from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
-            resp = self._client.get_balance_allowance(
-                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            resp = await self._in_executor(  # A6
+                self._client.get_balance_allowance,
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL),
             )
             if not resp:
                 logger.warning("allowance_check_empty", response=str(resp))
@@ -884,8 +894,9 @@ class Executor:
             return
         try:
             from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
-            resp = self._client.get_balance_allowance(
-                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            resp = await self._in_executor(  # A6
+                self._client.get_balance_allowance,
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL),
             )
             if resp and "balance" in resp:
                 raw = float(resp["balance"])
@@ -991,10 +1002,21 @@ class Executor:
             )
             return False
 
-        # Max concurrent positions
-        active_trades = [t for t in self._trades if t.status in (
-            OrderStatus.LIVE, OrderStatus.MATCHED, OrderStatus.PENDING
-        )]
+        # Max concurrent positions (A7). LIVE/PENDING always count. MATCHED
+        # counts only while fresh: winners leave the count when redeemed
+        # (→ CONFIRMED), but losers are never redeemed and would otherwise sit
+        # MATCHED forever, turning the cap into a lifetime limit that freezes
+        # the account. Directional markets resolve within ~1h, so a MATCHED
+        # position older than the TTL is settled — stop counting it.
+        now = time.time()
+        active_trades = [
+            t for t in self._trades
+            if t.status in (OrderStatus.LIVE, OrderStatus.PENDING)
+            or (
+                t.status == OrderStatus.MATCHED
+                and (t.matched_at == 0 or now - t.matched_at < self._MATCHED_ACTIVE_TTL)
+            )
+        ]
         if len(active_trades) >= self.risk.max_concurrent_positions:
             logger.debug("max_positions_reached", count=len(active_trades))
             return False
@@ -1011,18 +1033,50 @@ class Executor:
             )
             return False
 
-        # In live mode, check against real balance
+        # In live mode, check against the AVAILABLE balance, not the raw
+        # on-chain balance (A8). get_balance_allowance returns free pUSD but
+        # does NOT subtract our own resting GTC orders (funds don't move until
+        # a match), and the optimistic deduction we make on placement gets
+        # wiped by the next balance refresh. So each of N resting orders could
+        # commit up to the full balance. Subtract what's already committed in
+        # pending/live orders to get the real spendable amount.
         if self.mode == ExecutionMode.LIVE and self._live_balance is not None:
-            if opp.suggested_bet > self._live_balance:
+            available = self._available_balance()
+            if opp.suggested_bet > available:
                 logger.warning(
                     "insufficient_balance",
                     bet=f"${opp.suggested_bet:.2f}",
-                    balance=f"${self._live_balance:.2f}",
+                    available=f"${available:.2f}",
+                    on_chain=f"${self._live_balance:.2f}",
+                    committed=f"${self._live_balance - available:.2f}",
                     question=opp.question[:60],
                 )
                 return False
 
         return True
+
+    def _available_balance(self) -> float:
+        """Live balance spendable now = on-chain free pUSD minus our own
+        resting (pending/live) orders, whose cost the on-chain balance hasn't
+        deducted yet (A8)."""
+        if self._live_balance is None:
+            return 0.0
+        committed = sum(
+            t.cost_usd for t in self._pending_orders.values()
+            if t.status in (OrderStatus.PENDING, OrderStatus.LIVE)
+        )
+        return self._live_balance - committed
+
+    async def _in_executor(self, fn, *args):
+        """Run a blocking ClobClient call off the event loop (A6).
+
+        create_order signs EIP-712 and post_order/get_order/cancel_order/
+        get_balance_allowance are synchronous HTTP — running them inline froze
+        the whole loop (WS listener, ping, other strategies) for the duration
+        of every live order, triggering pong timeouts and reconnects mid-trade.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: fn(*args))
 
     # ── Fase 6: persistence helpers ─────────────────────────────────
 
@@ -1259,11 +1313,11 @@ class Executor:
                 token_id=resolved_token_id,
             )
 
-            # Create and sign the order
-            signed_order = self._client.create_order(order_args)
+            # Create and sign the order (off-loop — EIP-712 signing blocks, A6)
+            signed_order = await self._in_executor(self._client.create_order, order_args)
 
-            # Submit to CLOB
-            response = self._client.post_order(signed_order)
+            # Submit to CLOB (off-loop, A6)
+            response = await self._in_executor(self._client.post_order, signed_order)
 
             # A post_order response can signal a real fill three ways: orderID
             # populated (resting/partial), tradeIDs non-empty (FAK matched at
@@ -1284,9 +1338,11 @@ class Executor:
                     self._pending_orders[trade.order_id] = trade
                 else:
                     trade.status = OrderStatus.MATCHED  # filled at submit
-                # Deduct optimistically now, real refresh follows async
-                if self._live_balance is not None:
-                    self._live_balance -= opp.suggested_bet
+                # No optimistic deduction of _live_balance (A8): a resting order
+                # is now counted via _available_balance (committed = pending
+                # orders), and a FAK match is reflected by the async refresh
+                # below. Deducting here + the committed subtraction would
+                # double-count, and the refresh wiped it anyway.
                 logger.info(
                     "order_placed",
                     order_id=trade.order_id or "(fak)",
@@ -1328,9 +1384,8 @@ class Executor:
             hit = await self._verify_fill_via_api(opp.condition_id, since_ts=sent_at - 5)
             if hit:
                 trade.order_id = str(hit.get("transactionHash", "") or "")[:66]
-                trade.status = OrderStatus.MATCHED
-                if self._live_balance is not None:
-                    self._live_balance -= opp.suggested_bet
+                trade.status = OrderStatus.MATCHED  # already filled on-chain
+                # No optimistic deduction (A8) — the async refresh reflects it.
                 asyncio.create_task(self._refresh_balance_delayed(delay_seconds=5))
                 await self._persist_new_trade(trade, opp, "pending")
                 logger.warning(
@@ -1442,7 +1497,7 @@ class Executor:
 
         for order_id, trade in list(self._pending_orders.items()):
             try:
-                order_data = self._client.get_order(order_id)
+                order_data = await self._in_executor(self._client.get_order, order_id)  # A6
                 if not order_data:
                     continue
 
@@ -1503,15 +1558,26 @@ class Executor:
             self._pending_orders.pop(oid, None)
 
     async def _cancel_order(self, order_id: str, trade: TradeRecord):
-        """Cancel a single order and update trade record."""
+        """Cancel a timed-out order, but verify it didn't fill first (A5).
+
+        The old code cancelled unconditionally. If the order filled between the
+        last poll and the cancel, cancel_order raised, we logged and dropped it
+        from _pending_orders as CANCELLED → a real position with no tracking and
+        wrong P&L. Now: re-check status; if MATCHED, book the fill instead of
+        cancelling; and if the cancel itself fails, re-check once in case it
+        raced a fill.
+        """
+        matched = await self._matched_size_or_none(order_id)
+        if matched and matched > 0:
+            await self._book_fill(order_id, trade, matched)
+            return
+
         try:
             from py_clob_client_v2.clob_types import OrderPayload
-            self._client.cancel_order(OrderPayload(orderID=order_id))
+            await self._in_executor(self._client.cancel_order, OrderPayload(orderID=order_id))  # A6
             trade.status = OrderStatus.CANCELLED
             trade.error = f"Timed out after {ORDER_TIMEOUT}s"
-            # Refresh real balance instead of optimistic refund
             await self._refresh_balance()
-            # Fase 6: persist transition
             await self._persist_status_update(trade, "cancelled", error=trade.error)
             logger.info(
                 "order_cancelled_timeout",
@@ -1519,21 +1585,45 @@ class Executor:
                 question=trade.question[:60],
                 age=f"{time.time() - trade.created_at:.0f}s",
             )
-            # Notify detector to mark bet as cancelled
             if self._on_order_cancelled:
                 try:
                     await self._on_order_cancelled(trade.condition_id, trade.token_side)
                 except Exception as e:
-                    logger.warning(
-                        "order_cancelled_callback_error",
-                        error=str(e),
-                    )
+                    logger.warning("order_cancelled_callback_error", error=str(e))
         except Exception as e:
-            logger.warning(
-                "order_cancel_failed",
-                order_id=order_id,
-                error=str(e),
-            )
+            # Cancel failed — it may have filled in the meantime. Re-check.
+            matched = await self._matched_size_or_none(order_id)
+            if matched and matched > 0:
+                logger.warning("cancel_raced_fill", order_id=order_id, matched=matched)
+                await self._book_fill(order_id, trade, matched)
+            else:
+                logger.warning("order_cancel_failed", order_id=order_id, error=str(e))
+
+    async def _matched_size_or_none(self, order_id: str) -> float | None:
+        """size_matched for an order (None if the query fails / order gone)."""
+        try:
+            data = await self._in_executor(self._client.get_order, order_id)
+            if not data:
+                return None
+            return float(data.get("size_matched", 0) or 0)
+        except Exception:
+            return None
+
+    async def _book_fill(self, order_id: str, trade: TradeRecord, size_matched: float):
+        """Record a fill discovered during cancel (A5): mark MATCHED, size the
+        cost to the fill, refresh balance, persist."""
+        trade.status = OrderStatus.MATCHED
+        trade.matched_at = time.time()
+        trade.size_matched = size_matched
+        trade.cost_usd = round(size_matched * trade.price, 2)
+        await self._refresh_balance()
+        await self._persist_status_update(trade, "confirmed", matched_at=trade.matched_at)
+        logger.info(
+            "order_matched_on_cancel",
+            order_id=order_id,
+            question=trade.question[:60],
+            size_matched=f"{size_matched:.2f}",
+        )
 
     # ── Helpers ───────────────────────────────────────────────────
 

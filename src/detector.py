@@ -285,11 +285,15 @@ class ClosingArbitrageDetector:
                             opp.resolved_at = now
                             if opp.duration_seconds == 0:
                                 opp.duration_seconds = round(now - opp.timestamp, 1)
-                            self._balance = round(self._balance + pnl, 2)
-                            self._stats["simulated_pnl"] = round(
-                                self._stats["simulated_pnl"] + pnl, 2
-                            )
-                            self._loss_guard.record(pnl)  # C1 daily stop-loss
+                            # In live only credit balance if the executor
+                            # confirmed the order (M6); otherwise the executor
+                            # syncs the real balance. In paper always credit.
+                            if not self._is_live_mode or key in self._confirmed_orders:
+                                self._balance = round(self._balance + pnl, 2)
+                                self._stats["simulated_pnl"] = round(
+                                    self._stats["simulated_pnl"] + pnl, 2
+                                )
+                                self._loss_guard.record(pnl)  # C1 daily stop-loss
                             logger.info(
                                 "sweep_settled",
                                 question=opp.question[:60],
@@ -672,10 +676,15 @@ class ClosingArbitrageDetector:
                 bet_opp.outcome = "win"
                 bet_opp.actual_pnl = pnl
                 bet_opp.resolved_at = time.time()
-                self._balance = round(self._balance + pnl, 2)
                 self._stats["settled_wins"] += 1
-                self._stats["simulated_pnl"] = round(self._stats["simulated_pnl"] + pnl, 2)
-                self._loss_guard.record(pnl)  # C1 daily stop-loss (always a win here)
+                # In live only credit if the executor confirmed the order (M6);
+                # the callback fires fire-and-forget before the order is even
+                # placed, so crediting unconditionally inflated the live balance
+                # with trades that may not have executed. In paper always credit.
+                if not self._is_live_mode or key in self._confirmed_orders:
+                    self._balance = round(self._balance + pnl, 2)
+                    self._stats["simulated_pnl"] = round(self._stats["simulated_pnl"] + pnl, 2)
+                    self._loss_guard.record(pnl)  # C1 daily stop-loss (always a win here)
                 logger.info(
                     "post_resolution_settled",
                     question=bet_opp.question[:80],
@@ -1231,7 +1240,16 @@ class ClosingArbitrageDetector:
         for k in log_time_keys:
             self._last_log_time.pop(k, None)
 
-        bet_keys = [k for k in self._bet_placed if k.startswith(condition_id)]
+        # Drop bet-tracking entries — but KEEP unresolved bets (A4). Markets are
+        # cleaned up ~15 min after end_date, but a 5-min bet's resolution may not
+        # have reached the tracker yet; sweep_stale_pending (which needs age>1h)
+        # must still find it. Popping a pending bet here lost it forever →
+        # in paper the loss vanished from P&L (survivorship bias); in live a
+        # winning position could go un-redeemed (real money left on-chain).
+        bet_keys = [
+            k for k in self._bet_placed
+            if k.startswith(condition_id) and self._bet_placed[k].outcome != "pending"
+        ]
         for k in bet_keys:
             self._bet_placed.pop(k, None)
 

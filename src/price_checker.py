@@ -4,6 +4,7 @@ import asyncio
 import re
 import time
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import structlog
@@ -65,14 +66,19 @@ _QUESTION_HOURLY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# ET timezone offset (Eastern Time)
-ET_OFFSET_STANDARD = timedelta(hours=-5)  # EST
-ET_OFFSET_DST = timedelta(hours=-4)       # EDT (March-November)
+# Eastern Time zone (handles the EST/EDT DST transition automatically).
+_ET_ZONE = ZoneInfo("America/New_York")
 
 
 def _et_to_utc(dt: datetime) -> datetime:
-    """Convert naive ET datetime to UTC. Assumes EDT (March-November)."""
-    return dt.replace(tzinfo=timezone(ET_OFFSET_DST)).astimezone(timezone.utc)
+    """Convert a naive ET datetime to UTC, respecting DST (A9).
+
+    The old code hardcoded UTC-4 (EDT) year-round, so from Nov–Mar (EST,
+    UTC-5) every parsed Up/Down window was shifted 1h → the Binance open
+    price was fetched for the wrong minute and direction confirmation ran
+    against a false baseline for ~4 months a year.
+    """
+    return dt.replace(tzinfo=_ET_ZONE).astimezone(timezone.utc)
 
 
 def _parse_time_str(date_str: str, year: int, time_str: str) -> datetime | None:
