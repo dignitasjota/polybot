@@ -651,9 +651,17 @@ class CompletenessScanner:
                 return_exceptions=True,
             )
 
-            # Check results
+            # Collect an order_id PER LEG, aligned with opp.token_ids: an empty
+            # string means that leg's placement failed. A failure on one leg must
+            # NOT abandon a sibling leg that WAS accepted (C4): the old `break`
+            # exited before recording a later-accepted leg's id, leaving it
+            # resting → filled → an unhedged directional position with cost=0
+            # (invisible in P&L). Keep the aligned list and always run the fill
+            # verification pipeline, which cancels resting remainders and unwinds
+            # any stranded fill (a leg with id="" polls as matched=0, so
+            # pair<min_shares forces the unwind-all path).
             order_ids = []
-            all_success = True
+            placement_failures = 0
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     logger.error(
@@ -661,8 +669,9 @@ class CompletenessScanner:
                         token_id=opp.token_ids[i][:12],
                         error=str(result),
                     )
-                    all_success = False
-                    break
+                    order_ids.append("")
+                    placement_failures += 1
+                    continue
                 order_id = result.get("orderID", "") if isinstance(result, dict) else ""
                 if not order_id:
                     logger.error(
@@ -670,19 +679,13 @@ class CompletenessScanner:
                         token_id=opp.token_ids[i][:12],
                         response=str(result)[:200],
                     )
-                    all_success = False
-                    break
+                    placement_failures += 1
                 order_ids.append(order_id)
 
-            trade.order_ids = order_ids
+            trade.order_ids = [oid for oid in order_ids if oid]
 
-            if not all_success:
-                # Partial execution — cancel any placed orders.
-                # Reset cost_total to 0: the displayed "cost" was the *expected* spend;
-                # since cancellation reverses any partial fills (best-effort), the
-                # net realized cost is effectively 0 when no leg matched, and the
-                # half-filled case is already a residual position outside the arb.
-                await self._cancel_partial_orders(order_ids)
+            # Nothing was placed → nothing to verify, cancel, or unwind.
+            if not any(order_ids):
                 trade.cost_total = 0.0
                 trade.status = "failed"
                 self._trades_failed += 1
@@ -696,7 +699,8 @@ class CompletenessScanner:
                 shares=trade.shares,
                 cost=f"${trade.cost_total:.4f}",
                 expected_profit=f"${trade.expected_profit:.4f}",
-                order_ids=[oid[:12] for oid in order_ids],
+                order_ids=[oid[:12] for oid in order_ids if oid],
+                placement_failures=placement_failures,
             )
 
             # Force balance refresh on next check — legs may consume pUSD.
@@ -858,6 +862,8 @@ class CompletenessScanner:
         deadline = time.time() + FILL_POLL_TIMEOUT_S
         while True:
             for i, oid in enumerate(order_ids):
+                if not oid:
+                    continue  # leg never placed (id="") — stays matched=0
                 try:
                     data = await self._get_order_async(oid)
                 except Exception as e:

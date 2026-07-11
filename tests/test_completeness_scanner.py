@@ -857,6 +857,63 @@ class TestFillVerification:
         assert sell_price == pytest.approx(0.42)
 
     @pytest.mark.asyncio
+    async def test_leg_placement_failure_unwinds_accepted_leg(self, fake_clob_sdk):
+        """C4: una pata falla al COLOCARSE pero la otra es aceptada y llena.
+
+        El bug antiguo hacía `break` y saltaba el pipeline → la pata aceptada
+        quedaba viva/rellena, sin hedge, con cost=0 invisible. Ahora se cancela
+        y su fill se deshace con P&L realizado.
+        """
+        market = _arb_market()
+        scanner = CompletenessScanner(MockConfig(mode="live", cooldown_s=0), MockTracker([market]))
+        scanner._client = MagicMock()
+        scanner._client.create_order = MagicMock(return_value="signed")
+        scanner._refresh_balance = AsyncMock(return_value=None)
+        # YES (idx 0) falla al colocarse; NO (idx 1) aceptada con id.
+        scanner._post_order_async = AsyncMock(
+            side_effect=[Exception("network"), {"orderID": "o-no"}]
+        )
+        scanner._cancel_partial_orders = AsyncMock()
+        scanner._poll_fills = AsyncMock(return_value=[0.0, 50.0])  # NO llenó
+        scanner._unwind_leg = AsyncMock(return_value=0.40)
+
+        opp = scanner._evaluate_market(market)
+        await scanner._execute_arb(opp)
+
+        trade = scanner._trades[0]
+        assert trade.status == "unwound"                 # NO un failed silencioso
+        assert scanner._legs_unwound == 1
+        # La pata NO aceptada llenó del todo → se DESHACE via unwind (la posición
+        # que el bug dejaba huérfana). Antes: cost=0, invisible.
+        unwind_args = scanner._unwind_leg.call_args[0]
+        assert unwind_args[0] == "no_token"
+        assert unwind_args[1] == pytest.approx(50.0)
+        # PnL realizado del unwind: 50 × (0.40-0.45) = -2.50
+        assert trade.actual_pnl == pytest.approx(-2.50)
+        assert scanner._trades_failed == 1
+
+    @pytest.mark.asyncio
+    async def test_no_legs_placed_marks_failed_cost_zero(self, fake_clob_sdk):
+        """Si NINGUNA pata se coloca → failed con cost=0, sin tocar el pipeline."""
+        market = _arb_market()
+        scanner = CompletenessScanner(MockConfig(mode="live", cooldown_s=0), MockTracker([market]))
+        scanner._client = MagicMock()
+        scanner._client.create_order = MagicMock(return_value="signed")
+        scanner._refresh_balance = AsyncMock(return_value=None)
+        scanner._post_order_async = AsyncMock(side_effect=[Exception("x"), Exception("y")])
+        scanner._cancel_partial_orders = AsyncMock()
+        scanner._poll_fills = AsyncMock()
+
+        opp = scanner._evaluate_market(market)
+        await scanner._execute_arb(opp)
+
+        trade = scanner._trades[0]
+        assert trade.status == "failed"
+        assert trade.cost_total == 0.0
+        assert scanner._trades_failed == 1
+        scanner._poll_fills.assert_not_called()          # cortó antes del pipeline
+
+    @pytest.mark.asyncio
     async def test_unwind_leg_fallback_price_without_bid(self, fake_clob_sdk):
         """No bid known → sell at aggressive discount off our buy price."""
         market = _arb_market()  # bids default 0.0
