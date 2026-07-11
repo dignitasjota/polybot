@@ -34,10 +34,15 @@ def create_app(bot) -> web.Application:
 
     # Jinja2 templates
     templates_dir = Path(__file__).parent.parent / "templates"
+    # autoescape=True (M14): escape every {{ }} by default so any future
+    # {{ user_or_api_field }} can't inject HTML. The two pre-built HTML blobs
+    # (markets_html, opps_html) are already rendered with |safe; the htmx
+    # fragments in routes_panel are built in Python and never pass through here.
     aiohttp_jinja2.setup(
         app,
         loader=jinja2.FileSystemLoader(str(templates_dir)),
         context_processors=[_csrf_context],
+        autoescape=True,
     )
 
     # Static files

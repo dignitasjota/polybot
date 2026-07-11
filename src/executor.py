@@ -19,6 +19,20 @@ def _utc_day() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _usdc_from_raw(raw: float) -> float:
+    """Convert a CLOB V2 balance/allowance to dollars.
+
+    The collateral (pUSD/USDC) has 6 decimals, and get_balance_allowance
+    returns the smallest-unit integer ($1.00 == 1_000_000), so it's always
+    raw / 1e6. The old `raw/1e6 if raw>1000 else raw` heuristic (M15) misread
+    a decimal-format balance >$1000 as ~$0.001 (blocking all trading) and a
+    sub-cent raw balance as hundreds of dollars. The ambiguous band it tried
+    to guess ($0.001–$1 in raw units) is sub-dollar anyway — below the $1
+    minimum the bot needs — so a deterministic /1e6 is both correct and safe.
+    """
+    return raw / 1e6
+
+
 # Polymarket CLOB V2 contracts on Polygon (updated April 28, 2026)
 CTF_EXCHANGE = "0xE111180000d2663C0091e4f400237545B87B996B"
 NEG_RISK_CTF_EXCHANGE = "0xe2222d279d744050d28e00520010520000310F59"
@@ -847,8 +861,7 @@ class Executor:
                 return
 
             allowance_raw = float(resp.get("allowance", 0) or 0)
-            # Auto-detect format (same as balance)
-            allowance = allowance_raw / 1e6 if allowance_raw > 1000 else allowance_raw
+            allowance = _usdc_from_raw(allowance_raw)
 
             if allowance < 1.0:
                 logger.error(
@@ -876,9 +889,7 @@ class Executor:
             )
             if resp and "balance" in resp:
                 raw = float(resp["balance"])
-                # Auto-detect format: if raw > 1000, it's in smallest units (6 decimals)
-                # e.g. $1.00 = 1000000 raw. If raw < 1000, it's already in USDC.
-                self._live_balance = raw / 1e6 if raw > 1000 else raw
+                self._live_balance = _usdc_from_raw(raw)
                 self._last_balance_fetch = time.time()
                 logger.info("balance_refreshed",
                             balance=f"${self._live_balance:.2f}",

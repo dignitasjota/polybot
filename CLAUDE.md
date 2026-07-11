@@ -1446,14 +1446,17 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 **[ABIERTO] M12 — Weather: dedup solo por `condition_id`, no por `event_slug`**
 `weather_scanner.py:588-606` — `blocked_cids` opera a nivel de bucket individual. Si el forecast se desplaza entre ciclos, el bot puede comprar dos buckets mutuamente excluyentes del mismo evento → uno siempre pierde.
 
-**[ABIERTO] M13 — Escritura de TOML no atómica**
-`config_manager.py:585` — `open(..., "wb")` + `dump()` directamente sobre el archivo; un crash a mitad corrompe `config.toml` y el bot no arranca. Falta temp + `os.replace()`.
+**[CORREGIDO Jul 11, 2026] M13 — Escritura de TOML no atómica**
+`config_manager.py:585` — `open(..., "wb")` + `dump()` directamente sobre el archivo; un crash a mitad corrompía `config.toml` y el bot no arrancaba.
+> Fix: `_persist` serializa a un temp (`tempfile.mkstemp` en el mismo directorio), `flush`+`fsync`, y `os.replace()` (rename atómico en el mismo filesystem). Si `dump` falla, el temp se borra y el original queda intacto. Tests en `test_m13_m14_m15.py` (válido tras escribir; fallo no corrompe; sin temps huérfanos).
 
-**[ABIERTO] M14 — Jinja2 sin `autoescape=True`**
-`web/__init__.py:27` — el setup no pasa `autoescape=True`; hoy mitigado por `_esc()` manual en los sinks conocidos. Cualquier `{{ campo_de_api }}` futuro introduce XSS sin aviso.
+**[CORREGIDO Jul 11, 2026] M14 — Jinja2 sin `autoescape=True`**
+`web/__init__.py:27` — el setup no pasaba `autoescape=True`.
+> Fix: `autoescape=True` en `aiohttp_jinja2.setup`. Seguro: los únicos 2 HTML pre-construidos (`markets_html`, `opps_html`) ya se renderizan con `|safe`; el resto de `{{ }}` son valores de texto que ahora se escapan (lo deseado); los fragmentos htmx de `routes_panel` se construyen en Python y no pasan por Jinja2.
 
-**[ABIERTO] M15 — Heurística de unidades del balance frágil**
-`executor.py:868-870` — `raw / 1e6 if raw > 1000 else raw`: un balance real de $500-999 se interpreta correctamente, pero uno >$1000 se leería como ~$0.001 (bloquea todo), y uno en unidades mínimas <$1 se leería como si fuera dólares ($0-999 naturales). Dos catástrofes posibles según formato de la API.
+**[CORREGIDO Jul 11, 2026] M15 — Heurística de unidades del balance frágil**
+`executor.py:868-870` — `raw / 1e6 if raw > 1000 else raw`: podía leer un balance >$1000 como ~$0.001 (bloquea todo) o uno sub-dólar como cientos de dólares.
+> Fix: helper `_usdc_from_raw(raw) = raw / 1e6` determinista (el colateral pUSD/USDC tiene 6 decimales y `get_balance_allowance` devuelve unidades mínimas siempre). Usado en `_refresh_balance` y `_check_allowance`. La banda ambigua que la heurística intentaba adivinar ($0.001–$1 en unidades mínimas) es sub-dólar, por debajo del mínimo operativo. Tests en `test_m13_m14_m15.py`.
 
 ---
 

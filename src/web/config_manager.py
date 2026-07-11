@@ -1,7 +1,9 @@
 """Hot-reload config: mutate in-memory config + persist to TOML."""
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 if sys.version_info >= (3, 11):
@@ -585,8 +587,25 @@ class ConfigManager:
                     w_raw["max_forecast_days"] = wc.max_forecast_days
                     w_raw["forecast_cache_ttl"] = wc.forecast_cache_ttl
 
-        with open(self._toml_path, "wb") as f:
-            tomli_w.dump(raw, f)
+        # Atomic write (M13): serialize to a temp file in the same directory,
+        # fsync, then os.replace() (an atomic rename on the same filesystem).
+        # The old direct `open(path,"wb") + dump` could truncate config.toml if
+        # the process crashed / OOM'd mid-write, bricking the next startup.
+        path = str(self._toml_path)
+        directory = os.path.dirname(path) or "."
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".config-", suffix=".toml.tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                tomli_w.dump(raw, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
     # ── Helpers ────────────────────────────────────────────────────
 
