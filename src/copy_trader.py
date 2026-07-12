@@ -379,6 +379,13 @@ class CopyTrader:
         key = f"{trade.condition_id}:{token_side}:{wallet_prefix}"
         if key in self._bets:
             return  # Already copied this exact trade
+        # A position restored after a redeploy is keyed WITHOUT the wallet
+        # prefix (we don't know which target wallet it came from), so the exact
+        # key above misses it and we'd re-bet a market we already hold (A3).
+        # Treat a restored bet on this market+side as an existing position.
+        restored = self._bets.get(f"{trade.condition_id}:{token_side}")
+        if restored is not None and getattr(restored, "wallet_source", "") == "restored":
+            return
 
         # Opposite-side hedge logic (Option B):
         # Allow betting both sides ONLY when the combined price makes it a
@@ -758,7 +765,12 @@ class CopyTrader:
                 )
         else:
             bet.outcome = "loss"
-            bet.actual_pnl = round(-bet.bet_size, 4)
+            # The taker fee was paid at BUY regardless of outcome (B2). The old
+            # -bet_size ignored it, systematically understating losses (the win
+            # branch already subtracts it). shares = bet_size/price.
+            shares = bet.bet_size / bet.price if bet.price > 0 else 0
+            fee = taker_fee(bet.price, shares)
+            bet.actual_pnl = round(-(bet.bet_size + fee), 4)
             self._stats["settled_losses"] += 1
 
         self._loss_guard.record(bet.actual_pnl)  # C1 daily stop-loss

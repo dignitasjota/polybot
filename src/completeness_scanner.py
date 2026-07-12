@@ -45,6 +45,7 @@ MIN_ORDER_USD = 1.0
 # whose loss the bot never even sees.
 FILL_POLL_INTERVAL_S = 2.0
 FILL_POLL_TIMEOUT_S = 10.0
+REDEEM_RETRY_INTERVAL_S = 120.0  # M11: retry pending redeems this often
 
 # Skip markets within this window of resolution: order book asks become stale
 # (matching engine winding down), and any large gap detected here is almost
@@ -131,6 +132,7 @@ class CompletenessScanner:
         # State
         self._running = False
         self._scan_task: asyncio.Task | None = None
+        self._redeem_task: asyncio.Task | None = None  # M11: retries pending redeems
         self._trades: list[ArbTrade] = []
         self._pending_redeems: set[str] = set()  # condition_ids waiting for redeem
 
@@ -190,6 +192,8 @@ class CompletenessScanner:
         self._running = True
         self._started_at = time.time()
         self._scan_task = asyncio.create_task(self._scan_loop())
+        if not self.should_simulate:
+            self._redeem_task = asyncio.create_task(self._redeem_retry_loop())  # M11
 
         logger.info(
             "completeness_scanner_started",
@@ -207,6 +211,13 @@ class CompletenessScanner:
             except asyncio.CancelledError:
                 pass
         self._scan_task = None
+        if self._redeem_task and not self._redeem_task.done():
+            self._redeem_task.cancel()
+            try:
+                await self._redeem_task
+            except asyncio.CancelledError:
+                pass
+        self._redeem_task = None
         logger.info("completeness_scanner_stopped")
 
     def set_redeem_callback(self, callback):
@@ -733,7 +744,13 @@ class CompletenessScanner:
                     )
                     # sell_price=0 → unwind failed; assume full loss of the
                     # excess cost (conservative; reconciled by balance anyway).
-                    unwind_pnl += excess * (sell_price - opp.prices[i])
+                    # Subtract the taker fee: the unwind SELL crosses the book
+                    # (marketable), so it pays a taker fee that the raw price
+                    # difference ignored (B6). At sell_price=0 the fee is 0.
+                    unwind_pnl += (
+                        excess * (sell_price - opp.prices[i])
+                        - taker_fee(sell_price, excess, opp.category)
+                    )
                     self._legs_unwound += 1
 
             if pair < self._config.min_shares:
@@ -744,7 +761,10 @@ class CompletenessScanner:
                         sell_price = await self._unwind_leg(
                             token_id, pair, opp.prices[i]
                         )
-                        unwind_pnl += pair * (sell_price - opp.prices[i])
+                        unwind_pnl += (
+                            pair * (sell_price - opp.prices[i])
+                            - taker_fee(sell_price, pair, opp.category)  # B6
+                        )
                 trade.status = "unwound" if any(m > 0.01 for m in matched) else "failed"
                 trade.cost_total = 0.0
                 trade.actual_pnl = round(unwind_pnl, 4)
@@ -980,6 +1000,7 @@ class CompletenessScanner:
                     trade.actual_pnl = round(trade.actual_pnl + trade.expected_profit, 4)
                     self._total_profit += trade.expected_profit
                     self._loss_guard.record(trade.expected_profit)  # C1 daily stop-loss
+                    self._pending_redeems.discard(trade.condition_id)  # M11
                     logger.info(
                         "arb_redeemed",
                         trade_id=trade.trade_id,
@@ -996,6 +1017,35 @@ class CompletenessScanner:
             except Exception as e:
                 logger.warning("arb_redeem_failed", error=str(e))
                 self._pending_redeems.add(trade.condition_id)
+
+    async def _redeem_retry_loop(self):
+        """Retry redeems that failed on first attempt (M11).
+
+        Without this, a failed _on_redeem left the condition_id in
+        _pending_redeems (only ever read for stats) and the trade stayed
+        'confirmed' forever — expected_profit never booked, position never
+        redeemed. Now we re-drive _try_redeem for each pending condition until
+        it succeeds (or its trade is gone).
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(REDEEM_RETRY_INTERVAL_S)
+                if not self._pending_redeems or not self._on_redeem:
+                    continue
+                for cid in list(self._pending_redeems):
+                    trade = next(
+                        (t for t in self._trades
+                         if t.condition_id == cid and t.status == "confirmed"),
+                        None,
+                    )
+                    if trade is None:
+                        self._pending_redeems.discard(cid)  # nothing to redeem
+                        continue
+                    await self._try_redeem(trade)  # books profit + discards on success
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("arb_redeem_retry_loop_error", error=str(e))
 
     # ── WebSocket callback ───────────────────────────────────────────
 

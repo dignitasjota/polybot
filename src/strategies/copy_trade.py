@@ -105,34 +105,18 @@ class CopyTradeStrategy(Strategy):
         }
 
     async def restore_open_positions(self, positions: list[Any]) -> None:
-        """Restore in-memory bet tracking from persisted trades after redeploy."""
+        """Restore in-memory bet tracking from persisted trades after redeploy.
+
+        Delegates to CopyTrader.restore_open_positions, which inserts proper
+        CopyBet objects (A3). The old version stuffed plain dicts into _bets,
+        where every consumer expects CopyBet — _find_opposite_pending_bet did
+        `bet.condition_id` and raised AttributeError on every opportunity,
+        swallowed at debug level, silently killing copy trading after a
+        redeploy with open positions.
+        """
         if not self._copy_trader:
             return
-        restored = 0
-        # CopyTrader keeps its in-flight set in _bets (dict) — guard against
-        # the attribute not existing or having a different shape.
-        bets_attr = getattr(self._copy_trader, "_bets", None)
-        for trade in positions:
-            if getattr(trade, "source_strategy", None) != "copy_trade":
-                continue
-            condition_id = getattr(trade, "condition_id", None)
-            token_side = getattr(trade, "token_side", None)
-            if not condition_id or not token_side:
-                continue
-            key = f"{condition_id}:{token_side}"
-            if isinstance(bets_attr, dict) and key not in bets_attr:
-                bets_attr[key] = {
-                    "condition_id": condition_id,
-                    "token_side": token_side,
-                    "token_id": getattr(trade, "token_id", "") or "",
-                    "price": getattr(trade, "price", 0.0) or 0.0,
-                    "size": getattr(trade, "size", 0.0) or 0.0,
-                    "created_at": getattr(trade, "created_at", 0.0),
-                    "restored": True,
-                }
-                restored += 1
-        if restored:
-            logger.info("copy_trade_restored_positions", count=restored)
+        self._copy_trader.restore_open_positions(positions)
 
 
 # Registrar en el registry global

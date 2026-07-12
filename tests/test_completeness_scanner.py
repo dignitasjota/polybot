@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.completeness_scanner import CompletenessScanner, ArbOpportunity
+from src.fees import taker_fee
 from src.fees import GAS_REDEEM_USD, TAKER_FEE_RATES
 
 
@@ -789,9 +790,10 @@ class TestFillVerification:
 
         trade = scanner._trades[0]
         assert trade.status == "unwound"
-        # Realized: 50 shares × (0.40 - 0.45) = -2.50
-        assert trade.actual_pnl == pytest.approx(-2.50)
-        assert scanner._total_profit == pytest.approx(-2.50)
+        # Realized: 50 × (0.40 - 0.45) minus the marketable SELL's taker fee (B6)
+        _exp = 50 * (0.40 - 0.45) - taker_fee(0.40, 50, "crypto")
+        assert trade.actual_pnl == pytest.approx(_exp)
+        assert scanner._total_profit == pytest.approx(_exp)
         assert scanner._trades_failed == 1
         assert scanner._trades_executed == 0
         assert scanner._legs_unwound == 1
@@ -835,9 +837,10 @@ class TestFillVerification:
         assert trade.status == "confirmed"
         assert trade.shares == pytest.approx(30.0)
         assert trade.cost_total == pytest.approx(30 * 0.90)
-        # Excess 20 shares of the NO leg sold: 20 × (0.40 - 0.45) = -1.0
-        assert trade.actual_pnl == pytest.approx(-1.0)
-        assert scanner._total_profit == pytest.approx(-1.0)
+        # Excess 20 shares of the NO leg sold: 20 × (0.40 - 0.45) minus the fee (B6)
+        _exp = 20 * (0.40 - 0.45) - taker_fee(0.40, 20, "crypto")
+        assert trade.actual_pnl == pytest.approx(_exp)
+        assert scanner._total_profit == pytest.approx(_exp)
         assert scanner._trades_executed == 1
         assert scanner._legs_unwound == 1
         # Only the under-filled YES order was resting
@@ -888,8 +891,8 @@ class TestFillVerification:
         unwind_args = scanner._unwind_leg.call_args[0]
         assert unwind_args[0] == "no_token"
         assert unwind_args[1] == pytest.approx(50.0)
-        # PnL realizado del unwind: 50 × (0.40-0.45) = -2.50
-        assert trade.actual_pnl == pytest.approx(-2.50)
+        # PnL realizado del unwind: 50 × (0.40-0.45) menos el fee del SELL (B6)
+        assert trade.actual_pnl == pytest.approx(50 * (0.40 - 0.45) - taker_fee(0.40, 50, "crypto"))
         assert scanner._trades_failed == 1
 
     @pytest.mark.asyncio

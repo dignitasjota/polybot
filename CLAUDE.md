@@ -1334,6 +1334,17 @@ Cerrado el pendiente de C1: las otras 4 estrategias también tienen stop-loss di
 
 El guard resetea en el límite del día UTC (un tripped se levanta solo al día siguiente) y `max_daily_loss <= 0` lo desactiva. Con esto **C1 deja de ser letra muerta en las 5 estrategias**. El mecanismo `_daily_pnl`/`update_pnl` del Executor sigue existiendo (con el reset UTC de B7/B13) pero ya no es el driver — cada estrategia se autoprotege. **Tests**: +6 `test_risk_guard.py` (helper) +6 integración (corte real en weather/completeness, cableado+reset en detector/copy). **220 verde** (weather 96 + completeness 65 + risk_guard 12 + liquidity 61 - solapes).
 
+### Bloque copy + completeness: últimos hallazgos de estrategia (Julio 12, 2026)
+
+Cierra los 4 hallazgos restantes de copy y completeness (A3, B2, M11, B6):
+
+- **A3 — copy no muere tras redeploy**: `CopyTradeStrategy.restore_open_positions` delega en `CopyTrader.restore_open_positions` (que inserta objetos `CopyBet`) en vez de meter **dicts** en `_bets`. Los dicts hacían que `_find_opposite_pending_bet` (`bet.condition_id`) lanzara `AttributeError` en cada oportunidad, tragado a debug → el copy trading moría en silencio tras un redeploy con posiciones abiertas. Además el dedup vivo (key `cid:side:wallet`) ahora reconoce las posiciones restauradas (key base `cid:side`, `wallet_source=="restored"`) para no re-apostar el mismo mercado.
+- **B2 — pérdida de copy con fee**: `_settle_bet` brazo loss resta el taker fee de la compra (`-(bet_size + taker_fee(price, shares))`). El fee se paga al comprar gane o pierda; el brazo win ya lo restaba, el loss lo ignoraba → pérdidas subestimadas.
+- **M11 — reintento de redeems**: nuevo `_redeem_retry_loop` (cada `REDEEM_RETRY_INTERVAL_S`=120s, solo live) re-drivea `_try_redeem` para cada `condition_id` en `_pending_redeems`; al éxito contabiliza `expected_profit` y saca del set (`_try_redeem` ahora hace `discard`); un pending sin trade confirmed asociado se descarta. Antes un redeem fallido dejaba el trade `confirmed` para siempre, sin profit contabilizado.
+- **B6 — fee del unwind**: `unwind_pnl` resta `taker_fee(sell_price, shares, opp.category)` en ambos caminos de `_live_execute` (el SELL marketable cruza el book = taker; la diferencia de precio cruda lo ignoraba).
+
+**Tests**: +8 (`test_copy_completeness_block.py`: B2 win/loss con fee, A3 delegación+dedup, M11 discard/retry/orphan) y los asserts de unwind de `TestFillVerification` ajustados al fee (B6). **351 verde**.
+
 ### Bloque directional: saneamiento del Executor + detector (Julio 11, 2026)
 
 Los 8 hallazgos de directional/Executor de la auditoría (A4-A9, M5, M6):
@@ -1413,7 +1424,7 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 > Fix: `QuoteOrder.size_matched_seen` (delta tracking) + `_cancel_partial_remainder()` cancela el remanente vivo antes de limpiar la referencia; si el cancel pierde la carrera contra un fill, re-consulta y registra el delta final.
 `liquidity_provider.py:2090-2110` — `_check_order_status` marca `filled` con cualquier `size_matched > 0` sin comparar con `order.size` → limpia la referencia sin cancelar el resto → orden viva sin tracking + quote duplicada = doble exposición. Los fills futuros de la orden huérfana no se detectan nunca.
 
-**[ABIERTO] A3 — Copy-trade muere en silencio tras redeploy**
+**[CORREGIDO Jul 12, 2026] A3 — Copy-trade muere en silencio tras redeploy**
 `strategies/copy_trade.py:107-135` — el restore mete dicts en `_bets` donde el código espera objetos `CopyBet` → `AttributeError` tragado con `logger.debug` en cada oportunidad. Además la key restaurada (`cid:side`) no coincide con la del dedup vivo (`cid:side:wallet`) → re-apuesta lo ya apostado tras un redeploy.
 
 **[CORREGIDO Jul 11, 2026] A4 — Directional: `cleanup_market` elimina bets pendientes antes del sweep**
@@ -1470,7 +1481,7 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 **[ABIERTO] M10 — `set_strategy_mode` muta estado antes de la operación falible**
 `account_runner.py:520-524` — `exec_mode=LIVE` y `account.execution_mode="live"` se asignan antes de `await executor.set_mode(LIVE)`. Si la inicialización del CLOB falla, el executor revierte su modo pero el runner y config quedan en "live".
 
-**[ABIERTO] M11 — Completeness: redeems pendientes sin reintento**
+**[CORREGIDO Jul 12, 2026] M11 — Completeness: redeems pendientes sin reintento**
 `completeness_scanner.py:944-974` — `_pending_redeems` solo se usa en `len()` para stats. Un redeem fallido queda `confirmed` para siempre; las posiciones no se redimen salvo intervención externa.
 
 **[CORREGIDO Jul 11, 2026] M12 — Weather: dedup solo por `condition_id`, no por `event_slug`**
@@ -1493,11 +1504,11 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 #### 🔵 Bajos
 
 - **[CORREGIDO Jul 2, 2026] B1** — Liquidity: fill parcial re-registra `size_matched` en llamadas repetidas; `_sell_tokens` descuenta inventario al colocar la SELL, no al llenarse. *Fix: delta tracking via `size_matched_seen`; auto-exit SELL trackeada en `pos.exit_order` — inventario descontado y `exit_loss` registrado en métricas solo al confirmar el fill (`_check_exit_fills`), con expiración+reintento si no llena.*
-- **[ABIERTO] B2** — Copy: la pérdida omite el taker fee (`copy_trader.py:747`) — pérdidas subestimadas sistemáticamente.
+- **[CORREGIDO Jul 12, 2026] B2** — Copy: la pérdida omitía el taker fee. *Fix: `_settle_bet` brazo loss resta `taker_fee(price, shares)` (el fee se pagó al comprar, gane o pierda; el brazo win ya lo restaba).*
 - **[CORREGIDO Jul 11, 2026] B3** — Weather: sin mínimo de 5 shares. *Fix: floor de 5 shares en `_execute_trade` (log `weather_below_min_shares`).*
 - **[CORREGIDO Jul 11, 2026] B4** — Weather: `_outcome_history` sin poda. *Fix: poda a 90 días en `_verify_forecasts`, mismo horizonte que la verificación.*
 - **[CORREGIDO Jul 11, 2026] B5** — Weather: orphans sintéticos no filtran `side`. *Fix: el loop de reconciliación salta fills no-BUY; los orphans (prob 0) ya no entrenan el calibrador (guard `hist_prob > 0` en el outcome append).*
-- **[ABIERTO] B6** — Completeness: `_unwind_leg` no descuenta el taker fee del SELL → pérdida real algo mayor que la contabilizada.
+- **[CORREGIDO Jul 12, 2026] B6** — Completeness: `_unwind_leg` no descontaba el taker fee del SELL. *Fix: `unwind_pnl` resta `taker_fee(sell_price, shares, opp.category)` en ambos caminos (el SELL marketable cruza el book = taker).*
 - **[CORREGIDO Jul 10, 2026] B7** — `max_daily_loss` no resetea a medianoche UTC sino cada 24h desde el primer check. *Fix: `_maybe_reset_daily` compara el día UTC (`_utc_day()`) en vez de una ventana rodante de 24h; resetea `_daily_pnl` y `_daily_pnl_by_mode` en el límite del día.*
 - **[ABIERTO] B8** — `net_margin` resta el gas fijo como coste por share en vez de por redención (`fees.py:150`).
 - **[ABIERTO] B9** — Docker corre como root (sin directiva `USER` en Dockerfile).
