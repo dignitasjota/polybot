@@ -269,7 +269,8 @@ class ClosingArbitrageDetector:
                                 if winning_token_id == opp.token_id:
                                     outcome = "win"
                                     shares = opp.suggested_bet / opp.token_price if opp.token_price > 0 else 0
-                                    pnl = round(shares * opp.margin_net, 2)
+                                    # gas once per trade (B8), not per share
+                                    pnl = round(shares * opp.margin_net - GAS_REDEEM_USD, 2)
                                     self._stats["settled_wins"] += 1
                                 else:
                                     outcome = "loss"
@@ -540,7 +541,7 @@ class ClosingArbitrageDetector:
 
             if bet_opp.token_side == winning_side:
                 shares = bet_opp.suggested_bet / bet_opp.token_price if bet_opp.token_price > 0 else 0
-                pnl = round(shares * bet_opp.margin_net, 2)
+                pnl = round(shares * bet_opp.margin_net - GAS_REDEEM_USD, 2)  # gas once (B8)
                 outcome = "win"
                 self._stats["settled_wins"] += 1
             else:
@@ -631,7 +632,7 @@ class ClosingArbitrageDetector:
 
         margin_gross = 1.0 - price
         fee = self._calculate_fee(price, 1.0)  # For 1 share
-        margin_net = margin_gross - fee - GAS_REDEEM_USD
+        margin_net = margin_gross - fee  # per-share, sans gas (B8: gas is per-trade)
 
         if margin_net < self.config.min_margin_net:
             return
@@ -672,7 +673,7 @@ class ClosingArbitrageDetector:
             bet_opp = self._bet_placed.get(key)
             if bet_opp and bet_opp.outcome == "pending":
                 shares = bet_opp.suggested_bet / bet_opp.token_price if bet_opp.token_price > 0 else 0
-                pnl = round(shares * bet_opp.margin_net, 2)
+                pnl = round(shares * bet_opp.margin_net - GAS_REDEEM_USD, 2)  # gas once (B8)
                 bet_opp.outcome = "win"
                 bet_opp.actual_pnl = pnl
                 bet_opp.resolved_at = time.time()
@@ -844,7 +845,7 @@ class ClosingArbitrageDetector:
 
         margin_gross = 1.0 - price
         fee = self._calculate_fee(price, 1.0)
-        margin_net = margin_gross - fee - GAS_REDEEM_USD
+        margin_net = margin_gross - fee  # per-share, sans gas (B8: gas is per-trade)
 
         side = "YES" if is_yes else "NO"
         depth = self._get_depth_at_best_ask(market, is_yes)
@@ -916,7 +917,7 @@ class ClosingArbitrageDetector:
 
         margin_gross = 1.0 - price
         fee = self._calculate_fee(price, 1.0)
-        margin_net = margin_gross - fee - GAS_REDEEM_USD
+        margin_net = margin_gross - fee  # per-share, sans gas (B8: gas is per-trade)
 
         # Closing arb uses its own margin threshold (lower than updown)
         # because at p=0.98 the gross margin is only $0.02
@@ -1031,7 +1032,9 @@ class ClosingArbitrageDetector:
                 )
                 return 0.0, 0.0
 
-        profit = shares * margin_net  # margin_net is per-share profit after fees
+        # margin_net is per-share profit after fees; gas is one fixed cost per
+        # trade (B8), so subtract it once rather than per share.
+        profit = shares * margin_net - GAS_REDEEM_USD
         return round(bet, 2), round(profit, 2)
 
     def _calculate_expected_value(self, bet: float, win_profit: float, loss: float) -> float:

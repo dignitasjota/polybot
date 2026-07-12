@@ -518,16 +518,20 @@ class AccountRunner:
 
         # Sync executor mode: use the highest mode across all strategies
         # (live > dry_run > paper). Never downgrade if another strategy is higher.
+        # M10: call executor.set_mode FIRST and only mutate our own state if it
+        # succeeds. The old order set exec_mode/execution_mode before set_mode,
+        # so a CLOB init failure (which set_mode reverts internally) left the
+        # runner and config claiming "live" while the executor was still paper.
         if new_mode == "live" and self.exec_mode != ExecutionMode.LIVE:
             self.executor._credentials = self.account.credentials
+            await self.executor.set_mode(ExecutionMode.LIVE)
             self.exec_mode = ExecutionMode.LIVE
             self.account.execution_mode = "live"
-            await self.executor.set_mode(ExecutionMode.LIVE)
         elif new_mode == "dry_run" and self.exec_mode == ExecutionMode.PAPER:
             self.executor._credentials = self.account.credentials
+            await self.executor.set_mode(ExecutionMode.DRY_RUN)
             self.exec_mode = ExecutionMode.DRY_RUN
             self.account.execution_mode = "dry_run"
-            await self.executor.set_mode(ExecutionMode.DRY_RUN)
 
         await strat.set_mode(new_mode)
 
@@ -552,17 +556,25 @@ class AccountRunner:
                 self._orphan_scan_task = asyncio.create_task(self._run_orphan_scan_loop())
         elif new_mode in ("paper", "disabled") and old_mode == "live":
             sim_balance = self.account.risk.simulated_balance
+            # Cancel real resting orders on the exchange BEFORE clearing our
+            # local tracking (M9) — otherwise reset_trades() drops the order IDs
+            # and the GTC orders live on in the CLOB, orphaned, locking capital.
+            await self.executor.cancel_all_orders()
             self.executor.reset_trades()
             if self.detector:
                 self.detector.reset_stats(new_balance=sim_balance)
             if self.copy_trader:
                 self.copy_trader.reset_stats(new_balance=sim_balance)
 
-        # If all strategies are paper/disabled, downgrade executor to paper
+        # If all strategies are paper/disabled, downgrade executor to paper.
+        # M9: actually route the executor to PAPER — the old code flipped
+        # exec_mode/execution_mode but never called executor.set_mode(PAPER),
+        # leaving the executor stuck in LIVE while the runner claimed paper.
         any_needs_clob = any(
             s.config.mode in ("live", "dry_run") for s in self.strategies.values()
         )
         if not any_needs_clob and self.exec_mode != ExecutionMode.PAPER:
+            await self.executor.set_mode(ExecutionMode.PAPER)
             self.exec_mode = ExecutionMode.PAPER
             self.account.execution_mode = "paper"
 

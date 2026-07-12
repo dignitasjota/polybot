@@ -225,14 +225,26 @@ class WebSocketClient:
                             await result
                 continue
 
-            # Throttle: skip processing entirely if same token was handled < 1s ago
-            # (doesn't apply to price_change which is handled above)
-            # Reduced from 2.0s to 1.0s to allow faster completeness arb detection
+            # Throttle: skip processing if same token was handled < 1s ago.
+            # Applies ONLY to best_bid_ask (frequent top-of-book ticks). `book`
+            # events are full depth snapshots — rare and valuable — and used to
+            # share the throttle slot: a best_bid_ask would consume it and a
+            # book arriving <1s later was silently dropped, leaving the tracker's
+            # depth stale (breaks completeness require_book_depth sizing). Book
+            # events now always process (M7).
             now = time.time()
-            last = self._last_check_time.get(asset_id, 0)
-            if now - last < 1.0:
-                continue
-            self._last_check_time[asset_id] = now
+            if event_type == "best_bid_ask":
+                last = self._last_check_time.get(asset_id, 0)
+                if now - last < 1.0:
+                    continue
+                self._last_check_time[asset_id] = now
+                # Prune stale throttle entries (B12): tokens rotate constantly
+                # (5-min markets), so this dict grew without bound in a 24/7 run.
+                if len(self._last_check_time) > 5000:
+                    cutoff = now - 300
+                    self._last_check_time = {
+                        k: v for k, v in self._last_check_time.items() if v > cutoff
+                    }
 
             if event_type == "book":
                 self._handle_book(event)

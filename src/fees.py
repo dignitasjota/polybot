@@ -148,5 +148,12 @@ def category_from_fee_type(fee_type: str | None, fees_enabled: bool = True) -> s
 
 
 def net_margin(price: float, category: str = "crypto") -> float:
-    """Net margin per share after fees and gas: (1-p) - fee_per_share - gas."""
-    return (1.0 - price) - taker_fee_per_share(price, category) - GAS_REDEEM_USD
+    """Net margin PER SHARE after the taker fee: (1-p) - fee_per_share.
+
+    Gas is NOT included here (B8): redeem gas is a fixed cost PER TRADE, not per
+    share. The old version subtracted GAS_REDEEM_USD per share, so callers doing
+    `shares * net_margin` charged gas × shares — over-penalizing large fills
+    (conservative, but it left profitable trades on the table). Callers subtract
+    GAS_REDEEM_USD once per trade at settlement.
+    """
+    return (1.0 - price) - taker_fee_per_share(price, category)

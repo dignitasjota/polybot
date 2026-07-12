@@ -1125,6 +1125,13 @@ class Executor:
                 status=status_str,
             )
             self._persisted_orders.add(trade.order_id)
+            # Cap the dedupe set (B12): it only guards against re-persisting the
+            # SAME order, so keeping the most recent N is plenty. Order IDs are
+            # unique and monotonic-ish; dropping the oldest half can't cause a
+            # real double-persist in practice (those orders are long resolved).
+            if len(self._persisted_orders) > 10000:
+                keep = list(self._persisted_orders)[-5000:]
+                self._persisted_orders = set(keep)
         except Exception as e:
             logger.warning("persist_trade_failed", error=str(e), order_id=trade.order_id)
 
@@ -1698,6 +1705,21 @@ class Executor:
             self._initialized = True
 
         logger.info("executor_mode_changed", old=old_mode.value, new=mode.value)
+
+    async def cancel_all_orders(self) -> None:
+        """Cancel every resting order on the exchange (M9).
+
+        Called before a live→paper downgrade so real GTC orders aren't left
+        orphaned in the CLOB when reset_trades() clears our local tracking.
+        No-op without a live client.
+        """
+        if not self._client:
+            return
+        try:
+            await self._in_executor(self._client.cancel_all)
+            logger.info("executor_cancel_all", count=len(self._pending_orders))
+        except Exception as e:
+            logger.warning("executor_cancel_all_failed", error=str(e))
 
     def reset_trades(self):
         """Clear all trade history (e.g. when switching from paper to live)."""

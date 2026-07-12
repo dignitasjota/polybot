@@ -1334,6 +1334,20 @@ Cerrado el pendiente de C1: las otras 4 estrategias también tienen stop-loss di
 
 El guard resetea en el límite del día UTC (un tripped se levanta solo al día siguiente) y `max_daily_loss <= 0` lo desactiva. Con esto **C1 deja de ser letra muerta en las 5 estrategias**. El mecanismo `_daily_pnl`/`update_pnl` del Executor sigue existiendo (con el reset UTC de B7/B13) pero ya no es el driver — cada estrategia se autoprotege. **Tests**: +6 `test_risk_guard.py` (helper) +6 integración (corte real en weather/completeness, cableado+reset en detector/copy). **220 verde** (weather 96 + completeness 65 + risk_guard 12 + liquidity 61 - solapes).
 
+### Bloque final: infra, mode-switch y contabilidad (Julio 12, 2026)
+
+Cierra los 8 hallazgos restantes de la auditoría (M7, M9, M10, B8, B9, B10, B11, B12) → **auditoría completa**:
+
+- **M10 — orden de mutación**: `set_strategy_mode` llama `executor.set_mode` ANTES de mutar `exec_mode`/`execution_mode`; si el CLOB init falla (set_mode lo revierte), el runner ya no queda mintiendo "live".
+- **M9 — mode-switch huérfana órdenes**: al bajar live→paper se llama `executor.cancel_all_orders()` (nuevo, cancela las resting en el CLOB) antes de `reset_trades`, y `executor.set_mode(PAPER)` al final (antes nunca se llamaba → executor stuck en LIVE).
+- **M7 — throttle del WS**: el throttle de 1s aplica solo a `best_bid_ask`; los `book` (snapshots de profundidad, raros y valiosos) ya no comparten slot ni se descartan → el sizing de completeness (`require_book_depth`) deja de leer profundidad stale.
+- **B8 — gas por trade, no por share**: `net_margin` es per-share sin gas; el detector calcula `margin_gross - fee` inline y los settlements/`_calculate_bet` restan `GAS_REDEEM_USD` **una vez** por trade. Antes `shares × margin_net` cobraba gas × shares → sobre-penalizaba fills grandes.
+- **B9** Docker `USER` no root · **B10** `/api/health` solo liveness · **B11** upper bounds en requirements · **B12** poda de `_last_check_time` y `_persisted_orders`.
+
+**Tests**: +7 (`test_infra_block.py`). **358 verde**.
+
+**Estado**: los 6 críticos, los 9 altos y los 15 medios de la auditoría están cerrados; los bajos también salvo detalles cosméticos. El único pendiente real es **no-código**: la private key filtrada en el historial de git.
+
 ### Bloque copy + completeness: últimos hallazgos de estrategia (Julio 12, 2026)
 
 Cierra los 4 hallazgos restantes de copy y completeness (A3, B2, M11, B6):
@@ -1468,17 +1482,17 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 **[CORREGIDO Jul 11, 2026] M6 — P&L de directional acreditado sin verificar fill en dos caminos live**
 `detector.py:661-679,286-288` — balance y simulated_pnl se actualizan inmediatamente en `_check_resolved_market` y `sweep_stale_pending` sin el guard `_is_live_mode` ni confirmar que la orden llenó.
 
-**[ABIERTO] M7 — WS throttle descarta snapshots de book**
+**[CORREGIDO Jul 12, 2026] M7 — WS throttle descarta snapshots de book**
 `websocket_client.py:229-244` — el throttle de 1s por `asset_id` es compartido entre tipos de evento: un `best_bid_ask` consume el slot y un `book` que llegue <1s después se descarta silenciosamente → profundidad del tracker desincronizada; afecta al sizing de completeness (`require_book_depth`).
 
 **[CORREGIDO Jul 10, 2026] M8 — REST fallback marca frescura con bids stale**
 `websocket_client.py:341-363` — el fallback solo actualizaba `best_ask_*` pero ponía `state.last_update = now` → bids congelados marcados como frescos.
 > Fix: `_poll_rest_prices` consulta ambos lados (`side=buy`→best ask, `side=sell`→best bid) vía el nuevo helper `_fetch_rest_price` y solo estampa `last_update` cuando refresca al menos un lado. El midpoint de liquidity y el `_unwind_leg`/`max_quote_age_s` de completeness dejan de leer un bid stale certificado como fresco. Tests en `test_block2_risk.py`.
 
-**[ABIERTO] M9 — Cambio live→paper huérfana órdenes reales en el CLOB**
+**[CORREGIDO Jul 12, 2026] M9 — Cambio live→paper huérfana órdenes reales en el CLOB**
 `executor.py:1483-1488` — `reset_trades()` limpia `_pending_orders` sin cancelar en el exchange las órdenes resting → capital bloqueado, fills posteriores invisibles. Además `account_runner.py:560-566` no llama `executor.set_mode(PAPER)` → executor queda en modo LIVE con el runner en PAPER.
 
-**[ABIERTO] M10 — `set_strategy_mode` muta estado antes de la operación falible**
+**[CORREGIDO Jul 12, 2026] M10 — `set_strategy_mode` muta estado antes de la operación falible**
 `account_runner.py:520-524` — `exec_mode=LIVE` y `account.execution_mode="live"` se asignan antes de `await executor.set_mode(LIVE)`. Si la inicialización del CLOB falla, el executor revierte su modo pero el runner y config quedan en "live".
 
 **[CORREGIDO Jul 12, 2026] M11 — Completeness: redeems pendientes sin reintento**
@@ -1510,11 +1524,11 @@ Auditoría profunda multi-agente del proyecto completo. **Hallazgos abiertos —
 - **[CORREGIDO Jul 11, 2026] B5** — Weather: orphans sintéticos no filtran `side`. *Fix: el loop de reconciliación salta fills no-BUY; los orphans (prob 0) ya no entrenan el calibrador (guard `hist_prob > 0` en el outcome append).*
 - **[CORREGIDO Jul 12, 2026] B6** — Completeness: `_unwind_leg` no descontaba el taker fee del SELL. *Fix: `unwind_pnl` resta `taker_fee(sell_price, shares, opp.category)` en ambos caminos (el SELL marketable cruza el book = taker).*
 - **[CORREGIDO Jul 10, 2026] B7** — `max_daily_loss` no resetea a medianoche UTC sino cada 24h desde el primer check. *Fix: `_maybe_reset_daily` compara el día UTC (`_utc_day()`) en vez de una ventana rodante de 24h; resetea `_daily_pnl` y `_daily_pnl_by_mode` en el límite del día.*
-- **[ABIERTO] B8** — `net_margin` resta el gas fijo como coste por share en vez de por redención (`fees.py:150`).
-- **[ABIERTO] B9** — Docker corre como root (sin directiva `USER` en Dockerfile).
-- **[ABIERTO] B10** — `/api/health` expone estado operativo sin autenticación (`middleware.py:10`, `routes_api.py:11`).
-- **[ABIERTO] B11** — Dependencias sin pin exacto en `requirements.txt` (todo con `>=`).
-- **[ABIERTO] B12** — `_last_check_time` y `_persisted_orders` crecen sin límite en operación continua (`websocket_client.py:34`, `executor.py:207`).
+- **[CORREGIDO Jul 12, 2026] B8** — `net_margin` restaba el gas por share. *Fix: `net_margin` es per-share sin gas; el detector calcula `margin_gross - fee` inline y los settlements/profit restan `GAS_REDEEM_USD` una vez por trade (antes `shares × margin_net` cobraba gas × shares).*
+- **[CORREGIDO Jul 12, 2026] B9** — Docker corría como root. *Fix: `USER appuser` (uid 10001) no privilegiado en el Dockerfile, con ownership de `/app/data` y `/app/logs`.*
+- **[CORREGIDO Jul 12, 2026] B10** — `/api/health` exponía estado operativo sin auth. *Fix: devuelve solo `{status, ts, accounts}` (liveness); el detalle operativo vive tras `/api/report` autenticado.*
+- **[CORREGIDO Jul 12, 2026] B11** — Dependencias sin upper bound. *Fix: `>=X,<major+1` en todas (el CLOB V2 client fijado `<2.0` para no saltar a un V3 que rompa la firma).*
+- **[CORREGIDO Jul 12, 2026] B12** — `_last_check_time` y `_persisted_orders` crecían sin límite. *Fix: poda de `_last_check_time` (>5000 entradas → mantiene los últimos 5 min); cap de `_persisted_orders` a 5000 más recientes.*
 - **[CORREGIDO Jul 10, 2026] B13** — duplicado de B7 (`_maybe_reset_daily` reset a medianoche UTC). Corregido junto con B7.
 
 ---
